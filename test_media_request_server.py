@@ -455,6 +455,193 @@ class DownloadStatusTests(unittest.TestCase):
         self.assertNotIn("internal-client", serialized)
 
 
+class RequestStatusTests(unittest.TestCase):
+    def test_request_status_marks_unreleased_movie_as_waiting_for_release(self) -> None:
+        session = FakeSession(
+            [
+                {"records": []},
+                {"records": []},
+                [
+                    {
+                        "id": 42,
+                        "title": "Future Movie",
+                        "monitored": True,
+                        "hasFile": False,
+                        "physicalRelease": "2999-01-01T00:00:00Z",
+                    }
+                ],
+                [],
+            ]
+        )
+        service = server.MediaRequestService(config(), session=session)
+
+        result = service.request_status()
+
+        self.assertEqual(
+            result,
+            {
+                "active": False,
+                "items": [
+                    {
+                        "media_type": "movie",
+                        "status": "waiting_for_release",
+                        "eta": None,
+                        "message": (
+                            "This is being watched, but it has not been released yet. "
+                            "No ETA is available until a download starts."
+                        ),
+                        "title": "Future Movie",
+                    }
+                ],
+            },
+        )
+        self.assertNotIn("progress_percent", result["items"][0])
+        self.assertNotIn("time_left", result["items"][0])
+
+    def test_request_status_marks_released_movie_as_waiting_for_suitable_release(
+        self,
+    ) -> None:
+        session = FakeSession(
+            [
+                {"records": []},
+                {"records": []},
+                [
+                    {
+                        "id": 42,
+                        "title": "Past Movie",
+                        "monitored": True,
+                        "hasFile": False,
+                        "physicalRelease": "2000-01-01T00:00:00Z",
+                    }
+                ],
+                [],
+            ]
+        )
+        service = server.MediaRequestService(config(), session=session)
+
+        result = service.request_status()
+
+        self.assertEqual(result["items"][0]["status"], "waiting_for_suitable_release")
+        self.assertIsNone(result["items"][0]["eta"])
+        self.assertEqual(
+            result["items"][0]["message"],
+            (
+                "This is being watched, but no suitable release has been found yet. "
+                "No ETA is available until a download starts."
+            ),
+        )
+        self.assertNotIn("progress_percent", result["items"][0])
+        self.assertNotIn("time_left", result["items"][0])
+
+    def test_request_status_marks_future_series_as_waiting_for_release(self) -> None:
+        session = FakeSession(
+            [
+                {"records": []},
+                {"records": []},
+                [],
+                [
+                    {
+                        "id": 7,
+                        "title": "Future Show",
+                        "monitored": True,
+                        "statistics": {"episodeFileCount": 0},
+                        "firstAired": "2999-01-01T00:00:00Z",
+                    }
+                ],
+            ]
+        )
+        service = server.MediaRequestService(config(), session=session)
+
+        result = service.request_status()
+
+        self.assertEqual(result["items"][0]["media_type"], "series")
+        self.assertEqual(result["items"][0]["status"], "waiting_for_release")
+        self.assertIsNone(result["items"][0]["eta"])
+
+    def test_request_status_only_returns_eta_for_active_downloads(self) -> None:
+        session = FakeSession(
+            [
+                {
+                    "records": [
+                        {
+                            "movieId": 42,
+                            "movie": {"title": "Dune"},
+                            "status": "downloading",
+                            "progress": 50,
+                            "timeleft": "00:10:00",
+                            "trackedDownloadState": "downloading",
+                        }
+                    ]
+                },
+                {
+                    "records": [
+                        {
+                            "seriesId": 7,
+                            "series": {"title": "Fringe"},
+                            "status": "completed",
+                            "progress": 100,
+                            "timeleft": "00:00:00",
+                            "trackedDownloadState": "importPending",
+                        }
+                    ]
+                },
+                [{"id": 42, "title": "Dune", "monitored": True, "hasFile": False}],
+                [
+                    {
+                        "id": 7,
+                        "title": "Fringe",
+                        "monitored": True,
+                        "statistics": {"episodeFileCount": 0},
+                    }
+                ],
+            ]
+        )
+        service = server.MediaRequestService(config(), session=session)
+
+        result = service.request_status()
+
+        self.assertTrue(result["active"])
+        self.assertEqual(result["items"][0]["status"], "downloading")
+        self.assertEqual(result["items"][0]["eta"], "00:10:00")
+        self.assertEqual(result["items"][0]["progress_percent"], 50.0)
+        self.assertEqual(result["items"][0]["time_left"], "00:10:00")
+        self.assertEqual(result["items"][1]["status"], "importPending")
+        self.assertIsNone(result["items"][1]["eta"])
+        self.assertNotIn("progress_percent", result["items"][1])
+        self.assertNotIn("time_left", result["items"][1])
+
+    def test_request_status_filters_by_query(self) -> None:
+        session = FakeSession(
+            [
+                {"records": []},
+                {"records": []},
+                [
+                    {
+                        "id": 42,
+                        "title": "Dune",
+                        "monitored": True,
+                        "hasFile": False,
+                        "physicalRelease": "2000-01-01T00:00:00Z",
+                    },
+                    {
+                        "id": 43,
+                        "title": "Alien",
+                        "monitored": True,
+                        "hasFile": False,
+                        "physicalRelease": "2000-01-01T00:00:00Z",
+                    },
+                ],
+                [],
+            ]
+        )
+        service = server.MediaRequestService(config(), session=session)
+
+        result = service.request_status(query="alien")
+
+        self.assertEqual(len(result["items"]), 1)
+        self.assertEqual(result["items"][0]["title"], "Alien")
+
+
 class McpToolTests(unittest.TestCase):
     def test_create_server_registers_expected_tools(self) -> None:
         class FakeFastMCP:
@@ -493,6 +680,7 @@ class McpToolTests(unittest.TestCase):
                 "add_show",
                 "media_status",
                 "download_status",
+                "request_status",
             ],
         )
 

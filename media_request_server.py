@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 import requests
@@ -305,6 +306,55 @@ class MediaRequestService:
             "items": items,
         }
 
+    def request_status(
+        self, query: str | None = None, limit: int = 10
+    ) -> dict[str, Any]:
+        query_text = _optional_text(query)
+        result_limit = _normalize_limit(limit)
+        radarr_queue_records = _queue_records(self._get_radarr("/api/v3/queue"))
+        sonarr_queue_records = _queue_records(self._get_sonarr("/api/v3/queue"))
+        movies = _ensure_list(self._get_radarr("/api/v3/movie"))
+        series = _ensure_list(self._get_sonarr("/api/v3/series"))
+
+        items: list[dict[str, Any]] = []
+        items.extend(
+            _shape_request_queue_item(item, "movie") for item in radarr_queue_records
+        )
+        items.extend(
+            _shape_request_queue_item(item, "series") for item in sonarr_queue_records
+        )
+
+        queued_movie_ids = _queue_media_ids(radarr_queue_records, "movie")
+        queued_series_ids = _queue_media_ids(sonarr_queue_records, "series")
+        items.extend(
+            _shape_waiting_request_item(movie, "movie")
+            for movie in movies
+            if _is_missing_monitored_media(movie, "movie")
+            and _media_id(movie) not in queued_movie_ids
+        )
+        items.extend(
+            _shape_waiting_request_item(show, "series")
+            for show in series
+            if _is_missing_monitored_media(show, "series")
+            and _media_id(show) not in queued_series_ids
+        )
+
+        if query_text:
+            items = [item for item in items if _matches_query(item, query_text)]
+
+        items = items[:result_limit]
+        if not items:
+            return {
+                "active": False,
+                "items": [],
+                "message": "No matching requests found.",
+            }
+
+        return {
+            "active": any(item.get("status") == "downloading" for item in items),
+            "items": items,
+        }
+
     def _find_existing_movie(self, tmdb_id: int) -> dict[str, Any] | None:
         movies = self._get_radarr("/api/v3/movie")
         return _find_by_id(_ensure_list(movies), "tmdbId", tmdb_id)
@@ -455,6 +505,12 @@ def create_server() -> Any:
     def download_status() -> dict[str, Any]:
         return service.download_status()
 
+    @mcp.tool()
+    def request_status(
+        query: str | None = None, limit: int = 10
+    ) -> dict[str, Any]:
+        return service.request_status(query=query, limit=limit)
+
     return mcp
 
 
@@ -525,6 +581,64 @@ def _shape_queue_item(item: Mapping[str, Any], media_type: str) -> dict[str, Any
     return result
 
 
+def _shape_request_queue_item(
+    item: Mapping[str, Any], media_type: str
+) -> dict[str, Any]:
+    tracked_state = _clean_text(item.get("trackedDownloadState"))
+    time_left = _clean_text(_first_present(item, ("timeleft", "timeLeft")))
+    is_downloading = _queue_is_downloading(item)
+
+    result: dict[str, Any] = {
+        "media_type": media_type,
+        "status": "downloading" if is_downloading else _request_queue_status(item),
+        "eta": time_left if is_downloading else None,
+    }
+    _copy_if_not_none(result, "title", _queue_title(item, media_type))
+    if is_downloading:
+        _copy_if_not_none(result, "progress_percent", _queue_progress_percent(item))
+        _copy_if_not_none(result, "time_left", time_left)
+    _copy_if_not_none(
+        result,
+        "tracked_download_status",
+        _clean_text(item.get("trackedDownloadStatus")),
+    )
+    _copy_if_not_none(result, "tracked_download_state", tracked_state)
+    _copy_if_not_none(
+        result,
+        "download_client",
+        _clean_text(_first_present(item, ("downloadClient", "downloadClientName"))),
+    )
+    _copy_if_not_none(result, "note", _queue_note(tracked_state))
+    return result
+
+
+def _shape_waiting_request_item(
+    item: Mapping[str, Any], media_type: str
+) -> dict[str, Any]:
+    waiting_for_release = _is_waiting_for_release(item, media_type)
+    if waiting_for_release:
+        status = "waiting_for_release"
+        message = (
+            "This is being watched, but it has not been released yet. "
+            "No ETA is available until a download starts."
+        )
+    else:
+        status = "waiting_for_suitable_release"
+        message = (
+            "This is being watched, but no suitable release has been found yet. "
+            "No ETA is available until a download starts."
+        )
+
+    result = {
+        "media_type": media_type,
+        "status": status,
+        "eta": None,
+        "message": message,
+    }
+    _copy_if_not_none(result, "title", _media_title(item))
+    return result
+
+
 def _queue_records(queue_response: Any) -> list[dict[str, Any]]:
     if isinstance(queue_response, dict):
         return _ensure_list(queue_response.get("records"))
@@ -565,6 +679,125 @@ def _queue_note(tracked_state: str | None) -> str | None:
     if tracked_state == "importPending":
         return "Download is complete and waiting to be imported."
     return None
+
+
+def _request_queue_status(item: Mapping[str, Any]) -> str | None:
+    tracked_state = _clean_text(item.get("trackedDownloadState"))
+    if tracked_state:
+        return tracked_state
+    return _clean_text(item.get("status"))
+
+
+def _queue_is_downloading(item: Mapping[str, Any]) -> bool:
+    status = _clean_text(item.get("status"))
+    return bool(status and status.lower() == "downloading")
+
+
+def _queue_media_ids(records: list[dict[str, Any]], media_type: str) -> set[int]:
+    ids: set[int] = set()
+    for item in records:
+        media_id = _queue_media_id(item, media_type)
+        if media_id is not None:
+            ids.add(media_id)
+    return ids
+
+
+def _queue_media_id(item: Mapping[str, Any], media_type: str) -> int | None:
+    key = "movieId" if media_type == "movie" else "seriesId"
+    media_id = _positive_int_or_none(item.get(key))
+    if media_id is not None:
+        return media_id
+
+    nested_key = "movie" if media_type == "movie" else "series"
+    nested = item.get(nested_key)
+    if isinstance(nested, dict):
+        return _positive_int_or_none(nested.get("id"))
+    return None
+
+
+def _is_missing_monitored_media(item: Mapping[str, Any], media_type: str) -> bool:
+    if item.get("monitored") is not True:
+        return False
+    if media_type == "movie":
+        return not _movie_has_file(item)
+    return not _series_has_file(item)
+
+
+def _movie_has_file(item: Mapping[str, Any]) -> bool:
+    if item.get("hasFile") is True:
+        return True
+    if _positive_int_or_none(item.get("movieFileId")) is not None:
+        return True
+    return isinstance(item.get("movieFile"), dict)
+
+
+def _series_has_file(item: Mapping[str, Any]) -> bool:
+    statistics = item.get("statistics")
+    if isinstance(statistics, dict):
+        if _positive_int_or_none(statistics.get("episodeFileCount")) is not None:
+            return True
+    return _positive_int_or_none(item.get("episodeFileCount")) is not None
+
+
+def _media_id(item: Mapping[str, Any]) -> int | None:
+    return _positive_int_or_none(item.get("id"))
+
+
+def _positive_int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value > 0:
+        return value
+    return None
+
+
+def _media_title(item: Mapping[str, Any]) -> str | None:
+    return _clean_text(item.get("title"))
+
+
+def _matches_query(item: Mapping[str, Any], query: str) -> bool:
+    title = item.get("title")
+    return isinstance(title, str) and query.lower() in title.lower()
+
+
+def _is_waiting_for_release(item: Mapping[str, Any], media_type: str) -> bool:
+    if media_type == "movie":
+        status = _clean_text(item.get("status"))
+        if status and status.lower() in {"announced", "incinemas"}:
+            return True
+        return _has_future_date(
+            item,
+            ("physicalRelease", "digitalRelease", "inCinemas", "premiered"),
+        )
+
+    status = _clean_text(item.get("status"))
+    if status and status.lower() == "upcoming":
+        return True
+    return _has_future_date(item, ("firstAired", "nextAiring", "airDateUtc"))
+
+
+def _has_future_date(item: Mapping[str, Any], keys: tuple[str, ...]) -> bool:
+    now = datetime.now(timezone.utc)
+    for key in keys:
+        parsed = _parse_datetime(item.get(key))
+        if parsed and parsed > now:
+            return True
+    return False
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _number(value: Any) -> float | None:

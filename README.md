@@ -81,6 +81,9 @@ mcp_servers:
 - `media_status()` checks basic Radarr and Sonarr connectivity.
 - `download_status()` checks Radarr and Sonarr queues and returns a sanitized,
   read-only download summary.
+- `request_status(query: str | None = None, limit: int = 10)` checks active
+  queues plus monitored missing media and returns whether requests are
+  downloading, waiting for release, or waiting for a suitable release.
 
 ## Development
 

@@ -132,11 +132,12 @@ class MediaRequestService:
         self.session = session or requests.Session()
         self.timeout_seconds = timeout_seconds
 
-    def search_movie(self, query: str) -> list[dict[str, Any]]:
+    def search_movie(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
         query = _require_text(query, "query")
+        result_limit = _normalize_limit(limit)
         results = self._get_radarr("/api/v3/movie/lookup", params={"term": query})
         return [_shape_movie_result(item) for item in _ensure_list(results)][
-            :MAX_SEARCH_RESULTS
+            :result_limit
         ]
 
     def add_movie(self, tmdbId: int, title: str | None = None) -> dict[str, Any]:
@@ -195,11 +196,12 @@ class MediaRequestService:
                 "message": str(exc),
             }
 
-    def search_show(self, query: str) -> list[dict[str, Any]]:
+    def search_show(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
         query = _require_text(query, "query")
+        result_limit = _normalize_limit(limit)
         results = self._get_sonarr("/api/v3/series/lookup", params={"term": query})
         return [_shape_show_result(item) for item in _ensure_list(results)][
-            :MAX_SEARCH_RESULTS
+            :result_limit
         ]
 
     def add_show(
@@ -402,16 +404,16 @@ def create_server() -> Any:
     mcp = FastMCP("plex-media-request")
 
     @mcp.tool()
-    def search_movie(query: str) -> list[dict[str, Any]]:
-        return service.search_movie(query)
+    def search_movie(query: str, limit: int = 5) -> list[dict[str, Any]]:
+        return service.search_movie(query, limit=limit)
 
     @mcp.tool()
     def add_movie(tmdbId: int, title: str | None = None) -> dict[str, Any]:
         return service.add_movie(tmdbId=tmdbId, title=title)
 
     @mcp.tool()
-    def search_show(query: str) -> list[dict[str, Any]]:
-        return service.search_show(query)
+    def search_show(query: str, limit: int = 5) -> list[dict[str, Any]]:
+        return service.search_show(query, limit=limit)
 
     @mcp.tool()
     def add_show(
@@ -440,11 +442,13 @@ def _shape_movie_result(item: Mapping[str, Any]) -> dict[str, Any]:
     result = {
         "title": item.get("title"),
         "year": item.get("year"),
-        "tmdbId": item.get("tmdbId"),
+        "tmdb_id": item.get("tmdbId"),
     }
-    _copy_optional(item, result, "overview")
-    _copy_optional(item, result, "alreadyExists")
-    _copy_optional(item, result, "isExisting")
+    _copy_optional_renamed(item, result, "imdbId", "imdb_id")
+    _copy_optional_renamed(item, result, "runtime", "runtime_minutes")
+    _copy_optional_renamed(item, result, "overview", "overview")
+    _copy_if_not_none(result, "poster_url", _poster_url(item.get("images")))
+    _copy_existence(item, result)
     return result
 
 
@@ -452,20 +456,89 @@ def _shape_show_result(item: Mapping[str, Any]) -> dict[str, Any]:
     result = {
         "title": item.get("title"),
         "year": item.get("year"),
-        "tvdbId": item.get("tvdbId"),
+        "tvdb_id": item.get("tvdbId"),
     }
-    _copy_optional(item, result, "overview")
-    _copy_optional(item, result, "alreadyExists")
-    _copy_optional(item, result, "isExisting")
-    _copy_optional(item, result, "genres")
+    _copy_optional_renamed(item, result, "imdbId", "imdb_id")
+    _copy_optional_renamed(item, result, "tmdbId", "tmdb_id")
+    _copy_if_not_none(result, "season_count", _season_count(item))
+    _copy_optional_renamed(item, result, "status", "status")
+    _copy_optional_renamed(item, result, "overview", "overview")
+    _copy_if_not_none(result, "poster_url", _poster_url(item.get("images")))
+    _copy_if_not_none(result, "is_anime", _is_anime(item))
+    _copy_existence(item, result)
     return result
 
 
-def _copy_optional(
-    source: Mapping[str, Any], target: dict[str, Any], key: str
+def _copy_optional_renamed(
+    source: Mapping[str, Any], target: dict[str, Any], source_key: str, target_key: str
 ) -> None:
-    if key in source and source[key] is not None:
-        target[key] = source[key]
+    if source_key in source and source[source_key] is not None:
+        target[target_key] = source[source_key]
+
+
+def _copy_if_not_none(target: dict[str, Any], key: str, value: Any) -> None:
+    if value is not None:
+        target[key] = value
+
+
+def _copy_existence(source: Mapping[str, Any], target: dict[str, Any]) -> None:
+    existence = _first_present(source, ("alreadyExists", "isExisting"))
+    if existence is None:
+        return
+    exists = bool(existence)
+    target["in_library"] = exists
+    target["already_exists"] = exists
+
+
+def _first_present(source: Mapping[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        if key in source and source[key] is not None:
+            return source[key]
+    return None
+
+
+def _poster_url(images: Any) -> str | None:
+    if not isinstance(images, list):
+        return None
+
+    for image in images:
+        if not isinstance(image, dict):
+            continue
+        cover_type = image.get("coverType")
+        if isinstance(cover_type, str) and cover_type.lower() != "poster":
+            continue
+        url = image.get("remoteUrl")
+        if _is_external_url(url):
+            return url
+    return None
+
+
+def _is_external_url(value: Any) -> bool:
+    return isinstance(value, str) and value.startswith(("https://", "http://"))
+
+
+def _season_count(item: Mapping[str, Any]) -> int | None:
+    season_count = item.get("seasonCount")
+    if isinstance(season_count, int) and not isinstance(season_count, bool):
+        return season_count
+
+    seasons = item.get("seasons")
+    if isinstance(seasons, list):
+        return len([season for season in seasons if isinstance(season, dict)])
+    return None
+
+
+def _is_anime(item: Mapping[str, Any]) -> bool | None:
+    series_type = item.get("seriesType")
+    if isinstance(series_type, str):
+        return series_type.lower() == "anime"
+
+    genres = item.get("genres")
+    if isinstance(genres, list) and any(
+        isinstance(genre, str) and genre.lower() == "anime" for genre in genres
+    ):
+        return True
+    return None
 
 
 def _ensure_list(value: Any) -> list[dict[str, Any]]:
@@ -484,6 +557,12 @@ def _require_text(value: str, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} must be a non-empty string")
     return value.strip()
+
+
+def _normalize_limit(value: int) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError("limit must be a positive integer")
+    return min(value, MAX_SEARCH_RESULTS)
 
 
 def _optional_text(value: str | None) -> str | None:

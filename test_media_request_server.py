@@ -156,16 +156,25 @@ class ConfigTests(unittest.TestCase):
 
 
 class SearchTests(unittest.TestCase):
-    def test_search_movie_returns_concise_results(self) -> None:
+    def test_search_movie_returns_normalized_results(self) -> None:
         session = FakeSession(
             [
                 [
                     {
-                        "title": "Alien",
-                        "year": 1979,
-                        "tmdbId": 348,
-                        "overview": "Space horror.",
-                        "isExisting": False,
+                        "title": "Dune",
+                        "year": 2021,
+                        "tmdbId": 438631,
+                        "imdbId": "tt1160419",
+                        "runtime": 155,
+                        "overview": "A gifted young man travels to Arrakis.",
+                        "alreadyExists": False,
+                        "images": [
+                            {
+                                "coverType": "poster",
+                                "url": "http://radarr:7878/MediaCover/1/poster.jpg",
+                                "remoteUrl": "https://image.tmdb.org/poster.jpg",
+                            }
+                        ],
                         "rootFolderPath": "/hidden",
                     }
                 ]
@@ -179,16 +188,56 @@ class SearchTests(unittest.TestCase):
             results,
             [
                 {
-                    "title": "Alien",
-                    "year": 1979,
-                    "tmdbId": 348,
-                    "overview": "Space horror.",
-                    "isExisting": False,
+                    "title": "Dune",
+                    "year": 2021,
+                    "tmdb_id": 438631,
+                    "imdb_id": "tt1160419",
+                    "runtime_minutes": 155,
+                    "overview": "A gifted young man travels to Arrakis.",
+                    "poster_url": "https://image.tmdb.org/poster.jpg",
+                    "in_library": False,
+                    "already_exists": False,
                 }
             ],
         )
 
-    def test_search_show_returns_genres(self) -> None:
+    def test_search_movie_defaults_to_five_results(self) -> None:
+        session = FakeSession(
+            [
+                [
+                    {"title": f"Movie {index}", "year": 2000 + index}
+                    for index in range(6)
+                ]
+            ]
+        )
+        service = server.MediaRequestService(config(), session=session)
+
+        results = service.search_movie("movie")
+
+        self.assertEqual(len(results), 5)
+
+    def test_search_movie_clamps_limit_to_ten_results(self) -> None:
+        session = FakeSession(
+            [
+                [
+                    {"title": f"Movie {index}", "year": 2000 + index}
+                    for index in range(12)
+                ]
+            ]
+        )
+        service = server.MediaRequestService(config(), session=session)
+
+        results = service.search_movie("movie", limit=99)
+
+        self.assertEqual(len(results), 10)
+
+    def test_search_movie_rejects_invalid_limit(self) -> None:
+        service = server.MediaRequestService(config(), session=FakeSession([]))
+
+        with self.assertRaisesRegex(ValueError, "limit"):
+            service.search_movie("movie", limit=0)
+
+    def test_search_show_returns_normalized_results(self) -> None:
         session = FakeSession(
             [
                 [
@@ -196,6 +245,17 @@ class SearchTests(unittest.TestCase):
                         "title": "Cowboy Bebop",
                         "year": 1998,
                         "tvdbId": 76885,
+                        "imdbId": "tt0213338",
+                        "tmdbId": 30991,
+                        "seasons": [{"seasonNumber": 1}, {"seasonNumber": 0}],
+                        "status": "ended",
+                        "overview": "Bounty hunters drift through space.",
+                        "images": [
+                            {
+                                "coverType": "poster",
+                                "remoteUrl": "https://art.example/poster.jpg",
+                            }
+                        ],
                         "genres": ["Anime"],
                         "alreadyExists": True,
                     }
@@ -206,8 +266,48 @@ class SearchTests(unittest.TestCase):
 
         results = service.search_show("bebop")
 
-        self.assertEqual(results[0]["genres"], ["Anime"])
-        self.assertTrue(results[0]["alreadyExists"])
+        self.assertEqual(
+            results,
+            [
+                {
+                    "title": "Cowboy Bebop",
+                    "year": 1998,
+                    "tvdb_id": 76885,
+                    "imdb_id": "tt0213338",
+                    "tmdb_id": 30991,
+                    "season_count": 2,
+                    "status": "ended",
+                    "overview": "Bounty hunters drift through space.",
+                    "poster_url": "https://art.example/poster.jpg",
+                    "is_anime": True,
+                    "in_library": True,
+                    "already_exists": True,
+                }
+            ],
+        )
+
+    def test_search_show_respects_limit(self) -> None:
+        session = FakeSession(
+            [
+                [
+                    {"title": f"Show {index}", "year": 2000 + index}
+                    for index in range(4)
+                ]
+            ]
+        )
+        service = server.MediaRequestService(config(), session=session)
+
+        results = service.search_show("show", limit=2)
+
+        self.assertEqual(len(results), 2)
+
+    def test_search_show_omits_unavailable_optional_fields(self) -> None:
+        session = FakeSession([[{"title": "Unknown", "year": 2024}]])
+        service = server.MediaRequestService(config(), session=session)
+
+        results = service.search_show("unknown")
+
+        self.assertEqual(results, [{"title": "Unknown", "year": 2024, "tvdb_id": None}])
 
 
 class AddTests(unittest.TestCase):

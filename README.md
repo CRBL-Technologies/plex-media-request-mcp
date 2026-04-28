@@ -70,10 +70,12 @@ mcp_servers:
 
 ## Tools
 
-- `search_movie(query: str)` returns concise Radarr movie matches.
+- `search_movie(query: str, limit: int = 5)` returns normalized Radarr movie
+  matches, capped at 10 results.
 - `add_movie(tmdbId: int, title: str | None = None)` adds a movie using the
   approved Radarr policy.
-- `search_show(query: str)` returns concise Sonarr series matches.
+- `search_show(query: str, limit: int = 5)` returns normalized Sonarr series
+  matches, capped at 10 results.
 - `add_show(tvdbId: int, title: str | None = None, anime: bool = False)` adds a
   series using the approved Sonarr policy.
 - `media_status()` checks basic Radarr and Sonarr connectivity.

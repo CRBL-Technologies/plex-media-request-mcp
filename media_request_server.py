@@ -207,10 +207,15 @@ class MediaRequestService:
         ]
 
     def add_show(
-        self, tvdbId: int, title: str | None = None, anime: bool = False
+        self,
+        tvdbId: int,
+        title: str | None = None,
+        anime: bool = False,
+        seasons: list[int] | None = None,
     ) -> dict[str, Any]:
         tvdb_id = _require_positive_int(tvdbId, "tvdbId")
         requested_title = _optional_text(title)
+        requested_seasons = _normalize_requested_seasons(seasons)
         profile_id = (
             self.config.sonarr_anime_quality_profile_id
             if anime
@@ -226,6 +231,18 @@ class MediaRequestService:
             existing = self._find_existing_show(tvdb_id)
             if existing is not None:
                 existing_title = existing.get("title") or requested_title
+                if requested_seasons is not None:
+                    return {
+                        "status": "already_exists",
+                        "title": existing_title,
+                        "tvdbId": tvdb_id,
+                        "profileUsed": profile_name,
+                        "monitoredSeasons": requested_seasons,
+                        "message": (
+                            f"{existing_title or 'Series'} is already in Sonarr; "
+                            "season monitoring was not changed."
+                        ),
+                    }
                 return {
                     "status": "already_exists",
                     "title": existing_title,
@@ -245,6 +262,19 @@ class MediaRequestService:
                 }
 
             payload = dict(series)
+            if requested_seasons is not None:
+                season_update = _with_season_monitoring(series, requested_seasons)
+                if "error" in season_update:
+                    return {
+                        "status": "error",
+                        "title": series.get("title") or requested_title,
+                        "tvdbId": tvdb_id,
+                        "profileUsed": profile_name,
+                        "monitoredSeasons": requested_seasons,
+                        "message": season_update["error"],
+                    }
+                payload["seasons"] = season_update["seasons"]
+
             payload.update(
                 {
                     "tvdbId": tvdb_id,
@@ -259,6 +289,18 @@ class MediaRequestService:
 
             response = self._post_sonarr("/api/v3/series", json=payload)
             added_title = response.get("title") or series.get("title") or requested_title
+            if requested_seasons is not None:
+                return {
+                    "status": "added",
+                    "title": added_title,
+                    "tvdbId": tvdb_id,
+                    "profileUsed": profile_name,
+                    "monitoredSeasons": requested_seasons,
+                    "message": (
+                        f"{added_title or 'Series'} was added with only "
+                        f"{_format_season_list(requested_seasons)} monitored."
+                    ),
+                }
             return {
                 "status": "added",
                 "title": added_title,
@@ -499,9 +541,15 @@ def create_server() -> Any:
 
     @mcp.tool()
     def add_show(
-        tvdbId: int, title: str | None = None, anime: bool = False
+        tvdbId: int,
+        title: str | None = None,
+        anime: bool = False,
+        seasons: list[int] | None = None,
     ) -> dict[str, Any]:
-        return service.add_show(tvdbId=tvdbId, title=title, anime=anime)
+        """Add a TV show. Use seasons for specific seasons; omit for whole show."""
+        return service.add_show(
+            tvdbId=tvdbId, title=title, anime=anime, seasons=seasons
+        )
 
     @mcp.tool()
     def media_status() -> dict[str, Any]:
@@ -559,6 +607,74 @@ def _shape_show_result(item: Mapping[str, Any]) -> dict[str, Any]:
     _copy_if_not_none(result, "is_anime", _is_anime(item))
     _copy_existence(item, result)
     return result
+
+
+def _normalize_requested_seasons(seasons: list[int] | None) -> list[int] | None:
+    if seasons is None:
+        return None
+    if not isinstance(seasons, list):
+        raise ValueError("seasons must be a list of season numbers")
+    if not seasons:
+        return None
+
+    normalized: set[int] = set()
+    for season in seasons:
+        if isinstance(season, bool) or not isinstance(season, int) or season < 0:
+            raise ValueError(
+                "seasons must contain non-negative integers; use 0 for specials"
+            )
+        normalized.add(season)
+    return sorted(normalized)
+
+
+def _with_season_monitoring(
+    series: Mapping[str, Any], requested_seasons: list[int]
+) -> dict[str, Any]:
+    seasons = _ensure_list(series.get("seasons"))
+    available_seasons = sorted(
+        season["seasonNumber"]
+        for season in seasons
+        if isinstance(season.get("seasonNumber"), int)
+        and not isinstance(season.get("seasonNumber"), bool)
+    )
+    missing = [season for season in requested_seasons if season not in available_seasons]
+    if missing:
+        return {
+            "error": (
+                "Requested seasons are not available: "
+                f"{_format_int_list(missing)}. Available seasons: "
+                f"{_format_int_list(available_seasons)}."
+            )
+        }
+
+    requested = set(requested_seasons)
+    return {
+        "seasons": [
+            {
+                **season,
+                "monitored": season.get("seasonNumber") in requested,
+            }
+            for season in seasons
+        ]
+    }
+
+
+def _format_season_list(seasons: list[int]) -> str:
+    if len(seasons) == 1:
+        season = seasons[0]
+        return "specials" if season == 0 else f"season {season}"
+
+    if _is_contiguous(seasons):
+        return f"seasons {seasons[0]}-{seasons[-1]}"
+    return "seasons " + ", ".join(str(season) for season in seasons)
+
+
+def _is_contiguous(values: list[int]) -> bool:
+    return values == list(range(values[0], values[-1] + 1))
+
+
+def _format_int_list(values: list[int]) -> str:
+    return ", ".join(str(value) for value in values) if values else "none"
 
 
 def _shape_queue_item(item: Mapping[str, Any], media_type: str) -> dict[str, Any]:

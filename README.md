@@ -76,8 +76,10 @@ mcp_servers:
   approved Radarr policy.
 - `search_show(query: str, limit: int = 5)` returns normalized Sonarr series
   matches, capped at 10 results.
-- `add_show(tvdbId: int, title: str | None = None, anime: bool = False)` adds a
-  series using the approved Sonarr policy.
+- `add_show(tvdbId: int, title: str | None = None, anime: bool = False,
+  seasons: list[int] | None = None)` adds a series using the approved Sonarr
+  policy. Use `seasons` when the user asks for specific seasons; omit it when
+  the user wants the whole show.
 - `media_status()` checks basic Radarr and Sonarr connectivity.
 - `download_status()` checks Radarr and Sonarr queues and returns a sanitized,
   read-only download summary.

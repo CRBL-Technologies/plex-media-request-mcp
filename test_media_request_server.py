@@ -759,9 +759,168 @@ class AddTests(unittest.TestCase):
 
         result = service.add_show(82066)
 
+        self.assertEqual(result["status"], "added")
+        self.assertNotIn("monitoredSeasons", result)
         self.assertEqual(result["profileUsed"], "Sonarr Normal Profile")
         post = session.requests[-1]
         self.assertEqual(post["json"]["qualityProfileId"], 601)
+        self.assertEqual(post["json"]["rootFolderPath"], "/configured/tv")
+        self.assertTrue(post["json"]["monitored"])
+        self.assertTrue(post["json"]["seasonFolder"])
+        self.assertEqual(post["json"]["tags"], [21, 22])
+
+    def test_add_show_existing_series_reports_season_monitoring_unchanged(self) -> None:
+        session = FakeSession([[{"title": "Existing Show", "tvdbId": 123}]])
+        service = server.MediaRequestService(config(), session=session)
+
+        result = service.add_show(123, seasons=[1])
+
+        self.assertEqual(result["status"], "already_exists")
+        self.assertEqual(result["monitoredSeasons"], [1])
+        self.assertIn("season monitoring was not changed", result["message"])
+        self.assertEqual(len(session.requests), 1)
+
+    def test_add_show_with_one_season_monitors_only_that_season(self) -> None:
+        session = FakeSession(
+            [
+                [],
+                [
+                    {
+                        "title": "My Brilliant Friend",
+                        "tvdbId": 354888,
+                        "seasons": [
+                            {"seasonNumber": 0, "monitored": True},
+                            {"seasonNumber": 1, "monitored": False},
+                            {"seasonNumber": 2, "monitored": True},
+                        ],
+                    }
+                ],
+                {"title": "My Brilliant Friend", "tvdbId": 354888},
+            ]
+        )
+        service = server.MediaRequestService(config(), session=session)
+
+        result = service.add_show(354888, seasons=[1])
+
+        self.assertEqual(result["status"], "added")
+        self.assertEqual(result["monitoredSeasons"], [1])
+        self.assertEqual(
+            session.requests[-1]["json"]["seasons"],
+            [
+                {"seasonNumber": 0, "monitored": False},
+                {"seasonNumber": 1, "monitored": True},
+                {"seasonNumber": 2, "monitored": False},
+            ],
+        )
+
+    def test_add_show_with_season_range_monitors_only_requested_seasons(self) -> None:
+        session = FakeSession(
+            [
+                [],
+                [
+                    {
+                        "title": "My Brilliant Friend",
+                        "tvdbId": 354888,
+                        "seasons": [
+                            {"seasonNumber": 0},
+                            {"seasonNumber": 1},
+                            {"seasonNumber": 2},
+                            {"seasonNumber": 3},
+                        ],
+                    }
+                ],
+                {"title": "My Brilliant Friend", "tvdbId": 354888},
+            ]
+        )
+        service = server.MediaRequestService(config(), session=session)
+
+        result = service.add_show(354888, seasons=[2, 1])
+
+        self.assertEqual(result["monitoredSeasons"], [1, 2])
+        self.assertIn("seasons 1-2 monitored", result["message"])
+        self.assertEqual(
+            [
+                season["monitored"]
+                for season in session.requests[-1]["json"]["seasons"]
+            ],
+            [False, True, True, False],
+        )
+
+    def test_add_show_keeps_specials_unmonitored_unless_requested(self) -> None:
+        session = FakeSession(
+            [
+                [],
+                [
+                    {
+                        "title": "Show With Specials",
+                        "tvdbId": 123,
+                        "seasons": [{"seasonNumber": 0}, {"seasonNumber": 1}],
+                    }
+                ],
+                {"title": "Show With Specials", "tvdbId": 123},
+            ]
+        )
+        service = server.MediaRequestService(config(), session=session)
+
+        service.add_show(123, seasons=[0])
+
+        self.assertEqual(
+            session.requests[-1]["json"]["seasons"],
+            [
+                {"seasonNumber": 0, "monitored": True},
+                {"seasonNumber": 1, "monitored": False},
+            ],
+        )
+
+    def test_add_show_rejects_nonexistent_requested_season(self) -> None:
+        session = FakeSession(
+            [
+                [],
+                [
+                    {
+                        "title": "Short Show",
+                        "tvdbId": 123,
+                        "seasons": [{"seasonNumber": 0}, {"seasonNumber": 1}],
+                    }
+                ],
+            ]
+        )
+        service = server.MediaRequestService(config(), session=session)
+
+        result = service.add_show(123, seasons=[3])
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["monitoredSeasons"], [3])
+        self.assertIn("Requested seasons are not available: 3", result["message"])
+        self.assertIn("Available seasons: 0, 1", result["message"])
+        self.assertEqual(len(session.requests), 2)
+
+    def test_add_show_rejects_invalid_season_values(self) -> None:
+        service = server.MediaRequestService(config(), session=FakeSession([]))
+
+        with self.assertRaisesRegex(ValueError, "seasons"):
+            service.add_show(123, seasons=[-1])
+
+    def test_add_show_with_seasons_still_enforces_configured_policy(self) -> None:
+        session = FakeSession(
+            [
+                [],
+                [
+                    {
+                        "title": "Policy Show",
+                        "tvdbId": 123,
+                        "seasons": [{"seasonNumber": 1}],
+                    }
+                ],
+                {"title": "Policy Show", "tvdbId": 123},
+            ]
+        )
+        service = server.MediaRequestService(config(), session=session)
+
+        service.add_show(123, anime=True, seasons=[1])
+
+        post = session.requests[-1]
+        self.assertEqual(post["json"]["qualityProfileId"], 602)
         self.assertEqual(post["json"]["rootFolderPath"], "/configured/tv")
         self.assertTrue(post["json"]["monitored"])
         self.assertTrue(post["json"]["seasonFolder"])

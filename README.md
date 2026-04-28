@@ -79,6 +79,8 @@ mcp_servers:
 - `add_show(tvdbId: int, title: str | None = None, anime: bool = False)` adds a
   series using the approved Sonarr policy.
 - `media_status()` checks basic Radarr and Sonarr connectivity.
+- `download_status()` checks Radarr and Sonarr queues and returns a sanitized,
+  read-only download summary.
 
 ## Development
 

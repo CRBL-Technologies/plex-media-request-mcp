@@ -279,6 +279,32 @@ class MediaRequestService:
             "sonarr": self._service_status("sonarr"),
         }
 
+    def download_status(self) -> dict[str, Any]:
+        radarr_queue = self._get_radarr("/api/v3/queue")
+        sonarr_queue = self._get_sonarr("/api/v3/queue")
+        items = [
+            *[
+                _shape_queue_item(item, "movie")
+                for item in _queue_records(radarr_queue)
+            ],
+            *[
+                _shape_queue_item(item, "series")
+                for item in _queue_records(sonarr_queue)
+            ],
+        ]
+
+        if not items:
+            return {
+                "active": False,
+                "items": [],
+                "message": "No active downloads found.",
+            }
+
+        return {
+            "active": True,
+            "items": items,
+        }
+
     def _find_existing_movie(self, tmdb_id: int) -> dict[str, Any] | None:
         movies = self._get_radarr("/api/v3/movie")
         return _find_by_id(_ensure_list(movies), "tmdbId", tmdb_id)
@@ -425,6 +451,10 @@ def create_server() -> Any:
     def media_status() -> dict[str, Any]:
         return service.media_status()
 
+    @mcp.tool()
+    def download_status() -> dict[str, Any]:
+        return service.download_status()
+
     return mcp
 
 
@@ -467,6 +497,97 @@ def _shape_show_result(item: Mapping[str, Any]) -> dict[str, Any]:
     _copy_if_not_none(result, "is_anime", _is_anime(item))
     _copy_existence(item, result)
     return result
+
+
+def _shape_queue_item(item: Mapping[str, Any], media_type: str) -> dict[str, Any]:
+    result: dict[str, Any] = {"media_type": media_type}
+    _copy_if_not_none(result, "title", _queue_title(item, media_type))
+    _copy_if_not_none(result, "status", _clean_text(item.get("status")))
+    _copy_if_not_none(result, "progress_percent", _queue_progress_percent(item))
+    _copy_if_not_none(
+        result,
+        "time_left",
+        _clean_text(_first_present(item, ("timeleft", "timeLeft"))),
+    )
+    _copy_if_not_none(
+        result,
+        "tracked_download_status",
+        _clean_text(item.get("trackedDownloadStatus")),
+    )
+    tracked_state = _clean_text(item.get("trackedDownloadState"))
+    _copy_if_not_none(result, "tracked_download_state", tracked_state)
+    _copy_if_not_none(
+        result,
+        "download_client",
+        _clean_text(_first_present(item, ("downloadClient", "downloadClientName"))),
+    )
+    _copy_if_not_none(result, "note", _queue_note(tracked_state))
+    return result
+
+
+def _queue_records(queue_response: Any) -> list[dict[str, Any]]:
+    if isinstance(queue_response, dict):
+        return _ensure_list(queue_response.get("records"))
+    return _ensure_list(queue_response)
+
+
+def _queue_title(item: Mapping[str, Any], media_type: str) -> str | None:
+    if media_type == "movie":
+        movie = item.get("movie")
+        if isinstance(movie, dict):
+            title = _clean_text(movie.get("title"))
+            if title:
+                return title
+    else:
+        series = item.get("series")
+        if isinstance(series, dict):
+            title = _clean_text(series.get("title"))
+            if title:
+                return title
+
+    return _clean_text(item.get("title"))
+
+
+def _queue_progress_percent(item: Mapping[str, Any]) -> float | int | None:
+    progress = _number(_first_present(item, ("progressPercent", "progress")))
+    if progress is not None:
+        return _clamped_percent(progress)
+
+    size = _number(item.get("size"))
+    size_left = _number(_first_present(item, ("sizeleft", "sizeLeft")))
+    if size is None or size <= 0 or size_left is None:
+        return None
+
+    return _clamped_percent(((size - size_left) / size) * 100)
+
+
+def _queue_note(tracked_state: str | None) -> str | None:
+    if tracked_state == "importPending":
+        return "Download is complete and waiting to be imported."
+    return None
+
+
+def _number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _clamped_percent(value: float) -> float:
+    return round(max(0.0, min(100.0, value)), 2)
+
+
+def _clean_text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    if "://" in cleaned or cleaned.startswith(("/", "\\")) or ":\\" in cleaned:
+        return None
+    return cleaned
 
 
 def _copy_optional_renamed(

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import json
+import os
+import sys
+import types
 import unittest
+from unittest.mock import patch
 from typing import Any
 
 import media_request_server as server
@@ -308,6 +313,188 @@ class SearchTests(unittest.TestCase):
         results = service.search_show("unknown")
 
         self.assertEqual(results, [{"title": "Unknown", "year": 2024, "tvdb_id": None}])
+
+
+class DownloadStatusTests(unittest.TestCase):
+    def test_download_status_normalizes_radarr_queue_items(self) -> None:
+        session = FakeSession(
+            [
+                {
+                    "records": [
+                        {
+                            "movie": {"title": "Dune"},
+                            "status": "downloading",
+                            "size": 1000,
+                            "sizeleft": 250,
+                            "timeleft": "00:30:00",
+                            "trackedDownloadStatus": "ok",
+                            "trackedDownloadState": "downloading",
+                            "downloadClient": "SABnzbd",
+                        }
+                    ]
+                },
+                {"records": []},
+            ]
+        )
+        service = server.MediaRequestService(config(), session=session)
+
+        result = service.download_status()
+
+        self.assertEqual(
+            result,
+            {
+                "active": True,
+                "items": [
+                    {
+                        "media_type": "movie",
+                        "title": "Dune",
+                        "status": "downloading",
+                        "progress_percent": 75.0,
+                        "time_left": "00:30:00",
+                        "tracked_download_status": "ok",
+                        "tracked_download_state": "downloading",
+                        "download_client": "SABnzbd",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(
+            [(request["method"], request["url"]) for request in session.requests],
+            [
+                ("GET", "http://radarr:7878/api/v3/queue"),
+                ("GET", "http://sonarr:8989/api/v3/queue"),
+            ],
+        )
+
+    def test_download_status_normalizes_sonarr_queue_items(self) -> None:
+        session = FakeSession(
+            [
+                {"records": []},
+                {
+                    "records": [
+                        {
+                            "series": {"title": "Fringe"},
+                            "status": "completed",
+                            "progress": 100,
+                            "timeLeft": "00:00:00",
+                            "trackedDownloadStatus": "warning",
+                            "trackedDownloadState": "importPending",
+                            "downloadClientName": "qBittorrent",
+                        }
+                    ]
+                },
+            ]
+        )
+        service = server.MediaRequestService(config(), session=session)
+
+        result = service.download_status()
+
+        self.assertEqual(
+            result,
+            {
+                "active": True,
+                "items": [
+                    {
+                        "media_type": "series",
+                        "title": "Fringe",
+                        "status": "completed",
+                        "progress_percent": 100.0,
+                        "time_left": "00:00:00",
+                        "tracked_download_status": "warning",
+                        "tracked_download_state": "importPending",
+                        "download_client": "qBittorrent",
+                        "note": "Download is complete and waiting to be imported.",
+                    }
+                ],
+            },
+        )
+
+    def test_download_status_returns_empty_summary_for_empty_queues(self) -> None:
+        session = FakeSession([{"records": []}, {"records": []}])
+        service = server.MediaRequestService(config(), session=session)
+
+        result = service.download_status()
+
+        self.assertEqual(
+            result,
+            {
+                "active": False,
+                "items": [],
+                "message": "No active downloads found.",
+            },
+        )
+
+    def test_download_status_does_not_leak_secret_urls_or_paths(self) -> None:
+        session = FakeSession(
+            [
+                {
+                    "records": [
+                        {
+                            "movie": {"title": "Dune"},
+                            "status": "downloading",
+                            "downloadUrl": "https://download.example/secret",
+                            "indexer": "Private Indexer",
+                            "outputPath": "/downloads/secret/Dune.mkv",
+                            "downloadClient": "http://internal-client:8080",
+                            "trackedDownloadStatus": "ok",
+                            "trackedDownloadState": "downloading",
+                        }
+                    ]
+                },
+                {"records": []},
+            ]
+        )
+        service = server.MediaRequestService(config(), session=session)
+
+        serialized = json.dumps(service.download_status())
+
+        self.assertNotIn("secret", serialized)
+        self.assertNotIn("download.example", serialized)
+        self.assertNotIn("/downloads", serialized)
+        self.assertNotIn("Private Indexer", serialized)
+        self.assertNotIn("internal-client", serialized)
+
+
+class McpToolTests(unittest.TestCase):
+    def test_create_server_registers_expected_tools(self) -> None:
+        class FakeFastMCP:
+            def __init__(self, name: str) -> None:
+                self.name = name
+                self.tools: list[str] = []
+
+            def tool(self) -> Any:
+                def decorator(fn: Any) -> Any:
+                    self.tools.append(fn.__name__)
+                    return fn
+
+                return decorator
+
+        mcp_module = types.ModuleType("mcp")
+        server_module = types.ModuleType("mcp.server")
+        fastmcp_module = types.ModuleType("mcp.server.fastmcp")
+        fastmcp_module.FastMCP = FakeFastMCP
+
+        with patch.dict(
+            sys.modules,
+            {
+                "mcp": mcp_module,
+                "mcp.server": server_module,
+                "mcp.server.fastmcp": fastmcp_module,
+            },
+        ), patch.dict(os.environ, env_config(), clear=True):
+            mcp = server.create_server()
+
+        self.assertEqual(
+            mcp.tools,
+            [
+                "search_movie",
+                "add_movie",
+                "search_show",
+                "add_show",
+                "media_status",
+                "download_status",
+            ],
+        )
 
 
 class AddTests(unittest.TestCase):

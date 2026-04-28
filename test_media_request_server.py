@@ -456,6 +456,89 @@ class DownloadStatusTests(unittest.TestCase):
 
 
 class RequestStatusTests(unittest.TestCase):
+    def test_request_status_returns_available_for_completed_radarr_movies(self) -> None:
+        movies = [
+            {
+                "id": 1,
+                "title": "American Gangster",
+                "cleanTitle": "americangangster",
+                "titleSlug": "american-gangster-2007",
+                "year": 2007,
+                "hasFile": True,
+            },
+            {
+                "id": 2,
+                "title": "Cloud Atlas",
+                "cleanTitle": "cloudatlas",
+                "titleSlug": "cloud-atlas-2012",
+                "year": 2012,
+                "hasFile": True,
+            },
+            {
+                "id": 3,
+                "title": "For a Few Dollars More",
+                "cleanTitle": "forafewdollarsmore",
+                "titleSlug": "for-a-few-dollars-more-1965",
+                "year": 1965,
+                "hasFile": True,
+            },
+        ]
+
+        for query, title, year in (
+            ("American Gangster", "American Gangster", 2007),
+            ("Cloud Atlas", "Cloud Atlas", 2012),
+            ("For a Few Dollars More", "For a Few Dollars More", 1965),
+        ):
+            with self.subTest(query=query):
+                session = FakeSession([{"records": []}, {"records": []}, movies, []])
+                service = server.MediaRequestService(config(), session=session)
+
+                result = service.request_status(query=query)
+
+                self.assertEqual(
+                    result,
+                    {
+                        "found": True,
+                        "media_type": "movie",
+                        "state": "available",
+                        "available": True,
+                        "message": f"{title} is already in the library.",
+                        "title": title,
+                        "year": year,
+                    },
+                )
+
+    def test_request_status_available_match_uses_radarr_title_keys_and_year(
+        self,
+    ) -> None:
+        movies = [
+            {
+                "id": 1,
+                "title": "Different Display Title",
+                "cleanTitle": "cloudatlas",
+                "titleSlug": "cloud-atlas-2012",
+                "year": 2012,
+                "hasFile": True,
+                "alternateTitles": [{"title": "Atlas des nuages"}],
+            },
+            {
+                "id": 2,
+                "title": "Cloud Atlas",
+                "cleanTitle": "cloudatlas",
+                "titleSlug": "cloud-atlas-2013",
+                "year": 2013,
+                "hasFile": True,
+            },
+        ]
+        session = FakeSession([{"records": []}, {"records": []}, movies, []])
+        service = server.MediaRequestService(config(), session=session)
+
+        result = service.request_status(query="Cloud Atlas 2012")
+
+        self.assertEqual(result["title"], "Different Display Title")
+        self.assertEqual(result["year"], 2012)
+        self.assertEqual(result["state"], "available")
+
     def test_request_status_marks_unreleased_movie_as_waiting_for_release(self) -> None:
         session = FakeSession(
             [

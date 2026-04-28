@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -315,6 +316,11 @@ class MediaRequestService:
         sonarr_queue_records = _queue_records(self._get_sonarr("/api/v3/queue"))
         movies = _ensure_list(self._get_radarr("/api/v3/movie"))
         series = _ensure_list(self._get_sonarr("/api/v3/series"))
+
+        if query_text:
+            available_movie = _find_available_movie_match(movies, query_text)
+            if available_movie is not None:
+                return _shape_available_movie_request(available_movie)
 
         items: list[dict[str, Any]] = []
         items.extend(
@@ -639,6 +645,20 @@ def _shape_waiting_request_item(
     return result
 
 
+def _shape_available_movie_request(item: Mapping[str, Any]) -> dict[str, Any]:
+    title = _media_title(item) or "Movie"
+    result: dict[str, Any] = {
+        "found": True,
+        "media_type": "movie",
+        "state": "available",
+        "available": True,
+        "message": f"{title} is already in the library.",
+    }
+    _copy_if_not_none(result, "title", _media_title(item))
+    _copy_if_not_none(result, "year", _positive_int_or_none(item.get("year")))
+    return result
+
+
 def _queue_records(queue_response: Any) -> list[dict[str, Any]]:
     if isinstance(queue_response, dict):
         return _ensure_list(queue_response.get("records"))
@@ -753,6 +773,75 @@ def _positive_int_or_none(value: Any) -> int | None:
 
 def _media_title(item: Mapping[str, Any]) -> str | None:
     return _clean_text(item.get("title"))
+
+
+def _find_available_movie_match(
+    movies: list[dict[str, Any]], query: str
+) -> dict[str, Any] | None:
+    query_title, query_year = _split_query_year(query)
+    query_key = _normalized_lookup_key(query_title)
+    if not query_key:
+        return None
+
+    for movie in movies:
+        if not _movie_has_file(movie):
+            continue
+        movie_year = _positive_int_or_none(movie.get("year"))
+        if query_year is not None and movie_year is not None and query_year != movie_year:
+            continue
+        if query_key in _movie_match_keys(movie):
+            return movie
+    return None
+
+
+def _split_query_year(query: str) -> tuple[str, int | None]:
+    stripped = query.strip()
+    match = re.search(r"(?:^|\D)((?:19|20)\d{2})(?:\D|$)", stripped)
+    if match is None:
+        return stripped, None
+
+    year = int(match.group(1))
+    title = (stripped[: match.start(1)] + stripped[match.end(1) :]).strip()
+    title = title.strip("()[]{}-: ")
+    return title, year
+
+
+def _movie_match_keys(movie: Mapping[str, Any]) -> set[str]:
+    keys: set[str] = set()
+    for value in (
+        movie.get("title"),
+        movie.get("cleanTitle"),
+        _strip_slug_year(movie.get("titleSlug")),
+        movie.get("titleSlug"),
+    ):
+        normalized = _normalized_lookup_key(value)
+        if normalized:
+            keys.add(normalized)
+
+    alternate_titles = movie.get("alternateTitles")
+    if isinstance(alternate_titles, list):
+        for alternate_title in alternate_titles:
+            if isinstance(alternate_title, str):
+                normalized = _normalized_lookup_key(alternate_title)
+            elif isinstance(alternate_title, dict):
+                normalized = _normalized_lookup_key(alternate_title.get("title"))
+            else:
+                normalized = ""
+            if normalized:
+                keys.add(normalized)
+    return keys
+
+
+def _strip_slug_year(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return re.sub(r"[-_](?:19|20)\d{2}$", "", value.strip())
+
+
+def _normalized_lookup_key(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return "".join(character.lower() for character in value if character.isalnum())
 
 
 def _matches_query(item: Mapping[str, Any], query: str) -> bool:

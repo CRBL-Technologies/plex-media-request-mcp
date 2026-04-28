@@ -36,6 +36,7 @@ def config() -> server.ArrConfig:
         radarr_quality_profile_id=501,
         radarr_quality_profile_name="Radarr Movie Profile",
         radarr_root_folder_path="/configured/movies",
+        radarr_tag_ids=[11],
         sonarr_url="http://sonarr:8989",
         sonarr_api_key="sonarr-key",
         sonarr_normal_quality_profile_id=601,
@@ -43,6 +44,7 @@ def config() -> server.ArrConfig:
         sonarr_anime_quality_profile_id=602,
         sonarr_anime_quality_profile_name="Sonarr Anime Profile",
         sonarr_root_folder_path="/configured/tv",
+        sonarr_tag_ids=[21, 22],
     )
 
 
@@ -53,6 +55,7 @@ def env_config(overrides: dict[str, str] | None = None) -> dict[str, str]:
         server.ENV_RADARR_QUALITY_PROFILE_ID: "501",
         server.ENV_RADARR_QUALITY_PROFILE_NAME: "Radarr Movie Profile",
         server.ENV_RADARR_ROOT_FOLDER_PATH: "/configured/movies",
+        server.ENV_RADARR_TAG_IDS: "11",
         server.ENV_SONARR_URL: "http://sonarr:8989",
         server.ENV_SONARR_API_KEY: "sonarr-key",
         server.ENV_SONARR_NORMAL_QUALITY_PROFILE_ID: "601",
@@ -60,6 +63,7 @@ def env_config(overrides: dict[str, str] | None = None) -> dict[str, str]:
         server.ENV_SONARR_ANIME_QUALITY_PROFILE_ID: "602",
         server.ENV_SONARR_ANIME_QUALITY_PROFILE_NAME: "Sonarr Anime Profile",
         server.ENV_SONARR_ROOT_FOLDER_PATH: "/configured/tv",
+        server.ENV_SONARR_TAG_IDS: "21, 22",
     }
     if overrides:
         values.update(overrides)
@@ -83,6 +87,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(loaded.sonarr_url, "http://sonarr:8989")
         self.assertEqual(loaded.radarr_quality_profile_id, 501)
         self.assertEqual(loaded.sonarr_anime_quality_profile_id, 602)
+        self.assertEqual(loaded.radarr_tag_ids, [11])
+        self.assertEqual(loaded.sonarr_tag_ids, [21, 22])
 
     def test_load_config_fails_clearly_for_missing_values(self) -> None:
         with self.assertRaisesRegex(RuntimeError, server.ENV_RADARR_URL):
@@ -130,6 +136,23 @@ class ConfigTests(unittest.TestCase):
             server.load_config(
                 env_config({server.ENV_RADARR_QUALITY_PROFILE_ID: "not-a-number"})
             )
+
+    def test_load_config_allows_empty_tag_ids(self) -> None:
+        loaded = server.load_config(
+            env_config(
+                {
+                    server.ENV_RADARR_TAG_IDS: "",
+                    server.ENV_SONARR_TAG_IDS: "",
+                }
+            )
+        )
+
+        self.assertEqual(loaded.radarr_tag_ids, [])
+        self.assertEqual(loaded.sonarr_tag_ids, [])
+
+    def test_load_config_requires_numeric_tag_ids(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, server.ENV_SONARR_TAG_IDS):
+            server.load_config(env_config({server.ENV_SONARR_TAG_IDS: "agent"}))
 
 
 class SearchTests(unittest.TestCase):
@@ -207,6 +230,7 @@ class AddTests(unittest.TestCase):
         self.assertEqual(post["json"]["rootFolderPath"], "/configured/movies")
         self.assertTrue(post["json"]["monitored"])
         self.assertEqual(post["json"]["minimumAvailability"], "announced")
+        self.assertEqual(post["json"]["tags"], [11])
 
     def test_add_movie_reports_existing(self) -> None:
         session = FakeSession([[{"title": "Alien", "tmdbId": 348}]])
@@ -235,6 +259,7 @@ class AddTests(unittest.TestCase):
         self.assertEqual(post["json"]["rootFolderPath"], "/configured/tv")
         self.assertTrue(post["json"]["monitored"])
         self.assertTrue(post["json"]["seasonFolder"])
+        self.assertEqual(post["json"]["tags"], [21, 22])
 
     def test_add_show_enforces_anime_profile(self) -> None:
         session = FakeSession(

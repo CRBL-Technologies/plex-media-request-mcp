@@ -23,6 +23,7 @@ PLEX_MEDIA_REQUEST_RADARR_API_KEY=replace-with-radarr-api-key
 PLEX_MEDIA_REQUEST_RADARR_QUALITY_PROFILE_ID=replace-with-radarr-quality-profile-id
 PLEX_MEDIA_REQUEST_RADARR_QUALITY_PROFILE_NAME=replace-with-radarr-quality-profile-name
 PLEX_MEDIA_REQUEST_RADARR_ROOT_FOLDER_PATH=replace-with-radarr-root-folder-path
+PLEX_MEDIA_REQUEST_RADARR_TAG_IDS=replace-with-radarr-tag-ids
 PLEX_MEDIA_REQUEST_SONARR_BASE_URL=replace-with-sonarr-base-url
 PLEX_MEDIA_REQUEST_SONARR_API_KEY=replace-with-sonarr-api-key
 PLEX_MEDIA_REQUEST_SONARR_NORMAL_QUALITY_PROFILE_ID=replace-with-sonarr-normal-quality-profile-id
@@ -30,12 +31,17 @@ PLEX_MEDIA_REQUEST_SONARR_NORMAL_QUALITY_PROFILE_NAME=replace-with-sonarr-normal
 PLEX_MEDIA_REQUEST_SONARR_ANIME_QUALITY_PROFILE_ID=replace-with-sonarr-anime-quality-profile-id
 PLEX_MEDIA_REQUEST_SONARR_ANIME_QUALITY_PROFILE_NAME=replace-with-sonarr-anime-quality-profile-name
 PLEX_MEDIA_REQUEST_SONARR_ROOT_FOLDER_PATH=replace-with-sonarr-root-folder-path
+PLEX_MEDIA_REQUEST_SONARR_TAG_IDS=replace-with-sonarr-tag-ids
 ```
 
 Base URLs are normalized, so a trailing slash is fine. API keys are sent with
 the `X-Api-Key` header and are never returned by tools. Profile and root folder
 settings are configured by environment variables, but they are not exposed as
 tool inputs.
+
+Tag IDs are optional comma-separated lists. Radarr and Sonarr keep separate tag
+namespaces, so create the visible tag in each app and use that app's numeric tag
+ID in the matching env var.
 
 ## Hermes Example
 
@@ -51,6 +57,7 @@ mcp_servers:
       PLEX_MEDIA_REQUEST_RADARR_QUALITY_PROFILE_ID: replace-with-radarr-quality-profile-id
       PLEX_MEDIA_REQUEST_RADARR_QUALITY_PROFILE_NAME: replace-with-radarr-quality-profile-name
       PLEX_MEDIA_REQUEST_RADARR_ROOT_FOLDER_PATH: replace-with-radarr-root-folder-path
+      PLEX_MEDIA_REQUEST_RADARR_TAG_IDS: replace-with-radarr-tag-ids
       PLEX_MEDIA_REQUEST_SONARR_BASE_URL: replace-with-sonarr-base-url
       PLEX_MEDIA_REQUEST_SONARR_API_KEY: replace-with-sonarr-api-key
       PLEX_MEDIA_REQUEST_SONARR_NORMAL_QUALITY_PROFILE_ID: replace-with-sonarr-normal-quality-profile-id
@@ -58,6 +65,7 @@ mcp_servers:
       PLEX_MEDIA_REQUEST_SONARR_ANIME_QUALITY_PROFILE_ID: replace-with-sonarr-anime-quality-profile-id
       PLEX_MEDIA_REQUEST_SONARR_ANIME_QUALITY_PROFILE_NAME: replace-with-sonarr-anime-quality-profile-name
       PLEX_MEDIA_REQUEST_SONARR_ROOT_FOLDER_PATH: replace-with-sonarr-root-folder-path
+      PLEX_MEDIA_REQUEST_SONARR_TAG_IDS: replace-with-sonarr-tag-ids
 ```
 
 ## Tools

@@ -13,6 +13,7 @@ ENV_RADARR_API_KEY = "PLEX_MEDIA_REQUEST_RADARR_API_KEY"
 ENV_RADARR_QUALITY_PROFILE_ID = "PLEX_MEDIA_REQUEST_RADARR_QUALITY_PROFILE_ID"
 ENV_RADARR_QUALITY_PROFILE_NAME = "PLEX_MEDIA_REQUEST_RADARR_QUALITY_PROFILE_NAME"
 ENV_RADARR_ROOT_FOLDER_PATH = "PLEX_MEDIA_REQUEST_RADARR_ROOT_FOLDER_PATH"
+ENV_RADARR_TAG_IDS = "PLEX_MEDIA_REQUEST_RADARR_TAG_IDS"
 ENV_SONARR_URL = "PLEX_MEDIA_REQUEST_SONARR_BASE_URL"
 ENV_SONARR_API_KEY = "PLEX_MEDIA_REQUEST_SONARR_API_KEY"
 ENV_SONARR_NORMAL_QUALITY_PROFILE_ID = (
@@ -28,6 +29,7 @@ ENV_SONARR_ANIME_QUALITY_PROFILE_NAME = (
     "PLEX_MEDIA_REQUEST_SONARR_ANIME_QUALITY_PROFILE_NAME"
 )
 ENV_SONARR_ROOT_FOLDER_PATH = "PLEX_MEDIA_REQUEST_SONARR_ROOT_FOLDER_PATH"
+ENV_SONARR_TAG_IDS = "PLEX_MEDIA_REQUEST_SONARR_TAG_IDS"
 
 REQUIRED_ENV_VARS = (
     ENV_RADARR_URL,
@@ -59,6 +61,7 @@ class ArrConfig:
     radarr_quality_profile_id: int
     radarr_quality_profile_name: str
     radarr_root_folder_path: str
+    radarr_tag_ids: list[int]
     sonarr_url: str
     sonarr_api_key: str
     sonarr_normal_quality_profile_id: int
@@ -66,6 +69,7 @@ class ArrConfig:
     sonarr_anime_quality_profile_id: int
     sonarr_anime_quality_profile_name: str
     sonarr_root_folder_path: str
+    sonarr_tag_ids: list[int]
 
 
 def normalize_base_url(value: str) -> str:
@@ -91,6 +95,9 @@ def load_config(env: Mapping[str, str] | None = None) -> ArrConfig:
         ),
         radarr_quality_profile_name=values[ENV_RADARR_QUALITY_PROFILE_NAME].strip(),
         radarr_root_folder_path=values[ENV_RADARR_ROOT_FOLDER_PATH].strip(),
+        radarr_tag_ids=_load_int_list(
+            values.get(ENV_RADARR_TAG_IDS, ""), ENV_RADARR_TAG_IDS
+        ),
         sonarr_url=normalize_base_url(values[ENV_SONARR_URL]),
         sonarr_api_key=values[ENV_SONARR_API_KEY].strip(),
         sonarr_normal_quality_profile_id=_load_positive_int(
@@ -108,6 +115,9 @@ def load_config(env: Mapping[str, str] | None = None) -> ArrConfig:
             ENV_SONARR_ANIME_QUALITY_PROFILE_NAME
         ].strip(),
         sonarr_root_folder_path=values[ENV_SONARR_ROOT_FOLDER_PATH].strip(),
+        sonarr_tag_ids=_load_int_list(
+            values.get(ENV_SONARR_TAG_IDS, ""), ENV_SONARR_TAG_IDS
+        ),
     )
 
 
@@ -161,6 +171,7 @@ class MediaRequestService:
                     "rootFolderPath": self.config.radarr_root_folder_path,
                     "monitored": True,
                     "minimumAvailability": "announced",
+                    "tags": self.config.radarr_tag_ids,
                     "addOptions": {"searchForMovie": True},
                 }
             )
@@ -237,6 +248,7 @@ class MediaRequestService:
                     "rootFolderPath": self.config.sonarr_root_folder_path,
                     "monitored": True,
                     "seasonFolder": True,
+                    "tags": self.config.sonarr_tag_ids,
                     "addOptions": {"searchForMissingEpisodes": True},
                 }
             )
@@ -488,6 +500,30 @@ def _load_positive_int(value: str, name: str) -> int:
         raise RuntimeError(f"{name} must be a positive integer") from exc
     if parsed <= 0:
         raise RuntimeError(f"{name} must be a positive integer")
+    return parsed
+
+
+def _load_int_list(value: str, name: str) -> list[int]:
+    stripped = value.strip()
+    if not stripped:
+        return []
+
+    parsed: list[int] = []
+    for raw_item in stripped.split(","):
+        item = raw_item.strip()
+        if not item:
+            continue
+        try:
+            parsed_item = int(item)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"{name} must be a comma-separated list of positive integers"
+            ) from exc
+        if parsed_item <= 0:
+            raise RuntimeError(
+                f"{name} must be a comma-separated list of positive integers"
+            )
+        parsed.append(parsed_item)
     return parsed
 
 

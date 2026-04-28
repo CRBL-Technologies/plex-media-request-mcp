@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping
+from urllib.parse import urlparse
 
 import requests
 
@@ -403,6 +405,98 @@ class MediaRequestService:
             "items": items,
         }
 
+    def browse_library(
+        self,
+        media_type: str = "any",
+        genre: str | None = None,
+        query: str | None = None,
+        year_min: int | None = None,
+        year_max: int | None = None,
+        runtime_max: int | None = None,
+        language: str | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        requested_type = _normalize_media_type(media_type)
+        result_limit = _normalize_limit(limit)
+        items = self._library_items(requested_type)
+        return [
+            item
+            for item in items
+            if _library_item_matches_filters(
+                item,
+                genre=genre,
+                query=query,
+                year_min=year_min,
+                year_max=year_max,
+                runtime_max=runtime_max,
+                language=language,
+            )
+        ][:result_limit]
+
+    def recommend_from_library(
+        self, prompt: str, media_type: str = "any", limit: int = 5
+    ) -> list[dict[str, Any]]:
+        prompt = _require_text(prompt, "prompt")
+        requested_type = _normalize_media_type(media_type)
+        result_limit = _normalize_limit(limit)
+        scored = [
+            (score, reason, item)
+            for item in self._library_items(requested_type)
+            for score, reason in [_recommendation_score(item, prompt)]
+            if score > 0
+        ]
+        scored.sort(
+            key=lambda scored_item: (-scored_item[0], scored_item[2].get("title") or "")
+        )
+        return [
+            {**item, "reason": reason}
+            for _, reason, item in scored[:result_limit]
+        ]
+
+    def similar_in_library(
+        self, title: str, media_type: str = "any", limit: int = 5
+    ) -> list[dict[str, Any]]:
+        title = _require_text(title, "title")
+        requested_type = _normalize_media_type(media_type)
+        result_limit = _normalize_limit(limit)
+        items = self._library_items(requested_type)
+        source = _find_library_source_item(items, title)
+        if source is None:
+            return []
+
+        scored = [
+            (score, reason, item)
+            for item in items
+            if _normalized_lookup_key(item.get("title"))
+            != _normalized_lookup_key(source.get("title"))
+            for score, reason in [_similarity_score(item, source)]
+            if score > 0
+        ]
+        scored.sort(
+            key=lambda scored_item: (-scored_item[0], scored_item[2].get("title") or "")
+        )
+        return [
+            {**item, "reason": reason}
+            for _, reason, item in scored[:result_limit]
+        ]
+
+    def _library_items(self, media_type: str) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        if media_type in {"movie", "any"}:
+            items.extend(
+                _shape_library_movie(movie)
+                for movie in _ensure_list(self._get_radarr("/api/v3/movie"))
+                if _movie_has_file(movie)
+            )
+        if media_type in {"series", "any"}:
+            items.extend(
+                _shape_library_series(show)
+                for show in _ensure_list(self._get_sonarr("/api/v3/series"))
+                if _series_has_file(show)
+            )
+        items.sort(key=lambda item: (item["media_type"], item.get("title") or ""))
+        return items
+
     def _find_existing_movie(self, tmdb_id: int) -> dict[str, Any] | None:
         movies = self._get_radarr("/api/v3/movie")
         return _find_by_id(_ensure_list(movies), "tmdbId", tmdb_id)
@@ -565,6 +659,44 @@ def create_server() -> Any:
     ) -> dict[str, Any]:
         return service.request_status(query=query, limit=limit)
 
+    @mcp.tool()
+    def browse_library(
+        media_type: str = "any",
+        genre: str | None = None,
+        query: str | None = None,
+        year_min: int | None = None,
+        year_max: int | None = None,
+        runtime_max: int | None = None,
+        language: str | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        return service.browse_library(
+            media_type=media_type,
+            genre=genre,
+            query=query,
+            year_min=year_min,
+            year_max=year_max,
+            runtime_max=runtime_max,
+            language=language,
+            limit=limit,
+        )
+
+    @mcp.tool()
+    def recommend_from_library(
+        prompt: str, media_type: str = "any", limit: int = 5
+    ) -> list[dict[str, Any]]:
+        return service.recommend_from_library(
+            prompt=prompt, media_type=media_type, limit=limit
+        )
+
+    @mcp.tool()
+    def similar_in_library(
+        title: str, media_type: str = "any", limit: int = 5
+    ) -> list[dict[str, Any]]:
+        return service.similar_in_library(
+            title=title, media_type=media_type, limit=limit
+        )
+
     return mcp
 
 
@@ -607,6 +739,228 @@ def _shape_show_result(item: Mapping[str, Any]) -> dict[str, Any]:
     _copy_if_not_none(result, "is_anime", _is_anime(item))
     _copy_existence(item, result)
     return result
+
+
+def _shape_library_movie(item: Mapping[str, Any]) -> dict[str, Any]:
+    result = {
+        "title": _clean_text(item.get("title")),
+        "year": _positive_int_or_none(item.get("year")),
+        "media_type": "movie",
+        "available": True,
+    }
+    _copy_if_not_none(result, "genres", _clean_string_list(item.get("genres")))
+    _copy_if_not_none(
+        result, "runtime_minutes", _positive_int_or_none(item.get("runtime"))
+    )
+    _copy_if_not_none(result, "overview", _clean_text(item.get("overview")))
+    _copy_if_not_none(result, "imdb_id", _clean_text(item.get("imdbId")))
+    _copy_if_not_none(result, "tmdb_id", _positive_int_or_none(item.get("tmdbId")))
+    _copy_if_not_none(result, "poster_url", _poster_url(item.get("images")))
+    _copy_if_not_none(result, "language", _language_name(item))
+    return result
+
+
+def _shape_library_series(item: Mapping[str, Any]) -> dict[str, Any]:
+    result = {
+        "title": _clean_text(item.get("title")),
+        "year": _positive_int_or_none(item.get("year")),
+        "media_type": "series",
+        "available": True,
+    }
+    _copy_if_not_none(result, "genres", _clean_string_list(item.get("genres")))
+    _copy_if_not_none(result, "seasons", _season_count(item))
+    _copy_if_not_none(result, "status", _clean_text(item.get("status")))
+    _copy_if_not_none(result, "overview", _clean_text(item.get("overview")))
+    _copy_if_not_none(result, "imdb_id", _clean_text(item.get("imdbId")))
+    _copy_if_not_none(result, "tmdb_id", _positive_int_or_none(item.get("tmdbId")))
+    _copy_if_not_none(result, "tvdb_id", _positive_int_or_none(item.get("tvdbId")))
+    _copy_if_not_none(result, "poster_url", _poster_url(item.get("images")))
+    _copy_if_not_none(result, "language", _language_name(item))
+    return result
+
+
+def _normalize_media_type(media_type: str) -> str:
+    if not isinstance(media_type, str):
+        raise ValueError("media_type must be movie, series, or any")
+    normalized = media_type.strip().lower()
+    if normalized not in {"movie", "series", "any"}:
+        raise ValueError("media_type must be movie, series, or any")
+    return normalized
+
+
+def _library_item_matches_filters(
+    item: Mapping[str, Any],
+    genre: str | None,
+    query: str | None,
+    year_min: int | None,
+    year_max: int | None,
+    runtime_max: int | None,
+    language: str | None,
+) -> bool:
+    if genre and not _genre_matches(item, genre):
+        return False
+    if query and not _library_query_matches(item, query):
+        return False
+    year = _positive_int_or_none(item.get("year"))
+    if year_min is not None and (year is None or year < year_min):
+        return False
+    if year_max is not None and (year is None or year > year_max):
+        return False
+    runtime = _positive_int_or_none(item.get("runtime_minutes"))
+    if runtime_max is not None and item.get("media_type") == "movie":
+        if runtime is None or runtime > runtime_max:
+            return False
+    if language and not _language_matches(item, language):
+        return False
+    return True
+
+
+def _genre_matches(item: Mapping[str, Any], genre: str) -> bool:
+    genre_key = _normalized_lookup_key(genre)
+    genres = item.get("genres")
+    return isinstance(genres, list) and any(
+        genre_key == _normalized_lookup_key(candidate) for candidate in genres
+    )
+
+
+def _library_query_matches(item: Mapping[str, Any], query: str) -> bool:
+    query_key = _normalized_lookup_key(query)
+    if not query_key:
+        return True
+    haystack = " ".join(
+        value
+        for value in (
+            _clean_text(item.get("title")),
+            _clean_text(item.get("overview")),
+            " ".join(item.get("genres", [])) if isinstance(item.get("genres"), list) else "",
+        )
+        if value
+    )
+    return query_key in _normalized_lookup_key(haystack)
+
+
+def _language_matches(item: Mapping[str, Any], language: str) -> bool:
+    item_language = item.get("language")
+    return isinstance(item_language, str) and _normalized_lookup_key(language) in (
+        _normalized_lookup_key(item_language)
+    )
+
+
+def _recommendation_score(
+    item: Mapping[str, Any], prompt: str
+) -> tuple[int, str]:
+    prompt_tokens = _keyword_tokens(prompt)
+    genres = item.get("genres") if isinstance(item.get("genres"), list) else []
+    genre_matches = [
+        genre for genre in genres if _normalized_lookup_key(genre) in prompt_tokens
+    ]
+    text_tokens = _library_item_tokens(item)
+    keyword_matches = sorted(prompt_tokens & text_tokens)
+
+    score = len(genre_matches) * 5 + len(keyword_matches)
+    reasons: list[str] = []
+    if genre_matches:
+        reasons.append("matches " + ", ".join(genre_matches))
+    if keyword_matches:
+        reasons.append("matches keywords: " + ", ".join(keyword_matches[:3]))
+
+    runtime = _positive_int_or_none(item.get("runtime_minutes"))
+    if runtime is not None and prompt_tokens & {"short", "quick"} and runtime <= 100:
+        score += 2
+        reasons.append("short runtime")
+    if runtime is not None and prompt_tokens & {"long", "epic"} and runtime >= 150:
+        score += 2
+        reasons.append("long runtime")
+
+    return score, "; ".join(reasons) if reasons else "Matches your library prompt."
+
+
+def _similarity_score(
+    item: Mapping[str, Any], source: Mapping[str, Any]
+) -> tuple[int, str]:
+    item_genres = set(item.get("genres", [])) if isinstance(item.get("genres"), list) else set()
+    source_genres = (
+        set(source.get("genres", [])) if isinstance(source.get("genres"), list) else set()
+    )
+    genre_overlap = sorted(item_genres & source_genres)
+    keyword_overlap = sorted(_library_item_tokens(item) & _library_item_tokens(source))
+
+    score = len(genre_overlap) * 5 + len(keyword_overlap)
+    reasons: list[str] = []
+    if genre_overlap:
+        reasons.append("shares " + ", ".join(genre_overlap))
+    if keyword_overlap:
+        reasons.append("shares keywords: " + ", ".join(keyword_overlap[:3]))
+    return score, "; ".join(reasons) if reasons else "Similar library metadata."
+
+
+def _find_library_source_item(
+    items: list[dict[str, Any]], title: str
+) -> dict[str, Any] | None:
+    query_title, query_year = _split_query_year(title)
+    query_key = _normalized_lookup_key(query_title)
+    return next(
+        (
+            item
+            for item in items
+            if _normalized_lookup_key(item.get("title")) == query_key
+            and (
+                query_year is None
+                or _positive_int_or_none(item.get("year")) in {None, query_year}
+            )
+        ),
+        None,
+    )
+
+
+def _library_item_tokens(item: Mapping[str, Any]) -> set[str]:
+    fields = [
+        _clean_text(item.get("title")) or "",
+        _clean_text(item.get("overview")) or "",
+    ]
+    genres = item.get("genres")
+    if isinstance(genres, list):
+        fields.extend(genre for genre in genres if isinstance(genre, str))
+    return _keyword_tokens(" ".join(fields))
+
+
+def _keyword_tokens(value: str) -> set[str]:
+    stopwords = {
+        "and",
+        "for",
+        "the",
+        "with",
+        "that",
+        "this",
+        "movie",
+        "show",
+        "series",
+        "watch",
+        "something",
+    }
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", value.lower())
+        if len(token) > 2 and token not in stopwords
+    }
+
+
+def _clean_string_list(value: Any) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+    cleaned = [
+        item.strip()
+        for item in value
+        if isinstance(item, str) and item.strip() and "://" not in item
+    ]
+    return cleaned or None
+
+
+def _language_name(item: Mapping[str, Any]) -> str | None:
+    language = _first_present(item, ("originalLanguage", "language"))
+    if isinstance(language, dict):
+        return _clean_text(language.get("name"))
+    return _clean_text(language)
 
 
 def _normalize_requested_seasons(seasons: list[int] | None) -> list[int] | None:
@@ -1073,7 +1427,16 @@ def _poster_url(images: Any) -> str | None:
 
 
 def _is_external_url(value: Any) -> bool:
-    return isinstance(value, str) and value.startswith(("https://", "http://"))
+    if not isinstance(value, str) or not value.startswith(("https://", "http://")):
+        return False
+    hostname = urlparse(value).hostname
+    if not hostname:
+        return False
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return "." in hostname
+    return not (address.is_private or address.is_loopback or address.is_link_local)
 
 
 def _season_count(item: Mapping[str, Any]) -> int | None:

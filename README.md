@@ -86,6 +86,12 @@ mcp_servers:
 - `request_status(query: str | None = None, limit: int = 10)` checks active
   queues plus monitored missing media and returns whether requests are
   downloading, waiting for release, or waiting for a suitable release.
+- `browse_library(...)` browses available Radarr/Sonarr library items with
+  filters for media type, genre, query, year, runtime, language, and limit.
+- `recommend_from_library(prompt: str, media_type: str = "any", limit: int = 5)`
+  returns watch-now library candidates using local keyword and genre matching.
+- `similar_in_library(title: str, media_type: str = "any", limit: int = 5)`
+  returns available library items with overlapping genres and metadata.
 
 ## Development
 

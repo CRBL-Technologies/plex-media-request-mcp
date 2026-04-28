@@ -673,6 +673,214 @@ class RequestStatusTests(unittest.TestCase):
         self.assertEqual(result["items"][0]["title"], "Alien")
 
 
+class LibraryToolTests(unittest.TestCase):
+    def test_browse_library_filters_movies_by_genre(self) -> None:
+        session = FakeSession(
+            [
+                [
+                    {
+                        "title": "Heat",
+                        "year": 1995,
+                        "genres": ["Crime", "Drama"],
+                        "runtime": 170,
+                        "overview": "A detective tracks a crew of thieves.",
+                        "imdbId": "tt0113277",
+                        "tmdbId": 949,
+                        "hasFile": True,
+                        "images": [
+                            {
+                                "coverType": "poster",
+                                "remoteUrl": "https://image.tmdb.org/heat.jpg",
+                            }
+                        ],
+                    },
+                    {
+                        "title": "Galaxy Quest",
+                        "year": 1999,
+                        "genres": ["Comedy"],
+                        "runtime": 102,
+                        "hasFile": True,
+                    },
+                ]
+            ]
+        )
+        service = server.MediaRequestService(config(), session=session)
+
+        results = service.browse_library(media_type="movie", genre="Crime")
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["title"], "Heat")
+        self.assertEqual(results[0]["media_type"], "movie")
+        self.assertEqual(results[0]["runtime_minutes"], 170)
+        self.assertTrue(results[0]["available"])
+
+    def test_browse_library_filters_series_by_genre(self) -> None:
+        session = FakeSession(
+            [
+                [
+                    {
+                        "title": "The Wire",
+                        "year": 2002,
+                        "genres": ["Crime", "Drama"],
+                        "status": "ended",
+                        "overview": "Baltimore institutions and crime.",
+                        "tvdbId": 79126,
+                        "statistics": {"episodeFileCount": 60},
+                        "seasons": [{"seasonNumber": 1}, {"seasonNumber": 2}],
+                    },
+                    {
+                        "title": "Unavailable Show",
+                        "year": 2024,
+                        "genres": ["Drama"],
+                        "statistics": {"episodeFileCount": 0},
+                    },
+                ]
+            ]
+        )
+        service = server.MediaRequestService(config(), session=session)
+
+        results = service.browse_library(media_type="series", genre="Crime")
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["title"], "The Wire")
+        self.assertEqual(results[0]["media_type"], "series")
+        self.assertEqual(results[0]["seasons"], 2)
+        self.assertTrue(results[0]["available"])
+
+    def test_recommend_from_library_returns_available_movies_only(self) -> None:
+        session = FakeSession(
+            [
+                [
+                    {
+                        "title": "Dune",
+                        "year": 2021,
+                        "genres": ["Adventure", "Science Fiction"],
+                        "overview": "A desert planet and political prophecy.",
+                        "runtime": 155,
+                        "hasFile": True,
+                    },
+                    {
+                        "title": "Missing Adventure",
+                        "year": 2022,
+                        "genres": ["Adventure"],
+                        "overview": "Adventure in space.",
+                        "runtime": 100,
+                        "hasFile": False,
+                    },
+                    {
+                        "title": "Quiet Comedy",
+                        "year": 2019,
+                        "genres": ["Comedy"],
+                        "overview": "A small town comedy.",
+                        "runtime": 90,
+                        "hasFile": True,
+                    },
+                ]
+            ]
+        )
+        service = server.MediaRequestService(config(), session=session)
+
+        results = service.recommend_from_library(
+            "adventure epic desert", media_type="movie"
+        )
+
+        self.assertEqual([item["title"] for item in results], ["Dune"])
+        self.assertIn("reason", results[0])
+
+    def test_similar_in_library_excludes_source_title(self) -> None:
+        session = FakeSession(
+            [
+                [
+                    {
+                        "title": "Dune",
+                        "year": 2021,
+                        "genres": ["Adventure", "Science Fiction"],
+                        "overview": "Desert politics and prophecy.",
+                        "hasFile": True,
+                    },
+                    {
+                        "title": "Blade Runner 2049",
+                        "year": 2017,
+                        "genres": ["Science Fiction"],
+                        "overview": "A future detective story.",
+                        "hasFile": True,
+                    },
+                    {
+                        "title": "Small Comedy",
+                        "year": 2020,
+                        "genres": ["Comedy"],
+                        "overview": "A local comedy.",
+                        "hasFile": True,
+                    },
+                ]
+            ]
+        )
+        service = server.MediaRequestService(config(), session=session)
+
+        results = service.similar_in_library("Dune", media_type="movie")
+
+        titles = [item["title"] for item in results]
+        self.assertNotIn("Dune", titles)
+        self.assertIn("Blade Runner 2049", titles)
+
+    def test_browse_library_excludes_unavailable_movies(self) -> None:
+        session = FakeSession(
+            [
+                [
+                    {
+                        "title": "Available Movie",
+                        "year": 2001,
+                        "genres": ["Drama"],
+                        "hasFile": True,
+                    },
+                    {
+                        "title": "Unavailable Movie",
+                        "year": 2002,
+                        "genres": ["Drama"],
+                        "hasFile": False,
+                    },
+                ]
+            ]
+        )
+        service = server.MediaRequestService(config(), session=session)
+
+        results = service.browse_library(media_type="movie", genre="Drama")
+
+        self.assertEqual([item["title"] for item in results], ["Available Movie"])
+
+    def test_library_output_is_sanitized(self) -> None:
+        session = FakeSession(
+            [
+                [
+                    {
+                        "title": "Safe Movie",
+                        "year": 2001,
+                        "genres": ["Drama"],
+                        "hasFile": True,
+                        "rootFolderPath": "/data/media/movies",
+                        "path": "/data/media/movies/Safe Movie",
+                        "movieFile": {"path": "/downloads/Safe Movie.mkv"},
+                        "images": [
+                            {
+                                "coverType": "poster",
+                                "remoteUrl": "http://radarr:7878/MediaCover/1.jpg",
+                            }
+                        ],
+                    }
+                ]
+            ]
+        )
+        service = server.MediaRequestService(config(), session=session)
+
+        serialized = json.dumps(service.browse_library(media_type="movie"))
+
+        self.assertNotIn("/data/media", serialized)
+        self.assertNotIn("/downloads", serialized)
+        self.assertNotIn("radarr:7878", serialized)
+        self.assertNotIn("rootFolderPath", serialized)
+        self.assertNotIn("movieFile", serialized)
+
+
 class McpToolTests(unittest.TestCase):
     def test_create_server_registers_expected_tools(self) -> None:
         class FakeFastMCP:
@@ -712,6 +920,9 @@ class McpToolTests(unittest.TestCase):
                 "media_status",
                 "download_status",
                 "request_status",
+                "browse_library",
+                "recommend_from_library",
+                "similar_in_library",
             ],
         )
 

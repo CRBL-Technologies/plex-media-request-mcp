@@ -33,42 +33,103 @@ def config() -> server.ArrConfig:
     return server.ArrConfig(
         radarr_url="http://radarr:7878",
         radarr_api_key="radarr-key",
+        radarr_quality_profile_id=501,
+        radarr_quality_profile_name="Radarr Movie Profile",
+        radarr_root_folder_path="/configured/movies",
         sonarr_url="http://sonarr:8989",
         sonarr_api_key="sonarr-key",
+        sonarr_normal_quality_profile_id=601,
+        sonarr_normal_quality_profile_name="Sonarr Normal Profile",
+        sonarr_anime_quality_profile_id=602,
+        sonarr_anime_quality_profile_name="Sonarr Anime Profile",
+        sonarr_root_folder_path="/configured/tv",
     )
+
+
+def env_config(overrides: dict[str, str] | None = None) -> dict[str, str]:
+    values = {
+        server.ENV_RADARR_URL: "http://radarr:7878",
+        server.ENV_RADARR_API_KEY: "radarr-key",
+        server.ENV_RADARR_QUALITY_PROFILE_ID: "501",
+        server.ENV_RADARR_QUALITY_PROFILE_NAME: "Radarr Movie Profile",
+        server.ENV_RADARR_ROOT_FOLDER_PATH: "/configured/movies",
+        server.ENV_SONARR_URL: "http://sonarr:8989",
+        server.ENV_SONARR_API_KEY: "sonarr-key",
+        server.ENV_SONARR_NORMAL_QUALITY_PROFILE_ID: "601",
+        server.ENV_SONARR_NORMAL_QUALITY_PROFILE_NAME: "Sonarr Normal Profile",
+        server.ENV_SONARR_ANIME_QUALITY_PROFILE_ID: "602",
+        server.ENV_SONARR_ANIME_QUALITY_PROFILE_NAME: "Sonarr Anime Profile",
+        server.ENV_SONARR_ROOT_FOLDER_PATH: "/configured/tv",
+    }
+    if overrides:
+        values.update(overrides)
+    return values
 
 
 class ConfigTests(unittest.TestCase):
     def test_load_config_uses_project_scoped_env_names(self) -> None:
         loaded = server.load_config(
-            {
-                server.ENV_RADARR_URL: " http://radarr:7878/ ",
-                server.ENV_RADARR_API_KEY: " radarr-key ",
-                server.ENV_SONARR_URL: "http://sonarr:8989/",
-                server.ENV_SONARR_API_KEY: "sonarr-key",
-            }
+            env_config(
+                {
+                    server.ENV_RADARR_URL: " http://radarr:7878/ ",
+                    server.ENV_RADARR_API_KEY: " radarr-key ",
+                    server.ENV_SONARR_URL: "http://sonarr:8989/",
+                }
+            )
         )
 
         self.assertEqual(loaded.radarr_url, "http://radarr:7878")
         self.assertEqual(loaded.radarr_api_key, "radarr-key")
         self.assertEqual(loaded.sonarr_url, "http://sonarr:8989")
+        self.assertEqual(loaded.radarr_quality_profile_id, 501)
+        self.assertEqual(loaded.sonarr_anime_quality_profile_id, 602)
 
     def test_load_config_fails_clearly_for_missing_values(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, server.ENV_RADARR_API_KEY):
+        with self.assertRaisesRegex(RuntimeError, server.ENV_RADARR_URL):
             server.load_config({})
 
-    def test_load_config_defaults_arr_urls(self) -> None:
+    def test_load_config_requires_arr_urls(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, server.ENV_RADARR_URL):
+            server.load_config(
+                env_config(
+                    {
+                        server.ENV_RADARR_URL: " ",
+                        server.ENV_SONARR_URL: "",
+                    }
+                )
+            )
+
+    def test_load_config_requires_arr_api_keys(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, server.ENV_RADARR_API_KEY):
+            server.load_config(
+                env_config(
+                    {
+                        server.ENV_RADARR_API_KEY: "",
+                        server.ENV_SONARR_API_KEY: "",
+                    }
+                )
+            )
+
+    def test_load_config_normalizes_arr_urls(self) -> None:
         loaded = server.load_config(
-            {
-                server.ENV_RADARR_URL: " ",
-                server.ENV_RADARR_API_KEY: "radarr-key",
-                server.ENV_SONARR_URL: "",
-                server.ENV_SONARR_API_KEY: "sonarr-key",
-            }
+            env_config(
+                {
+                    server.ENV_RADARR_URL: " http://radarr:7878/ ",
+                    server.ENV_SONARR_URL: "http://sonarr:8989/",
+                }
+            )
         )
 
         self.assertEqual(loaded.radarr_url, "http://radarr:7878")
         self.assertEqual(loaded.sonarr_url, "http://sonarr:8989")
+
+    def test_load_config_requires_numeric_profile_ids(self) -> None:
+        with self.assertRaisesRegex(
+            RuntimeError, server.ENV_RADARR_QUALITY_PROFILE_ID
+        ):
+            server.load_config(
+                env_config({server.ENV_RADARR_QUALITY_PROFILE_ID: "not-a-number"})
+            )
 
 
 class SearchTests(unittest.TestCase):
@@ -127,7 +188,7 @@ class SearchTests(unittest.TestCase):
 
 
 class AddTests(unittest.TestCase):
-    def test_add_movie_enforces_radarr_defaults(self) -> None:
+    def test_add_movie_enforces_configured_radarr_policy(self) -> None:
         session = FakeSession(
             [
                 [],
@@ -142,8 +203,8 @@ class AddTests(unittest.TestCase):
         self.assertEqual(result["status"], "added")
         post = session.requests[-1]
         self.assertEqual(post["method"], "POST")
-        self.assertEqual(post["json"]["qualityProfileId"], 25)
-        self.assertEqual(post["json"]["rootFolderPath"], "/data/media/movies")
+        self.assertEqual(post["json"]["qualityProfileId"], 501)
+        self.assertEqual(post["json"]["rootFolderPath"], "/configured/movies")
         self.assertTrue(post["json"]["monitored"])
         self.assertEqual(post["json"]["minimumAvailability"], "announced")
 
@@ -168,10 +229,10 @@ class AddTests(unittest.TestCase):
 
         result = service.add_show(82066)
 
-        self.assertEqual(result["profileUsed"], "WEB-1080p - Original")
+        self.assertEqual(result["profileUsed"], "Sonarr Normal Profile")
         post = session.requests[-1]
-        self.assertEqual(post["json"]["qualityProfileId"], 25)
-        self.assertEqual(post["json"]["rootFolderPath"], "/data/media/tv")
+        self.assertEqual(post["json"]["qualityProfileId"], 601)
+        self.assertEqual(post["json"]["rootFolderPath"], "/configured/tv")
         self.assertTrue(post["json"]["monitored"])
         self.assertTrue(post["json"]["seasonFolder"])
 
@@ -187,8 +248,8 @@ class AddTests(unittest.TestCase):
 
         result = service.add_show(76885, anime=True)
 
-        self.assertEqual(result["profileUsed"], "Remux-1080p - Anime - Original")
-        self.assertEqual(session.requests[-1]["json"]["qualityProfileId"], 26)
+        self.assertEqual(result["profileUsed"], "Sonarr Anime Profile")
+        self.assertEqual(session.requests[-1]["json"]["qualityProfileId"], 602)
 
 
 if __name__ == "__main__":

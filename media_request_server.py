@@ -10,26 +10,39 @@ import requests
 
 ENV_RADARR_URL = "PLEX_MEDIA_REQUEST_RADARR_BASE_URL"
 ENV_RADARR_API_KEY = "PLEX_MEDIA_REQUEST_RADARR_API_KEY"
+ENV_RADARR_QUALITY_PROFILE_ID = "PLEX_MEDIA_REQUEST_RADARR_QUALITY_PROFILE_ID"
+ENV_RADARR_QUALITY_PROFILE_NAME = "PLEX_MEDIA_REQUEST_RADARR_QUALITY_PROFILE_NAME"
+ENV_RADARR_ROOT_FOLDER_PATH = "PLEX_MEDIA_REQUEST_RADARR_ROOT_FOLDER_PATH"
 ENV_SONARR_URL = "PLEX_MEDIA_REQUEST_SONARR_BASE_URL"
 ENV_SONARR_API_KEY = "PLEX_MEDIA_REQUEST_SONARR_API_KEY"
-
-DEFAULT_RADARR_URL = "http://radarr:7878"
-DEFAULT_SONARR_URL = "http://sonarr:8989"
+ENV_SONARR_NORMAL_QUALITY_PROFILE_ID = (
+    "PLEX_MEDIA_REQUEST_SONARR_NORMAL_QUALITY_PROFILE_ID"
+)
+ENV_SONARR_NORMAL_QUALITY_PROFILE_NAME = (
+    "PLEX_MEDIA_REQUEST_SONARR_NORMAL_QUALITY_PROFILE_NAME"
+)
+ENV_SONARR_ANIME_QUALITY_PROFILE_ID = (
+    "PLEX_MEDIA_REQUEST_SONARR_ANIME_QUALITY_PROFILE_ID"
+)
+ENV_SONARR_ANIME_QUALITY_PROFILE_NAME = (
+    "PLEX_MEDIA_REQUEST_SONARR_ANIME_QUALITY_PROFILE_NAME"
+)
+ENV_SONARR_ROOT_FOLDER_PATH = "PLEX_MEDIA_REQUEST_SONARR_ROOT_FOLDER_PATH"
 
 REQUIRED_ENV_VARS = (
+    ENV_RADARR_URL,
     ENV_RADARR_API_KEY,
+    ENV_RADARR_QUALITY_PROFILE_ID,
+    ENV_RADARR_QUALITY_PROFILE_NAME,
+    ENV_RADARR_ROOT_FOLDER_PATH,
+    ENV_SONARR_URL,
     ENV_SONARR_API_KEY,
+    ENV_SONARR_NORMAL_QUALITY_PROFILE_ID,
+    ENV_SONARR_NORMAL_QUALITY_PROFILE_NAME,
+    ENV_SONARR_ANIME_QUALITY_PROFILE_ID,
+    ENV_SONARR_ANIME_QUALITY_PROFILE_NAME,
+    ENV_SONARR_ROOT_FOLDER_PATH,
 )
-
-RADARR_QUALITY_PROFILE_ID = 25
-RADARR_QUALITY_PROFILE_NAME = "HD Bluray + WEB - Original"
-RADARR_ROOT_FOLDER_PATH = "/data/media/movies"
-
-SONARR_NORMAL_QUALITY_PROFILE_ID = 25
-SONARR_NORMAL_QUALITY_PROFILE_NAME = "WEB-1080p - Original"
-SONARR_ANIME_QUALITY_PROFILE_ID = 26
-SONARR_ANIME_QUALITY_PROFILE_NAME = "Remux-1080p - Anime - Original"
-SONARR_ROOT_FOLDER_PATH = "/data/media/tv"
 
 DEFAULT_TIMEOUT_SECONDS = 15
 MAX_SEARCH_RESULTS = 10
@@ -43,8 +56,16 @@ class ArrApiError(RuntimeError):
 class ArrConfig:
     radarr_url: str
     radarr_api_key: str
+    radarr_quality_profile_id: int
+    radarr_quality_profile_name: str
+    radarr_root_folder_path: str
     sonarr_url: str
     sonarr_api_key: str
+    sonarr_normal_quality_profile_id: int
+    sonarr_normal_quality_profile_name: str
+    sonarr_anime_quality_profile_id: int
+    sonarr_anime_quality_profile_name: str
+    sonarr_root_folder_path: str
 
 
 def normalize_base_url(value: str) -> str:
@@ -63,14 +84,30 @@ def load_config(env: Mapping[str, str] | None = None) -> ArrConfig:
         )
 
     return ArrConfig(
-        radarr_url=normalize_base_url(
-            values.get(ENV_RADARR_URL, "").strip() or DEFAULT_RADARR_URL
-        ),
+        radarr_url=normalize_base_url(values[ENV_RADARR_URL]),
         radarr_api_key=values[ENV_RADARR_API_KEY].strip(),
-        sonarr_url=normalize_base_url(
-            values.get(ENV_SONARR_URL, "").strip() or DEFAULT_SONARR_URL
+        radarr_quality_profile_id=_load_positive_int(
+            values[ENV_RADARR_QUALITY_PROFILE_ID], ENV_RADARR_QUALITY_PROFILE_ID
         ),
+        radarr_quality_profile_name=values[ENV_RADARR_QUALITY_PROFILE_NAME].strip(),
+        radarr_root_folder_path=values[ENV_RADARR_ROOT_FOLDER_PATH].strip(),
+        sonarr_url=normalize_base_url(values[ENV_SONARR_URL]),
         sonarr_api_key=values[ENV_SONARR_API_KEY].strip(),
+        sonarr_normal_quality_profile_id=_load_positive_int(
+            values[ENV_SONARR_NORMAL_QUALITY_PROFILE_ID],
+            ENV_SONARR_NORMAL_QUALITY_PROFILE_ID,
+        ),
+        sonarr_normal_quality_profile_name=values[
+            ENV_SONARR_NORMAL_QUALITY_PROFILE_NAME
+        ].strip(),
+        sonarr_anime_quality_profile_id=_load_positive_int(
+            values[ENV_SONARR_ANIME_QUALITY_PROFILE_ID],
+            ENV_SONARR_ANIME_QUALITY_PROFILE_ID,
+        ),
+        sonarr_anime_quality_profile_name=values[
+            ENV_SONARR_ANIME_QUALITY_PROFILE_NAME
+        ].strip(),
+        sonarr_root_folder_path=values[ENV_SONARR_ROOT_FOLDER_PATH].strip(),
     )
 
 
@@ -120,8 +157,8 @@ class MediaRequestService:
             payload.update(
                 {
                     "tmdbId": tmdb_id,
-                    "qualityProfileId": RADARR_QUALITY_PROFILE_ID,
-                    "rootFolderPath": RADARR_ROOT_FOLDER_PATH,
+                    "qualityProfileId": self.config.radarr_quality_profile_id,
+                    "rootFolderPath": self.config.radarr_root_folder_path,
                     "monitored": True,
                     "minimumAvailability": "announced",
                     "addOptions": {"searchForMovie": True},
@@ -136,7 +173,7 @@ class MediaRequestService:
                 "tmdbId": tmdb_id,
                 "message": (
                     f"{added_title or 'Movie'} was added to Radarr using "
-                    f"{RADARR_QUALITY_PROFILE_NAME}."
+                    f"{self.config.radarr_quality_profile_name}."
                 ),
             }
         except ArrApiError as exc:
@@ -160,14 +197,14 @@ class MediaRequestService:
         tvdb_id = _require_positive_int(tvdbId, "tvdbId")
         requested_title = _optional_text(title)
         profile_id = (
-            SONARR_ANIME_QUALITY_PROFILE_ID
+            self.config.sonarr_anime_quality_profile_id
             if anime
-            else SONARR_NORMAL_QUALITY_PROFILE_ID
+            else self.config.sonarr_normal_quality_profile_id
         )
         profile_name = (
-            SONARR_ANIME_QUALITY_PROFILE_NAME
+            self.config.sonarr_anime_quality_profile_name
             if anime
-            else SONARR_NORMAL_QUALITY_PROFILE_NAME
+            else self.config.sonarr_normal_quality_profile_name
         )
 
         try:
@@ -197,7 +234,7 @@ class MediaRequestService:
                 {
                     "tvdbId": tvdb_id,
                     "qualityProfileId": profile_id,
-                    "rootFolderPath": SONARR_ROOT_FOLDER_PATH,
+                    "rootFolderPath": self.config.sonarr_root_folder_path,
                     "monitored": True,
                     "seasonFolder": True,
                     "addOptions": {"searchForMissingEpisodes": True},
@@ -442,6 +479,16 @@ def _optional_text(value: str | None) -> str | None:
         return None
     value = value.strip()
     return value or None
+
+
+def _load_positive_int(value: str, name: str) -> int:
+    try:
+        parsed = int(value.strip())
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a positive integer") from exc
+    if parsed <= 0:
+        raise RuntimeError(f"{name} must be a positive integer")
+    return parsed
 
 
 def _require_positive_int(value: int, name: str) -> int:

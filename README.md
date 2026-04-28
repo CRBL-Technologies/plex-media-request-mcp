@@ -1,0 +1,79 @@
+# Plex Media Request MCP
+
+Small Python MCP stdio server for safe Plex media requests from an agent such as
+Hermes Agent over Telegram.
+
+The server exposes narrow tools for searching and adding Radarr movies and
+Sonarr series. It does not expose quality profile IDs or root folder choices as
+tool arguments.
+
+## Configuration
+
+Install dependencies:
+
+```bash
+python3 -m pip install -r requirements.txt
+```
+
+Set the required environment variables:
+
+```bash
+PLEX_MEDIA_REQUEST_RADARR_BASE_URL=replace-with-radarr-base-url
+PLEX_MEDIA_REQUEST_RADARR_API_KEY=replace-with-radarr-api-key
+PLEX_MEDIA_REQUEST_RADARR_QUALITY_PROFILE_ID=replace-with-radarr-quality-profile-id
+PLEX_MEDIA_REQUEST_RADARR_QUALITY_PROFILE_NAME=replace-with-radarr-quality-profile-name
+PLEX_MEDIA_REQUEST_RADARR_ROOT_FOLDER_PATH=replace-with-radarr-root-folder-path
+PLEX_MEDIA_REQUEST_SONARR_BASE_URL=replace-with-sonarr-base-url
+PLEX_MEDIA_REQUEST_SONARR_API_KEY=replace-with-sonarr-api-key
+PLEX_MEDIA_REQUEST_SONARR_NORMAL_QUALITY_PROFILE_ID=replace-with-sonarr-normal-quality-profile-id
+PLEX_MEDIA_REQUEST_SONARR_NORMAL_QUALITY_PROFILE_NAME=replace-with-sonarr-normal-quality-profile-name
+PLEX_MEDIA_REQUEST_SONARR_ANIME_QUALITY_PROFILE_ID=replace-with-sonarr-anime-quality-profile-id
+PLEX_MEDIA_REQUEST_SONARR_ANIME_QUALITY_PROFILE_NAME=replace-with-sonarr-anime-quality-profile-name
+PLEX_MEDIA_REQUEST_SONARR_ROOT_FOLDER_PATH=replace-with-sonarr-root-folder-path
+```
+
+Base URLs are normalized, so a trailing slash is fine. API keys are sent with
+the `X-Api-Key` header and are never returned by tools. Profile and root folder
+settings are configured by environment variables, but they are not exposed as
+tool inputs.
+
+## Hermes Example
+
+```yaml
+mcp_servers:
+  media:
+    command: python3
+    args:
+      - /opt/data/mcp/media_request_server.py
+    env:
+      PLEX_MEDIA_REQUEST_RADARR_BASE_URL: replace-with-radarr-base-url
+      PLEX_MEDIA_REQUEST_RADARR_API_KEY: replace-with-radarr-api-key
+      PLEX_MEDIA_REQUEST_RADARR_QUALITY_PROFILE_ID: replace-with-radarr-quality-profile-id
+      PLEX_MEDIA_REQUEST_RADARR_QUALITY_PROFILE_NAME: replace-with-radarr-quality-profile-name
+      PLEX_MEDIA_REQUEST_RADARR_ROOT_FOLDER_PATH: replace-with-radarr-root-folder-path
+      PLEX_MEDIA_REQUEST_SONARR_BASE_URL: replace-with-sonarr-base-url
+      PLEX_MEDIA_REQUEST_SONARR_API_KEY: replace-with-sonarr-api-key
+      PLEX_MEDIA_REQUEST_SONARR_NORMAL_QUALITY_PROFILE_ID: replace-with-sonarr-normal-quality-profile-id
+      PLEX_MEDIA_REQUEST_SONARR_NORMAL_QUALITY_PROFILE_NAME: replace-with-sonarr-normal-quality-profile-name
+      PLEX_MEDIA_REQUEST_SONARR_ANIME_QUALITY_PROFILE_ID: replace-with-sonarr-anime-quality-profile-id
+      PLEX_MEDIA_REQUEST_SONARR_ANIME_QUALITY_PROFILE_NAME: replace-with-sonarr-anime-quality-profile-name
+      PLEX_MEDIA_REQUEST_SONARR_ROOT_FOLDER_PATH: replace-with-sonarr-root-folder-path
+```
+
+## Tools
+
+- `search_movie(query: str)` returns concise Radarr movie matches.
+- `add_movie(tmdbId: int, title: str | None = None)` adds a movie using the
+  approved Radarr policy.
+- `search_show(query: str)` returns concise Sonarr series matches.
+- `add_show(tvdbId: int, title: str | None = None, anime: bool = False)` adds a
+  series using the approved Sonarr policy.
+- `media_status()` checks basic Radarr and Sonarr connectivity.
+
+## Development
+
+Run tests with:
+
+```bash
+python3 -m unittest -v
+```

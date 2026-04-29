@@ -1,0 +1,850 @@
+openapi: 3.1.0
+info:
+  title: Plex Media Request MCP Tools
+  version: 1.0.0
+  description: >
+    OpenAPI-style reference for the public MCP tools exposed by
+    media_request_server.py. The paths below model MCP tool invocations; they
+    are not HTTP routes served by this project.
+servers: []
+tags:
+  - name: MCP tools
+    description: Public tools registered by create_server().
+paths:
+  /tools/search_media:
+    post:
+      tags: [MCP tools]
+      operationId: search_media
+      summary: Search movies and series with factual availability.
+      description: >
+        Searches Radarr and/or Sonarr and reports whether matching media exists
+        in the configured library. Movie availability requires a movie file.
+        Series availability requires episode files and is never inferred from
+        series metadata alone.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SearchMediaRequest"
+            examples:
+              movie:
+                value:
+                  query: Dune
+                  media_type: movie
+                  limit: 5
+              seriesSeason:
+                value:
+                  query: My Brilliant Friend
+                  media_type: series
+                  season: 1
+      responses:
+        "200":
+          description: Search results with sanitized public metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchMediaResponse"
+              examples:
+                mixed:
+                  value:
+                    ok: true
+                    items:
+                      - media_type: movie
+                        title: Dune
+                        year: 2021
+                        tmdbId: 438631
+                        imdbId: tt1160419
+                        exists: true
+                        available: true
+                        runtimeMinutes: 155
+                      - media_type: series
+                        title: My Brilliant Friend
+                        year: 2018
+                        tvdbId: 344626
+                        exists: true
+                        available: false
+                        seasons: [1, 2, 3, 4]
+                        availability:
+                          availableEpisodes: 0
+                          missingEpisodes: 10
+                          totalEpisodes: 10
+                          seasons:
+                            - season: 4
+                              available: false
+                              availableEpisodes: 0
+                              missingEpisodes: 10
+                              totalEpisodes: 10
+
+  /tools/request_movie:
+    post:
+      tags: [MCP tools]
+      operationId: request_movie
+      summary: Request a movie by TMDB ID.
+      description: >
+        Adds a movie using the configured Radarr policy. Quality profile, root
+        folder, tags, and search behavior are controlled by server
+        configuration and are not tool inputs.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RequestMovieRequest"
+            examples:
+              request:
+                value:
+                  tmdbId: 438631
+                  title: Dune
+      responses:
+        "200":
+          description: Add result from Radarr, normalized by the MCP wrapper.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RequestMovieResponse"
+              examples:
+                added:
+                  value:
+                    status: added
+                    title: Dune
+                    tmdbId: 438631
+                    message: Dune was added to Radarr using Movie Profile.
+                alreadyExists:
+                  value:
+                    status: already_exists
+                    title: Dune
+                    tmdbId: 438631
+                    message: Dune is already in Radarr.
+
+  /tools/request_series:
+    post:
+      tags: [MCP tools]
+      operationId: request_series
+      summary: Request explicit TV seasons by TVDB ID.
+      description: >
+        Adds a series using the configured Sonarr policy and monitors only the
+        explicit season numbers supplied. The seasons list is required and must
+        be non-empty. Use 0 only when intentionally requesting specials.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RequestSeriesRequest"
+            examples:
+              singleSeason:
+                value:
+                  tvdbId: 344626
+                  title: My Brilliant Friend
+                  seasons: [1]
+                  anime: false
+              wholeShowExplicit:
+                value:
+                  tvdbId: 344626
+                  title: My Brilliant Friend
+                  seasons: [1, 2, 3, 4]
+      responses:
+        "200":
+          description: Add result or existing-series availability summary.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RequestSeriesResponse"
+              examples:
+                added:
+                  value:
+                    status: added
+                    title: My Brilliant Friend
+                    tvdbId: 344626
+                    profileUsed: Series Profile
+                    monitoredSeasons: [1]
+                    message: My Brilliant Friend was added with only season 1 monitored.
+                alreadyExists:
+                  value:
+                    status: already_exists
+                    title: My Brilliant Friend
+                    tvdbId: 344626
+                    profileUsed: Series Profile
+                    monitoredSeasons: [4]
+                    available: false
+                    availability:
+                      availableEpisodes: 0
+                      missingEpisodes: 10
+                      totalEpisodes: 10
+                      seasons:
+                        - season: 4
+                          available: false
+                          availableEpisodes: 0
+                          missingEpisodes: 10
+                          totalEpisodes: 10
+                invalidSeason:
+                  value:
+                    status: error
+                    title: Short Show
+                    tvdbId: 123
+                    profileUsed: Series Profile
+                    monitoredSeasons: [3]
+                    message: "Requested seasons are not available: 3. Available seasons: 0, 1."
+
+  /tools/request_status:
+    post:
+      tags: [MCP tools]
+      operationId: request_status
+      summary: Check active and waiting requests.
+      description: >
+        Checks Radarr and Sonarr queues plus monitored missing media. Active
+        downloads include ETA only when the queue item is actively downloading.
+        Waiting items return eta: null. A matching available movie may return a
+        direct available status object instead of a request list.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RequestStatusRequest"
+            examples:
+              all:
+                value:
+                  limit: 10
+              filtered:
+                value:
+                  query: Cloud Atlas 2012
+      responses:
+        "200":
+          description: Request status summary or direct available movie match.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/RequestStatusResponse"
+                  - $ref: "#/components/schemas/AvailableMovieStatus"
+              examples:
+                downloading:
+                  value:
+                    active: true
+                    items:
+                      - media_type: movie
+                        title: Dune
+                        status: downloading
+                        eta: "00:10:00"
+                        progress_percent: 50.0
+                        time_left: "00:10:00"
+                        tracked_download_state: downloading
+                waiting:
+                  value:
+                    active: false
+                    items:
+                      - media_type: series
+                        title: Future Show
+                        status: waiting_for_release
+                        eta: null
+                        message: This is being watched, but it has not been released yet. No ETA is available until a download starts.
+                availableMovie:
+                  value:
+                    found: true
+                    media_type: movie
+                    title: Cloud Atlas
+                    year: 2012
+                    state: available
+                    available: true
+                    message: Cloud Atlas is already in the library.
+
+  /tools/download_status:
+    post:
+      tags: [MCP tools]
+      operationId: download_status
+      summary: Check active Radarr and Sonarr downloads.
+      description: >
+        Read-only queue summary. It returns sanitized queue fields only and
+        omits backend URLs, filesystem paths, raw queue objects, indexer
+        details, and control actions.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        "200":
+          description: Queue summary.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadStatusResponse"
+              examples:
+                empty:
+                  value:
+                    active: false
+                    items: []
+                    message: No active downloads found.
+                active:
+                  value:
+                    active: true
+                    items:
+                      - media_type: series
+                        title: Fringe
+                        status: completed
+                        progress_percent: 100.0
+                        time_left: "00:00:00"
+                        tracked_download_status: warning
+                        tracked_download_state: importPending
+                        download_client: qBittorrent
+                        note: Download is complete and waiting to be imported.
+
+  /tools/browse_library:
+    post:
+      tags: [MCP tools]
+      operationId: browse_library
+      summary: Browse available library items.
+      description: >
+        Returns available-to-watch Radarr/Sonarr library items only. Movies
+        require a movie file. Series require episode files. This tool performs
+        filtering only; ranking and recommendation text should be handled by
+        the calling agent.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BrowseLibraryRequest"
+            examples:
+              crimeMovies:
+                value:
+                  media_type: movie
+                  genre: Crime
+                  runtime_max: 180
+                  limit: 10
+              seriesSearch:
+                value:
+                  media_type: series
+                  query: detective
+                  language: English
+      responses:
+        "200":
+          description: List of sanitized available library items.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  oneOf:
+                    - $ref: "#/components/schemas/LibraryMovie"
+                    - $ref: "#/components/schemas/LibrarySeries"
+              examples:
+                results:
+                  value:
+                    - title: Heat
+                      year: 1995
+                      media_type: movie
+                      available: true
+                      genres: [Crime, Drama]
+                      runtimeMinutes: 170
+                      overview: A detective tracks a crew of thieves.
+                      imdbId: tt0113277
+                      tmdbId: 949
+                      posterUrl: https://image.tmdb.org/example-poster.jpg
+                    - title: The Wire
+                      year: 2002
+                      media_type: series
+                      available: true
+                      genres: [Crime, Drama]
+                      seasons: [1, 2]
+                      status: ended
+                      tvdbId: 79126
+                      availability:
+                        availableEpisodes: 25
+                        missingEpisodes: 0
+                        totalEpisodes: 25
+                        seasons:
+                          - season: 1
+                            available: true
+                            availableEpisodes: 13
+                            missingEpisodes: 0
+                            totalEpisodes: 13
+
+  /tools/media_status:
+    post:
+      tags: [MCP tools]
+      operationId: media_status
+      summary: Check Radarr and Sonarr connectivity.
+      description: >
+        Returns basic service health for the configured Radarr and Sonarr
+        endpoints. It does not expose URLs or API keys.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        "200":
+          description: Service connectivity status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MediaStatusResponse"
+              examples:
+                connected:
+                  value:
+                    radarr:
+                      ok: true
+                      version: 5.0.0
+                      message: connected
+                    sonarr:
+                      ok: true
+                      version: 4.0.0
+                      message: connected
+
+components:
+  schemas:
+    MediaType:
+      type: string
+      enum: [movie, series, any]
+
+    SearchMediaRequest:
+      type: object
+      required: [query]
+      additionalProperties: false
+      properties:
+        query:
+          type: string
+          minLength: 1
+        media_type:
+          $ref: "#/components/schemas/MediaType"
+          default: any
+        season:
+          type: integer
+          minimum: 0
+          description: Optional season filter for series results. 0 means specials.
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 10
+          default: 5
+
+    SearchMediaResponse:
+      type: object
+      required: [ok, items]
+      additionalProperties: false
+      properties:
+        ok:
+          type: boolean
+        items:
+          type: array
+          items:
+            oneOf:
+              - $ref: "#/components/schemas/SearchMovieItem"
+              - $ref: "#/components/schemas/SearchSeriesItem"
+
+    SearchMovieItem:
+      type: object
+      required: [media_type, title, year, tmdbId, exists, available]
+      additionalProperties: false
+      properties:
+        media_type:
+          const: movie
+        title:
+          type: [string, "null"]
+        year:
+          type: [integer, "null"]
+        tmdbId:
+          type: [integer, "null"]
+        imdbId:
+          type: string
+        exists:
+          type: boolean
+        available:
+          type: boolean
+        runtimeMinutes:
+          type: integer
+        overview:
+          type: string
+        posterUrl:
+          type: string
+          format: uri
+
+    SearchSeriesItem:
+      type: object
+      required: [media_type, title, year, tvdbId, exists, available, seasons, availability]
+      additionalProperties: false
+      properties:
+        media_type:
+          const: series
+        title:
+          type: [string, "null"]
+        year:
+          type: [integer, "null"]
+        tvdbId:
+          type: [integer, "null"]
+        imdbId:
+          type: string
+        tmdbId:
+          type: integer
+        exists:
+          type: boolean
+        available:
+          type: boolean
+        seasons:
+          type: array
+          items:
+            type: integer
+            minimum: 0
+        status:
+          type: string
+        overview:
+          type: string
+        posterUrl:
+          type: string
+          format: uri
+        availability:
+          $ref: "#/components/schemas/SeriesAvailability"
+
+    RequestMovieRequest:
+      type: object
+      required: [tmdbId]
+      additionalProperties: false
+      properties:
+        tmdbId:
+          type: integer
+          minimum: 1
+        title:
+          type: [string, "null"]
+
+    RequestMovieResponse:
+      type: object
+      required: [status, tmdbId]
+      additionalProperties: true
+      properties:
+        status:
+          type: string
+          enum: [added, already_exists, error]
+        title:
+          type: [string, "null"]
+        tmdbId:
+          type: integer
+        message:
+          type: string
+
+    RequestSeriesRequest:
+      type: object
+      required: [tvdbId, seasons]
+      additionalProperties: false
+      properties:
+        tvdbId:
+          type: integer
+          minimum: 1
+        title:
+          type: [string, "null"]
+        seasons:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: integer
+            minimum: 0
+          description: Explicit season numbers. Use 0 only for specials.
+        anime:
+          type: boolean
+          default: false
+
+    RequestSeriesResponse:
+      type: object
+      required: [status, tvdbId, profileUsed]
+      additionalProperties: true
+      properties:
+        status:
+          type: string
+          enum: [added, already_exists, error]
+        title:
+          type: [string, "null"]
+        tvdbId:
+          type: integer
+        profileUsed:
+          type: string
+        monitoredSeasons:
+          type: array
+          items:
+            type: integer
+            minimum: 0
+        available:
+          type: boolean
+        availability:
+          $ref: "#/components/schemas/SeriesAvailability"
+        message:
+          type: string
+
+    RequestStatusRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        query:
+          type: [string, "null"]
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 10
+          default: 10
+
+    RequestStatusResponse:
+      type: object
+      required: [active, items]
+      additionalProperties: false
+      properties:
+        active:
+          type: boolean
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/RequestStatusItem"
+        message:
+          type: string
+
+    RequestStatusItem:
+      type: object
+      required: [media_type, status, eta]
+      additionalProperties: false
+      properties:
+        media_type:
+          type: string
+          enum: [movie, series]
+        title:
+          type: string
+        status:
+          type: string
+          examples: [downloading, importPending, waiting_for_release, waiting_for_suitable_release]
+        eta:
+          type: [string, "null"]
+        progress_percent:
+          type: number
+        time_left:
+          type: string
+        tracked_download_status:
+          type: string
+        tracked_download_state:
+          type: string
+        download_client:
+          type: string
+        note:
+          type: string
+        message:
+          type: string
+
+    AvailableMovieStatus:
+      type: object
+      required: [found, media_type, state, available]
+      additionalProperties: false
+      properties:
+        found:
+          type: boolean
+        media_type:
+          const: movie
+        title:
+          type: string
+        year:
+          type: integer
+        state:
+          const: available
+        available:
+          const: true
+        message:
+          type: string
+
+    DownloadStatusResponse:
+      type: object
+      required: [active, items]
+      additionalProperties: false
+      properties:
+        active:
+          type: boolean
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/QueueItem"
+        message:
+          type: string
+
+    QueueItem:
+      type: object
+      required: [media_type]
+      additionalProperties: false
+      properties:
+        media_type:
+          type: string
+          enum: [movie, series]
+        title:
+          type: string
+        status:
+          type: string
+        progress_percent:
+          type: number
+        time_left:
+          type: string
+        tracked_download_status:
+          type: string
+        tracked_download_state:
+          type: string
+        download_client:
+          type: string
+        note:
+          type: string
+
+    BrowseLibraryRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        media_type:
+          $ref: "#/components/schemas/MediaType"
+          default: any
+        genre:
+          type: [string, "null"]
+        query:
+          type: [string, "null"]
+        year_min:
+          type: [integer, "null"]
+        year_max:
+          type: [integer, "null"]
+        runtime_max:
+          type: [integer, "null"]
+          description: Movie runtime filter in minutes.
+        language:
+          type: [string, "null"]
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 10
+          default: 10
+
+    LibraryMovie:
+      type: object
+      required: [title, year, media_type, available]
+      additionalProperties: false
+      properties:
+        title:
+          type: [string, "null"]
+        year:
+          type: [integer, "null"]
+        media_type:
+          const: movie
+        available:
+          const: true
+        genres:
+          type: array
+          items:
+            type: string
+        runtimeMinutes:
+          type: integer
+        overview:
+          type: string
+        imdbId:
+          type: string
+        tmdbId:
+          type: integer
+        posterUrl:
+          type: string
+          format: uri
+        language:
+          type: string
+
+    LibrarySeries:
+      type: object
+      required: [title, year, media_type, available, availability]
+      additionalProperties: false
+      properties:
+        title:
+          type: [string, "null"]
+        year:
+          type: [integer, "null"]
+        media_type:
+          const: series
+        available:
+          const: true
+        genres:
+          type: array
+          items:
+            type: string
+        seasons:
+          type: array
+          items:
+            type: integer
+            minimum: 0
+        status:
+          type: string
+        overview:
+          type: string
+        imdbId:
+          type: string
+        tmdbId:
+          type: integer
+        tvdbId:
+          type: integer
+        posterUrl:
+          type: string
+          format: uri
+        language:
+          type: string
+        availability:
+          $ref: "#/components/schemas/SeriesAvailability"
+
+    SeriesAvailability:
+      type: object
+      required: [availableEpisodes, missingEpisodes, totalEpisodes, seasons]
+      additionalProperties: false
+      properties:
+        availableEpisodes:
+          type: integer
+          minimum: 0
+        missingEpisodes:
+          type: integer
+          minimum: 0
+        totalEpisodes:
+          type: integer
+          minimum: 0
+        seasons:
+          type: array
+          items:
+            $ref: "#/components/schemas/SeasonAvailability"
+
+    SeasonAvailability:
+      type: object
+      required: [season, available, availableEpisodes, missingEpisodes, totalEpisodes]
+      additionalProperties: false
+      properties:
+        season:
+          type: integer
+          minimum: 0
+        available:
+          type: boolean
+        availableEpisodes:
+          type: integer
+          minimum: 0
+        missingEpisodes:
+          type: integer
+          minimum: 0
+        totalEpisodes:
+          type: integer
+          minimum: 0
+
+    MediaStatusResponse:
+      type: object
+      required: [radarr, sonarr]
+      additionalProperties: false
+      properties:
+        radarr:
+          $ref: "#/components/schemas/ServiceStatus"
+        sonarr:
+          $ref: "#/components/schemas/ServiceStatus"
+
+    ServiceStatus:
+      type: object
+      required: [ok, version, message]
+      additionalProperties: false
+      properties:
+        ok:
+          type: boolean
+        version:
+          type: [string, "null"]
+        message:
+          type: string

@@ -93,6 +93,12 @@ The older service methods `search_movie`, `search_show`, `add_movie`,
 Python service for compatibility, but they are not registered as public MCP
 tools.
 
+## Tool Specification
+
+An OpenAPI-style reference for the public MCP tools is available at
+[docs/openapi.yaml](docs/openapi.yaml). It documents request schemas, response
+schemas, examples, and the sanitized fields returned by the current tools.
+
 ## Development
 
 Run tests with:

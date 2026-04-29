@@ -155,7 +155,7 @@ class MediaRequestService:
             )
             movies = _ensure_list(self._get_radarr("/api/v3/movie"))
             items.extend(
-                _shape_search_movie_item(item, _movie_library_match(item, movies))
+                _shape_movie_search_item(item, _movie_library_match(item, movies))
                 for item in movie_results
             )
 
@@ -175,20 +175,9 @@ class MediaRequestService:
 
         return {"ok": True, "items": items[:result_limit]}
 
-    def search_movie(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
-        query = _require_text(query, "query")
-        result_limit = _normalize_limit(limit)
-        results = self._get_radarr("/api/v3/movie/lookup", params={"term": query})
-        return [_shape_movie_result(item) for item in _ensure_list(results)][
-            :result_limit
-        ]
-
     def request_movie(
         self, tmdbId: int, title: str | None = None
     ) -> dict[str, Any]:
-        return self.add_movie(tmdbId=tmdbId, title=title)
-
-    def add_movie(self, tmdbId: int, title: str | None = None) -> dict[str, Any]:
         tmdb_id = _require_positive_int(tmdbId, "tmdbId")
         requested_title = _optional_text(title)
 
@@ -244,14 +233,6 @@ class MediaRequestService:
                 "message": str(exc),
             }
 
-    def search_show(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
-        query = _require_text(query, "query")
-        result_limit = _normalize_limit(limit)
-        results = self._get_sonarr("/api/v3/series/lookup", params={"term": query})
-        return [_shape_show_result(item) for item in _ensure_list(results)][
-            :result_limit
-        ]
-
     def request_series(
         self,
         tvdbId: int,
@@ -302,7 +283,7 @@ class MediaRequestService:
                     "availability": availability,
                 }
 
-            return self.add_show(
+            return self._add_series(
                 tvdbId=tvdb_id,
                 title=requested_title,
                 anime=anime,
@@ -318,16 +299,16 @@ class MediaRequestService:
                 "message": str(exc),
             }
 
-    def add_show(
+    def _add_series(
         self,
         tvdbId: int,
-        title: str | None = None,
-        anime: bool = False,
-        seasons: list[int] | None = None,
+        title: str | None,
+        anime: bool,
+        seasons: list[int],
     ) -> dict[str, Any]:
         tvdb_id = _require_positive_int(tvdbId, "tvdbId")
         requested_title = _optional_text(title)
-        requested_seasons = _normalize_requested_seasons(seasons)
+        requested_seasons = _require_requested_seasons(seasons)
         profile_id = (
             self.config.sonarr_anime_quality_profile_id
             if anime
@@ -340,29 +321,6 @@ class MediaRequestService:
         )
 
         try:
-            existing = self._find_existing_show(tvdb_id)
-            if existing is not None:
-                existing_title = existing.get("title") or requested_title
-                if requested_seasons is not None:
-                    return {
-                        "status": "already_exists",
-                        "title": existing_title,
-                        "tvdbId": tvdb_id,
-                        "profileUsed": profile_name,
-                        "monitoredSeasons": requested_seasons,
-                        "message": (
-                            f"{existing_title or 'Series'} is already in Sonarr; "
-                            "season monitoring was not changed."
-                        ),
-                    }
-                return {
-                    "status": "already_exists",
-                    "title": existing_title,
-                    "tvdbId": tvdb_id,
-                    "profileUsed": profile_name,
-                    "message": f"{existing_title or 'Series'} is already in Sonarr.",
-                }
-
             series = self._lookup_show_by_tvdb(tvdb_id)
             if series is None:
                 return {
@@ -374,18 +332,17 @@ class MediaRequestService:
                 }
 
             payload = dict(series)
-            if requested_seasons is not None:
-                season_update = _with_season_monitoring(series, requested_seasons)
-                if "error" in season_update:
-                    return {
-                        "status": "error",
-                        "title": series.get("title") or requested_title,
-                        "tvdbId": tvdb_id,
-                        "profileUsed": profile_name,
-                        "monitoredSeasons": requested_seasons,
-                        "message": season_update["error"],
-                    }
-                payload["seasons"] = season_update["seasons"]
+            season_update = _with_season_monitoring(series, requested_seasons)
+            if "error" in season_update:
+                return {
+                    "status": "error",
+                    "title": series.get("title") or requested_title,
+                    "tvdbId": tvdb_id,
+                    "profileUsed": profile_name,
+                    "monitoredSeasons": requested_seasons,
+                    "message": season_update["error"],
+                }
+            payload["seasons"] = season_update["seasons"]
 
             payload.update(
                 {
@@ -401,24 +358,16 @@ class MediaRequestService:
 
             response = self._post_sonarr("/api/v3/series", json=payload)
             added_title = response.get("title") or series.get("title") or requested_title
-            if requested_seasons is not None:
-                return {
-                    "status": "added",
-                    "title": added_title,
-                    "tvdbId": tvdb_id,
-                    "profileUsed": profile_name,
-                    "monitoredSeasons": requested_seasons,
-                    "message": (
-                        f"{added_title or 'Series'} was added with only "
-                        f"{_format_season_list(requested_seasons)} monitored."
-                    ),
-                }
             return {
                 "status": "added",
                 "title": added_title,
                 "tvdbId": tvdb_id,
                 "profileUsed": profile_name,
-                "message": f"{added_title or 'Series'} was added to Sonarr.",
+                "monitoredSeasons": requested_seasons,
+                "message": (
+                    f"{added_title or 'Series'} was added with only "
+                    f"{_format_season_list(requested_seasons)} monitored."
+                ),
             }
         except ArrApiError as exc:
             return {
@@ -542,53 +491,6 @@ class MediaRequestService:
                 language=language,
             )
         ][:result_limit]
-
-    def recommend_from_library(
-        self, prompt: str, media_type: str = "any", limit: int = 5
-    ) -> list[dict[str, Any]]:
-        prompt = _require_text(prompt, "prompt")
-        requested_type = _normalize_media_type(media_type)
-        result_limit = _normalize_limit(limit)
-        scored = [
-            (score, reason, item)
-            for item in self._library_items(requested_type)
-            for score, reason in [_recommendation_score(item, prompt)]
-            if score > 0
-        ]
-        scored.sort(
-            key=lambda scored_item: (-scored_item[0], scored_item[2].get("title") or "")
-        )
-        return [
-            {**item, "reason": reason}
-            for _, reason, item in scored[:result_limit]
-        ]
-
-    def similar_in_library(
-        self, title: str, media_type: str = "any", limit: int = 5
-    ) -> list[dict[str, Any]]:
-        title = _require_text(title, "title")
-        requested_type = _normalize_media_type(media_type)
-        result_limit = _normalize_limit(limit)
-        items = self._library_items(requested_type)
-        source = _find_library_source_item(items, title)
-        if source is None:
-            return []
-
-        scored = [
-            (score, reason, item)
-            for item in items
-            if _normalized_lookup_key(item.get("title"))
-            != _normalized_lookup_key(source.get("title"))
-            for score, reason in [_similarity_score(item, source)]
-            if score > 0
-        ]
-        scored.sort(
-            key=lambda scored_item: (-scored_item[0], scored_item[2].get("title") or "")
-        )
-        return [
-            {**item, "reason": reason}
-            for _, reason, item in scored[:result_limit]
-        ]
 
     def _library_items(self, media_type: str) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
@@ -809,38 +711,7 @@ def main() -> None:
     server.run()
 
 
-def _shape_movie_result(item: Mapping[str, Any]) -> dict[str, Any]:
-    result = {
-        "title": item.get("title"),
-        "year": item.get("year"),
-        "tmdb_id": item.get("tmdbId"),
-    }
-    _copy_optional_renamed(item, result, "imdbId", "imdb_id")
-    _copy_optional_renamed(item, result, "runtime", "runtime_minutes")
-    _copy_optional_renamed(item, result, "overview", "overview")
-    _copy_if_not_none(result, "poster_url", _poster_url(item.get("images")))
-    _copy_existence(item, result)
-    return result
-
-
-def _shape_show_result(item: Mapping[str, Any]) -> dict[str, Any]:
-    result = {
-        "title": item.get("title"),
-        "year": item.get("year"),
-        "tvdb_id": item.get("tvdbId"),
-    }
-    _copy_optional_renamed(item, result, "imdbId", "imdb_id")
-    _copy_optional_renamed(item, result, "tmdbId", "tmdb_id")
-    _copy_if_not_none(result, "season_count", _season_count(item))
-    _copy_optional_renamed(item, result, "status", "status")
-    _copy_optional_renamed(item, result, "overview", "overview")
-    _copy_if_not_none(result, "poster_url", _poster_url(item.get("images")))
-    _copy_if_not_none(result, "is_anime", _is_anime(item))
-    _copy_existence(item, result)
-    return result
-
-
-def _shape_search_movie_item(
+def _shape_movie_search_item(
     item: Mapping[str, Any], library_match: Mapping[str, Any] | None
 ) -> dict[str, Any]:
     result = {
@@ -1185,105 +1056,6 @@ def _language_matches(item: Mapping[str, Any], language: str) -> bool:
     return isinstance(item_language, str) and _normalized_lookup_key(language) in (
         _normalized_lookup_key(item_language)
     )
-
-
-def _recommendation_score(
-    item: Mapping[str, Any], prompt: str
-) -> tuple[int, str]:
-    prompt_tokens = _keyword_tokens(prompt)
-    genres = item.get("genres") if isinstance(item.get("genres"), list) else []
-    genre_matches = [
-        genre for genre in genres if _normalized_lookup_key(genre) in prompt_tokens
-    ]
-    text_tokens = _library_item_tokens(item)
-    keyword_matches = sorted(prompt_tokens & text_tokens)
-
-    score = len(genre_matches) * 5 + len(keyword_matches)
-    reasons: list[str] = []
-    if genre_matches:
-        reasons.append("matches " + ", ".join(genre_matches))
-    if keyword_matches:
-        reasons.append("matches keywords: " + ", ".join(keyword_matches[:3]))
-
-    runtime = _positive_int_or_none(item.get("runtimeMinutes"))
-    if runtime is not None and prompt_tokens & {"short", "quick"} and runtime <= 100:
-        score += 2
-        reasons.append("short runtime")
-    if runtime is not None and prompt_tokens & {"long", "epic"} and runtime >= 150:
-        score += 2
-        reasons.append("long runtime")
-
-    return score, "; ".join(reasons) if reasons else "Matches your library prompt."
-
-
-def _similarity_score(
-    item: Mapping[str, Any], source: Mapping[str, Any]
-) -> tuple[int, str]:
-    item_genres = set(item.get("genres", [])) if isinstance(item.get("genres"), list) else set()
-    source_genres = (
-        set(source.get("genres", [])) if isinstance(source.get("genres"), list) else set()
-    )
-    genre_overlap = sorted(item_genres & source_genres)
-    keyword_overlap = sorted(_library_item_tokens(item) & _library_item_tokens(source))
-
-    score = len(genre_overlap) * 5 + len(keyword_overlap)
-    reasons: list[str] = []
-    if genre_overlap:
-        reasons.append("shares " + ", ".join(genre_overlap))
-    if keyword_overlap:
-        reasons.append("shares keywords: " + ", ".join(keyword_overlap[:3]))
-    return score, "; ".join(reasons) if reasons else "Similar library metadata."
-
-
-def _find_library_source_item(
-    items: list[dict[str, Any]], title: str
-) -> dict[str, Any] | None:
-    query_title, query_year = _split_query_year(title)
-    query_key = _normalized_lookup_key(query_title)
-    return next(
-        (
-            item
-            for item in items
-            if _normalized_lookup_key(item.get("title")) == query_key
-            and (
-                query_year is None
-                or _positive_int_or_none(item.get("year")) in {None, query_year}
-            )
-        ),
-        None,
-    )
-
-
-def _library_item_tokens(item: Mapping[str, Any]) -> set[str]:
-    fields = [
-        _clean_text(item.get("title")) or "",
-        _clean_text(item.get("overview")) or "",
-    ]
-    genres = item.get("genres")
-    if isinstance(genres, list):
-        fields.extend(genre for genre in genres if isinstance(genre, str))
-    return _keyword_tokens(" ".join(fields))
-
-
-def _keyword_tokens(value: str) -> set[str]:
-    stopwords = {
-        "and",
-        "for",
-        "the",
-        "with",
-        "that",
-        "this",
-        "movie",
-        "show",
-        "series",
-        "watch",
-        "something",
-    }
-    return {
-        token
-        for token in re.findall(r"[a-z0-9]+", value.lower())
-        if len(token) > 2 and token not in stopwords
-    }
 
 
 def _clean_string_list(value: Any) -> list[str] | None:
@@ -1751,25 +1523,9 @@ def _clean_text(value: Any) -> str | None:
     return cleaned
 
 
-def _copy_optional_renamed(
-    source: Mapping[str, Any], target: dict[str, Any], source_key: str, target_key: str
-) -> None:
-    if source_key in source and source[source_key] is not None:
-        target[target_key] = source[source_key]
-
-
 def _copy_if_not_none(target: dict[str, Any], key: str, value: Any) -> None:
     if value is not None:
         target[key] = value
-
-
-def _copy_existence(source: Mapping[str, Any], target: dict[str, Any]) -> None:
-    existence = _first_present(source, ("alreadyExists", "isExisting"))
-    if existence is None:
-        return
-    exists = bool(existence)
-    target["in_library"] = exists
-    target["already_exists"] = exists
 
 
 def _first_present(source: Mapping[str, Any], keys: tuple[str, ...]) -> Any:
@@ -1806,30 +1562,6 @@ def _is_external_url(value: Any) -> bool:
     except ValueError:
         return "." in hostname
     return not (address.is_private or address.is_loopback or address.is_link_local)
-
-
-def _season_count(item: Mapping[str, Any]) -> int | None:
-    season_count = item.get("seasonCount")
-    if isinstance(season_count, int) and not isinstance(season_count, bool):
-        return season_count
-
-    seasons = item.get("seasons")
-    if isinstance(seasons, list):
-        return len([season for season in seasons if isinstance(season, dict)])
-    return None
-
-
-def _is_anime(item: Mapping[str, Any]) -> bool | None:
-    series_type = item.get("seriesType")
-    if isinstance(series_type, str):
-        return series_type.lower() == "anime"
-
-    genres = item.get("genres")
-    if isinstance(genres, list) and any(
-        isinstance(genre, str) and genre.lower() == "anime" for genre in genres
-    ):
-        return True
-    return None
 
 
 def _ensure_list(value: Any) -> list[dict[str, Any]]:

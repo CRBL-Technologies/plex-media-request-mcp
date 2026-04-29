@@ -88,11 +88,6 @@ mcp_servers:
   filters for media type, genre, query, year, runtime, language, and limit.
 - `media_status()` checks basic Radarr and Sonarr connectivity.
 
-The older service methods `search_movie`, `search_show`, `add_movie`,
-`add_show`, `recommend_from_library`, and `similar_in_library` remain in the
-Python service for compatibility, but they are not registered as public MCP
-tools.
-
 ## Tool Specification
 
 An OpenAPI-style reference for the public MCP tools is available at

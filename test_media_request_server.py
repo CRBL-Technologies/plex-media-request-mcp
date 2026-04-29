@@ -160,161 +160,6 @@ class ConfigTests(unittest.TestCase):
             server.load_config(env_config({server.ENV_SONARR_TAG_IDS: "agent"}))
 
 
-class SearchTests(unittest.TestCase):
-    def test_search_movie_returns_normalized_results(self) -> None:
-        session = FakeSession(
-            [
-                [
-                    {
-                        "title": "Dune",
-                        "year": 2021,
-                        "tmdbId": 438631,
-                        "imdbId": "tt1160419",
-                        "runtime": 155,
-                        "overview": "A gifted young man travels to Arrakis.",
-                        "alreadyExists": False,
-                        "images": [
-                            {
-                                "coverType": "poster",
-                                "url": "http://radarr:7878/MediaCover/1/poster.jpg",
-                                "remoteUrl": "https://image.tmdb.org/poster.jpg",
-                            }
-                        ],
-                        "rootFolderPath": "/hidden",
-                    }
-                ]
-            ]
-        )
-        service = server.MediaRequestService(config(), session=session)
-
-        results = service.search_movie("alien")
-
-        self.assertEqual(
-            results,
-            [
-                {
-                    "title": "Dune",
-                    "year": 2021,
-                    "tmdb_id": 438631,
-                    "imdb_id": "tt1160419",
-                    "runtime_minutes": 155,
-                    "overview": "A gifted young man travels to Arrakis.",
-                    "poster_url": "https://image.tmdb.org/poster.jpg",
-                    "in_library": False,
-                    "already_exists": False,
-                }
-            ],
-        )
-
-    def test_search_movie_defaults_to_five_results(self) -> None:
-        session = FakeSession(
-            [
-                [
-                    {"title": f"Movie {index}", "year": 2000 + index}
-                    for index in range(6)
-                ]
-            ]
-        )
-        service = server.MediaRequestService(config(), session=session)
-
-        results = service.search_movie("movie")
-
-        self.assertEqual(len(results), 5)
-
-    def test_search_movie_clamps_limit_to_ten_results(self) -> None:
-        session = FakeSession(
-            [
-                [
-                    {"title": f"Movie {index}", "year": 2000 + index}
-                    for index in range(12)
-                ]
-            ]
-        )
-        service = server.MediaRequestService(config(), session=session)
-
-        results = service.search_movie("movie", limit=99)
-
-        self.assertEqual(len(results), 10)
-
-    def test_search_movie_rejects_invalid_limit(self) -> None:
-        service = server.MediaRequestService(config(), session=FakeSession([]))
-
-        with self.assertRaisesRegex(ValueError, "limit"):
-            service.search_movie("movie", limit=0)
-
-    def test_search_show_returns_normalized_results(self) -> None:
-        session = FakeSession(
-            [
-                [
-                    {
-                        "title": "Cowboy Bebop",
-                        "year": 1998,
-                        "tvdbId": 76885,
-                        "imdbId": "tt0213338",
-                        "tmdbId": 30991,
-                        "seasons": [{"seasonNumber": 1}, {"seasonNumber": 0}],
-                        "status": "ended",
-                        "overview": "Bounty hunters drift through space.",
-                        "images": [
-                            {
-                                "coverType": "poster",
-                                "remoteUrl": "https://art.example/poster.jpg",
-                            }
-                        ],
-                        "genres": ["Anime"],
-                        "alreadyExists": True,
-                    }
-                ]
-            ]
-        )
-        service = server.MediaRequestService(config(), session=session)
-
-        results = service.search_show("bebop")
-
-        self.assertEqual(
-            results,
-            [
-                {
-                    "title": "Cowboy Bebop",
-                    "year": 1998,
-                    "tvdb_id": 76885,
-                    "imdb_id": "tt0213338",
-                    "tmdb_id": 30991,
-                    "season_count": 2,
-                    "status": "ended",
-                    "overview": "Bounty hunters drift through space.",
-                    "poster_url": "https://art.example/poster.jpg",
-                    "is_anime": True,
-                    "in_library": True,
-                    "already_exists": True,
-                }
-            ],
-        )
-
-    def test_search_show_respects_limit(self) -> None:
-        session = FakeSession(
-            [
-                [
-                    {"title": f"Show {index}", "year": 2000 + index}
-                    for index in range(4)
-                ]
-            ]
-        )
-        service = server.MediaRequestService(config(), session=session)
-
-        results = service.search_show("show", limit=2)
-
-        self.assertEqual(len(results), 2)
-
-    def test_search_show_omits_unavailable_optional_fields(self) -> None:
-        session = FakeSession([[{"title": "Unknown", "year": 2024}]])
-        service = server.MediaRequestService(config(), session=session)
-
-        results = service.search_show("unknown")
-
-        self.assertEqual(results, [{"title": "Unknown", "year": 2024, "tvdb_id": None}])
-
-
 class SearchMediaTests(unittest.TestCase):
     def test_search_media_reports_movie_available_and_missing(self) -> None:
         session = FakeSession(
@@ -957,82 +802,6 @@ class LibraryToolTests(unittest.TestCase):
         self.assertEqual(results[0]["availability"]["availableEpisodes"], 25)
         self.assertTrue(results[0]["available"])
 
-    def test_recommend_from_library_returns_available_movies_only(self) -> None:
-        session = FakeSession(
-            [
-                [
-                    {
-                        "title": "Dune",
-                        "year": 2021,
-                        "genres": ["Adventure", "Science Fiction"],
-                        "overview": "A desert planet and political prophecy.",
-                        "runtime": 155,
-                        "hasFile": True,
-                    },
-                    {
-                        "title": "Missing Adventure",
-                        "year": 2022,
-                        "genres": ["Adventure"],
-                        "overview": "Adventure in space.",
-                        "runtime": 100,
-                        "hasFile": False,
-                    },
-                    {
-                        "title": "Quiet Comedy",
-                        "year": 2019,
-                        "genres": ["Comedy"],
-                        "overview": "A small town comedy.",
-                        "runtime": 90,
-                        "hasFile": True,
-                    },
-                ]
-            ]
-        )
-        service = server.MediaRequestService(config(), session=session)
-
-        results = service.recommend_from_library(
-            "adventure epic desert", media_type="movie"
-        )
-
-        self.assertEqual([item["title"] for item in results], ["Dune"])
-        self.assertIn("reason", results[0])
-
-    def test_similar_in_library_excludes_source_title(self) -> None:
-        session = FakeSession(
-            [
-                [
-                    {
-                        "title": "Dune",
-                        "year": 2021,
-                        "genres": ["Adventure", "Science Fiction"],
-                        "overview": "Desert politics and prophecy.",
-                        "hasFile": True,
-                    },
-                    {
-                        "title": "Blade Runner 2049",
-                        "year": 2017,
-                        "genres": ["Science Fiction"],
-                        "overview": "A future detective story.",
-                        "hasFile": True,
-                    },
-                    {
-                        "title": "Small Comedy",
-                        "year": 2020,
-                        "genres": ["Comedy"],
-                        "overview": "A local comedy.",
-                        "hasFile": True,
-                    },
-                ]
-            ]
-        )
-        service = server.MediaRequestService(config(), session=session)
-
-        results = service.similar_in_library("Dune", media_type="movie")
-
-        titles = [item["title"] for item in results]
-        self.assertNotIn("Dune", titles)
-        self.assertIn("Blade Runner 2049", titles)
-
     def test_browse_library_excludes_unavailable_movies(self) -> None:
         session = FakeSession(
             [
@@ -1184,7 +953,6 @@ class RequestSeriesTests(unittest.TestCase):
         session = FakeSession(
             [
                 [],
-                [],
                 [
                     {
                         "title": "Whole Show",
@@ -1272,8 +1040,8 @@ class RequestSeriesTests(unittest.TestCase):
         self.assertEqual(len(session.requests), 1)
 
 
-class AddTests(unittest.TestCase):
-    def test_add_movie_enforces_configured_radarr_policy(self) -> None:
+class RequestPolicyTests(unittest.TestCase):
+    def test_request_movie_enforces_configured_radarr_policy(self) -> None:
         session = FakeSession(
             [
                 [],
@@ -1283,7 +1051,7 @@ class AddTests(unittest.TestCase):
         )
         service = server.MediaRequestService(config(), session=session)
 
-        result = service.add_movie(348)
+        result = service.request_movie(348)
 
         self.assertEqual(result["status"], "added")
         post = session.requests[-1]
@@ -1294,29 +1062,36 @@ class AddTests(unittest.TestCase):
         self.assertEqual(post["json"]["minimumAvailability"], "announced")
         self.assertEqual(post["json"]["tags"], [11])
 
-    def test_add_movie_reports_existing(self) -> None:
+    def test_request_movie_reports_existing(self) -> None:
         session = FakeSession([[{"title": "Alien", "tmdbId": 348}]])
         service = server.MediaRequestService(config(), session=session)
 
-        result = service.add_movie(348)
+        result = service.request_movie(348)
 
         self.assertEqual(result["status"], "already_exists")
         self.assertEqual(len(session.requests), 1)
 
-    def test_add_show_enforces_normal_profile(self) -> None:
+    def test_request_series_enforces_normal_profile(self) -> None:
         session = FakeSession(
             [
                 [],
-                [{"title": "Fringe", "tvdbId": 82066, "titleSlug": "fringe"}],
+                [
+                    {
+                        "title": "Fringe",
+                        "tvdbId": 82066,
+                        "titleSlug": "fringe",
+                        "seasons": [{"seasonNumber": 1}],
+                    }
+                ],
                 {"title": "Fringe", "tvdbId": 82066},
             ]
         )
         service = server.MediaRequestService(config(), session=session)
 
-        result = service.add_show(82066)
+        result = service.request_series(82066, seasons=[1])
 
         self.assertEqual(result["status"], "added")
-        self.assertNotIn("monitoredSeasons", result)
+        self.assertEqual(result["monitoredSeasons"], [1])
         self.assertEqual(result["profileUsed"], "Sonarr Normal Profile")
         post = session.requests[-1]
         self.assertEqual(post["json"]["qualityProfileId"], 601)
@@ -1325,18 +1100,7 @@ class AddTests(unittest.TestCase):
         self.assertTrue(post["json"]["seasonFolder"])
         self.assertEqual(post["json"]["tags"], [21, 22])
 
-    def test_add_show_existing_series_reports_season_monitoring_unchanged(self) -> None:
-        session = FakeSession([[{"title": "Existing Show", "tvdbId": 123}]])
-        service = server.MediaRequestService(config(), session=session)
-
-        result = service.add_show(123, seasons=[1])
-
-        self.assertEqual(result["status"], "already_exists")
-        self.assertEqual(result["monitoredSeasons"], [1])
-        self.assertIn("season monitoring was not changed", result["message"])
-        self.assertEqual(len(session.requests), 1)
-
-    def test_add_show_with_one_season_monitors_only_that_season(self) -> None:
+    def test_request_series_with_one_season_monitors_only_that_season(self) -> None:
         session = FakeSession(
             [
                 [],
@@ -1356,7 +1120,7 @@ class AddTests(unittest.TestCase):
         )
         service = server.MediaRequestService(config(), session=session)
 
-        result = service.add_show(354888, seasons=[1])
+        result = service.request_series(354888, seasons=[1])
 
         self.assertEqual(result["status"], "added")
         self.assertEqual(result["monitoredSeasons"], [1])
@@ -1369,7 +1133,9 @@ class AddTests(unittest.TestCase):
             ],
         )
 
-    def test_add_show_with_season_range_monitors_only_requested_seasons(self) -> None:
+    def test_request_series_with_season_range_monitors_only_requested_seasons(
+        self,
+    ) -> None:
         session = FakeSession(
             [
                 [],
@@ -1390,7 +1156,7 @@ class AddTests(unittest.TestCase):
         )
         service = server.MediaRequestService(config(), session=session)
 
-        result = service.add_show(354888, seasons=[2, 1])
+        result = service.request_series(354888, seasons=[2, 1])
 
         self.assertEqual(result["monitoredSeasons"], [1, 2])
         self.assertIn("seasons 1-2 monitored", result["message"])
@@ -1402,7 +1168,7 @@ class AddTests(unittest.TestCase):
             [False, True, True, False],
         )
 
-    def test_add_show_keeps_specials_unmonitored_unless_requested(self) -> None:
+    def test_request_series_keeps_specials_unmonitored_unless_requested(self) -> None:
         session = FakeSession(
             [
                 [],
@@ -1418,7 +1184,7 @@ class AddTests(unittest.TestCase):
         )
         service = server.MediaRequestService(config(), session=session)
 
-        service.add_show(123, seasons=[0])
+        service.request_series(123, seasons=[0])
 
         self.assertEqual(
             session.requests[-1]["json"]["seasons"],
@@ -1428,7 +1194,7 @@ class AddTests(unittest.TestCase):
             ],
         )
 
-    def test_add_show_rejects_nonexistent_requested_season(self) -> None:
+    def test_request_series_rejects_nonexistent_requested_season(self) -> None:
         session = FakeSession(
             [
                 [],
@@ -1443,7 +1209,7 @@ class AddTests(unittest.TestCase):
         )
         service = server.MediaRequestService(config(), session=session)
 
-        result = service.add_show(123, seasons=[3])
+        result = service.request_series(123, seasons=[3])
 
         self.assertEqual(result["status"], "error")
         self.assertEqual(result["monitoredSeasons"], [3])
@@ -1451,13 +1217,15 @@ class AddTests(unittest.TestCase):
         self.assertIn("Available seasons: 0, 1", result["message"])
         self.assertEqual(len(session.requests), 2)
 
-    def test_add_show_rejects_invalid_season_values(self) -> None:
+    def test_request_series_rejects_invalid_season_values(self) -> None:
         service = server.MediaRequestService(config(), session=FakeSession([]))
 
-        with self.assertRaisesRegex(ValueError, "seasons"):
-            service.add_show(123, seasons=[-1])
+        result = service.request_series(123, seasons=[-1])
 
-    def test_add_show_with_seasons_still_enforces_configured_policy(self) -> None:
+        self.assertEqual(result["status"], "error")
+        self.assertIn("seasons", result["message"])
+
+    def test_request_series_with_seasons_still_enforces_configured_policy(self) -> None:
         session = FakeSession(
             [
                 [],
@@ -1473,7 +1241,7 @@ class AddTests(unittest.TestCase):
         )
         service = server.MediaRequestService(config(), session=session)
 
-        service.add_show(123, anime=True, seasons=[1])
+        service.request_series(123, anime=True, seasons=[1])
 
         post = session.requests[-1]
         self.assertEqual(post["json"]["qualityProfileId"], 602)
@@ -1482,17 +1250,23 @@ class AddTests(unittest.TestCase):
         self.assertTrue(post["json"]["seasonFolder"])
         self.assertEqual(post["json"]["tags"], [21, 22])
 
-    def test_add_show_enforces_anime_profile(self) -> None:
+    def test_request_series_enforces_anime_profile(self) -> None:
         session = FakeSession(
             [
                 [],
-                [{"title": "Cowboy Bebop", "tvdbId": 76885}],
+                [
+                    {
+                        "title": "Cowboy Bebop",
+                        "tvdbId": 76885,
+                        "seasons": [{"seasonNumber": 1}],
+                    }
+                ],
                 {"title": "Cowboy Bebop", "tvdbId": 76885},
             ]
         )
         service = server.MediaRequestService(config(), session=session)
 
-        result = service.add_show(76885, anime=True)
+        result = service.request_series(76885, anime=True, seasons=[1])
 
         self.assertEqual(result["profileUsed"], "Sonarr Anime Profile")
         self.assertEqual(session.requests[-1]["json"]["qualityProfileId"], 602)

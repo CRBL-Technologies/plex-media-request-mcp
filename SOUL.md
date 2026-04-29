@@ -7,9 +7,6 @@
   requests still need every wanted season listed.
 - Use `browse_library` for recommendations, then rank and explain candidates in
   the agent response.
-- Do not use deprecated tools unless required for compatibility:
-  `search_movie`, `search_show`, `add_movie`, `add_show`,
-  `recommend_from_library`, and `similar_in_library`.
 - Treat library availability as factual. Movies require a movie file; series
   require episode files.
 - Do not invent ETAs. Only report progress, time left, or ETA from active queue

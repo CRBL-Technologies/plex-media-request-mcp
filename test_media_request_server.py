@@ -315,6 +315,192 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(results, [{"title": "Unknown", "year": 2024, "tvdb_id": None}])
 
 
+class SearchMediaTests(unittest.TestCase):
+    def test_search_media_reports_movie_available_and_missing(self) -> None:
+        session = FakeSession(
+            [
+                [
+                    {
+                        "title": "Dune",
+                        "year": 2021,
+                        "tmdbId": 438631,
+                        "imdbId": "tt1160419",
+                        "runtime": 155,
+                    },
+                    {
+                        "title": "Missing Movie",
+                        "year": 2024,
+                        "tmdbId": 999,
+                    },
+                ],
+                [
+                    {"title": "Dune", "year": 2021, "tmdbId": 438631, "hasFile": True},
+                    {
+                        "title": "Missing Movie",
+                        "year": 2024,
+                        "tmdbId": 999,
+                        "hasFile": False,
+                    },
+                ],
+            ]
+        )
+        service = server.MediaRequestService(config(), session=session)
+
+        result = service.search_media("dune", media_type="movie")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(result["items"]), 2)
+        self.assertEqual(
+            result["items"][0],
+            {
+                "media_type": "movie",
+                "title": "Dune",
+                "year": 2021,
+                "tmdbId": 438631,
+                "exists": True,
+                "available": True,
+                "imdbId": "tt1160419",
+                "runtimeMinutes": 155,
+            },
+        )
+        self.assertTrue(result["items"][1]["exists"])
+        self.assertFalse(result["items"][1]["available"])
+
+    def test_search_media_reports_series_requested_season_available(self) -> None:
+        session = FakeSession(
+            [
+                [
+                    {
+                        "title": "My Brilliant Friend",
+                        "year": 2018,
+                        "tvdbId": 344626,
+                        "seasons": [{"seasonNumber": 1}, {"seasonNumber": 4}],
+                    }
+                ],
+                [
+                    {
+                        "title": "My Brilliant Friend",
+                        "year": 2018,
+                        "tvdbId": 344626,
+                        "seasons": [
+                            {
+                                "seasonNumber": 1,
+                                "statistics": {
+                                    "episodeFileCount": 8,
+                                    "episodeCount": 8,
+                                },
+                            },
+                            {
+                                "seasonNumber": 4,
+                                "statistics": {
+                                    "episodeFileCount": 0,
+                                    "episodeCount": 10,
+                                },
+                            },
+                        ],
+                    }
+                ],
+            ]
+        )
+        service = server.MediaRequestService(config(), session=session)
+
+        result = service.search_media(
+            "my brilliant friend", media_type="series", season=1
+        )
+
+        item = result["items"][0]
+        self.assertTrue(item["available"])
+        self.assertEqual(item["seasons"], [1, 4])
+        self.assertEqual(
+            item["availability"],
+            {
+                "availableEpisodes": 8,
+                "missingEpisodes": 0,
+                "totalEpisodes": 8,
+                "seasons": [
+                    {
+                        "season": 1,
+                        "available": True,
+                        "availableEpisodes": 8,
+                        "missingEpisodes": 0,
+                        "totalEpisodes": 8,
+                    }
+                ],
+            },
+        )
+
+    def test_search_media_reports_series_requested_season_missing(self) -> None:
+        session = FakeSession(
+            [
+                [
+                    {
+                        "title": "My Brilliant Friend",
+                        "year": 2018,
+                        "tvdbId": 344626,
+                        "seasons": [{"seasonNumber": 1}, {"seasonNumber": 4}],
+                    }
+                ],
+                [
+                    {
+                        "title": "My Brilliant Friend",
+                        "year": 2018,
+                        "tvdbId": 344626,
+                        "seasons": [
+                            {
+                                "seasonNumber": 4,
+                                "statistics": {
+                                    "episodeFileCount": 0,
+                                    "episodeCount": 10,
+                                },
+                            }
+                        ],
+                    }
+                ],
+            ]
+        )
+        service = server.MediaRequestService(config(), session=session)
+
+        result = service.search_media(
+            "my brilliant friend", media_type="series", season=4
+        )
+
+        item = result["items"][0]
+        self.assertTrue(item["exists"])
+        self.assertFalse(item["available"])
+        self.assertEqual(item["availability"]["availableEpisodes"], 0)
+        self.assertEqual(item["availability"]["missingEpisodes"], 10)
+
+    def test_search_media_does_not_treat_series_metadata_as_available(self) -> None:
+        session = FakeSession(
+            [
+                [
+                    {
+                        "title": "Metadata Only Show",
+                        "year": 2024,
+                        "tvdbId": 123,
+                        "seasons": [{"seasonNumber": 1}, {"seasonNumber": 2}],
+                    }
+                ],
+                [
+                    {
+                        "title": "Metadata Only Show",
+                        "year": 2024,
+                        "tvdbId": 123,
+                        "seasons": [{"seasonNumber": 1}, {"seasonNumber": 2}],
+                    }
+                ],
+            ]
+        )
+        service = server.MediaRequestService(config(), session=session)
+
+        result = service.search_media("metadata", media_type="series")
+
+        item = result["items"][0]
+        self.assertTrue(item["exists"])
+        self.assertFalse(item["available"])
+        self.assertEqual(item["availability"]["availableEpisodes"], 0)
+
+
 class DownloadStatusTests(unittest.TestCase):
     def test_download_status_normalizes_radarr_queue_items(self) -> None:
         session = FakeSession(
@@ -711,7 +897,10 @@ class LibraryToolTests(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["title"], "Heat")
         self.assertEqual(results[0]["media_type"], "movie")
-        self.assertEqual(results[0]["runtime_minutes"], 170)
+        self.assertEqual(results[0]["runtimeMinutes"], 170)
+        self.assertEqual(results[0]["imdbId"], "tt0113277")
+        self.assertEqual(results[0]["tmdbId"], 949)
+        self.assertEqual(results[0]["posterUrl"], "https://image.tmdb.org/heat.jpg")
         self.assertTrue(results[0]["available"])
 
     def test_browse_library_filters_series_by_genre(self) -> None:
@@ -724,9 +913,26 @@ class LibraryToolTests(unittest.TestCase):
                         "genres": ["Crime", "Drama"],
                         "status": "ended",
                         "overview": "Baltimore institutions and crime.",
+                        "imdbId": "tt0306414",
+                        "tmdbId": 1438,
                         "tvdbId": 79126,
                         "statistics": {"episodeFileCount": 60},
-                        "seasons": [{"seasonNumber": 1}, {"seasonNumber": 2}],
+                        "seasons": [
+                            {
+                                "seasonNumber": 1,
+                                "statistics": {
+                                    "episodeFileCount": 13,
+                                    "episodeCount": 13,
+                                },
+                            },
+                            {
+                                "seasonNumber": 2,
+                                "statistics": {
+                                    "episodeFileCount": 12,
+                                    "episodeCount": 12,
+                                },
+                            },
+                        ],
                     },
                     {
                         "title": "Unavailable Show",
@@ -744,7 +950,11 @@ class LibraryToolTests(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["title"], "The Wire")
         self.assertEqual(results[0]["media_type"], "series")
-        self.assertEqual(results[0]["seasons"], 2)
+        self.assertEqual(results[0]["seasons"], [1, 2])
+        self.assertEqual(results[0]["tvdbId"], 79126)
+        self.assertEqual(results[0]["imdbId"], "tt0306414")
+        self.assertEqual(results[0]["tmdbId"], 1438)
+        self.assertEqual(results[0]["availability"]["availableEpisodes"], 25)
         self.assertTrue(results[0]["available"])
 
     def test_recommend_from_library_returns_available_movies_only(self) -> None:
@@ -848,6 +1058,40 @@ class LibraryToolTests(unittest.TestCase):
 
         self.assertEqual([item["title"] for item in results], ["Available Movie"])
 
+    def test_browse_library_excludes_unavailable_series(self) -> None:
+        session = FakeSession(
+            [
+                [
+                    {
+                        "title": "Available Show",
+                        "year": 2001,
+                        "genres": ["Drama"],
+                        "seasons": [
+                            {
+                                "seasonNumber": 1,
+                                "statistics": {
+                                    "episodeFileCount": 1,
+                                    "episodeCount": 10,
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "title": "Unavailable Show",
+                        "year": 2002,
+                        "genres": ["Drama"],
+                        "statistics": {"episodeFileCount": 0},
+                        "seasons": [{"seasonNumber": 1}],
+                    },
+                ]
+            ]
+        )
+        service = server.MediaRequestService(config(), session=session)
+
+        results = service.browse_library(media_type="series", genre="Drama")
+
+        self.assertEqual([item["title"] for item in results], ["Available Show"])
+
     def test_library_output_is_sanitized(self) -> None:
         session = FakeSession(
             [
@@ -913,18 +1157,119 @@ class McpToolTests(unittest.TestCase):
         self.assertEqual(
             mcp.tools,
             [
-                "search_movie",
-                "add_movie",
-                "search_show",
-                "add_show",
-                "media_status",
-                "download_status",
+                "search_media",
+                "request_movie",
+                "request_series",
                 "request_status",
+                "download_status",
                 "browse_library",
-                "recommend_from_library",
-                "similar_in_library",
+                "media_status",
             ],
         )
+
+
+class RequestSeriesTests(unittest.TestCase):
+    def test_request_series_requires_explicit_non_empty_seasons(self) -> None:
+        service = server.MediaRequestService(config(), session=FakeSession([]))
+
+        missing = service.request_series(123)
+        empty = service.request_series(123, seasons=[])
+
+        self.assertEqual(missing["status"], "error")
+        self.assertIn("explicit non-empty", missing["message"])
+        self.assertEqual(empty["status"], "error")
+        self.assertIn("explicit non-empty", empty["message"])
+
+    def test_request_series_whole_show_requires_explicit_seasons(self) -> None:
+        session = FakeSession(
+            [
+                [],
+                [],
+                [
+                    {
+                        "title": "Whole Show",
+                        "tvdbId": 123,
+                        "seasons": [
+                            {"seasonNumber": 0},
+                            {"seasonNumber": 1},
+                            {"seasonNumber": 2},
+                        ],
+                    }
+                ],
+                {"title": "Whole Show", "tvdbId": 123},
+            ]
+        )
+        service = server.MediaRequestService(config(), session=session)
+
+        result = service.request_series(123, seasons=[1, 2])
+
+        self.assertEqual(result["status"], "added")
+        self.assertEqual(result["monitoredSeasons"], [1, 2])
+        post = session.requests[-1]
+        self.assertEqual(
+            post["json"]["seasons"],
+            [
+                {"seasonNumber": 0, "monitored": False},
+                {"seasonNumber": 1, "monitored": True},
+                {"seasonNumber": 2, "monitored": True},
+            ],
+        )
+        self.assertEqual(post["json"]["qualityProfileId"], 601)
+        self.assertEqual(post["json"]["rootFolderPath"], "/configured/tv")
+        self.assertEqual(post["json"]["tags"], [21, 22])
+
+    def test_request_series_existing_returns_requested_season_counts(self) -> None:
+        session = FakeSession(
+            [
+                [
+                    {
+                        "title": "Existing Show",
+                        "tvdbId": 123,
+                        "seasons": [
+                            {
+                                "seasonNumber": 1,
+                                "statistics": {
+                                    "episodeFileCount": 2,
+                                    "episodeCount": 10,
+                                },
+                            },
+                            {
+                                "seasonNumber": 2,
+                                "statistics": {
+                                    "episodeFileCount": 0,
+                                    "episodeCount": 8,
+                                },
+                            },
+                        ],
+                    }
+                ]
+            ]
+        )
+        service = server.MediaRequestService(config(), session=session)
+
+        result = service.request_series(123, seasons=[2])
+
+        self.assertEqual(result["status"], "already_exists")
+        self.assertEqual(result["monitoredSeasons"], [2])
+        self.assertFalse(result["available"])
+        self.assertEqual(
+            result["availability"],
+            {
+                "availableEpisodes": 0,
+                "missingEpisodes": 8,
+                "totalEpisodes": 8,
+                "seasons": [
+                    {
+                        "season": 2,
+                        "available": False,
+                        "availableEpisodes": 0,
+                        "missingEpisodes": 8,
+                        "totalEpisodes": 8,
+                    }
+                ],
+            },
+        )
+        self.assertEqual(len(session.requests), 1)
 
 
 class AddTests(unittest.TestCase):

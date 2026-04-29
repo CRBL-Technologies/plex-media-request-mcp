@@ -50,7 +50,7 @@ mcp_servers:
   media:
     command: python3
     args:
-      - /opt/data/mcp/media_request_server.py
+      - /path/to/plex-media-request-mcp/media_request_server.py
     env:
       PLEX_MEDIA_REQUEST_RADARR_BASE_URL: replace-with-radarr-base-url
       PLEX_MEDIA_REQUEST_RADARR_API_KEY: replace-with-radarr-api-key
@@ -70,28 +70,28 @@ mcp_servers:
 
 ## Tools
 
-- `search_movie(query: str, limit: int = 5)` returns normalized Radarr movie
-  matches, capped at 10 results.
-- `add_movie(tmdbId: int, title: str | None = None)` adds a movie using the
-  approved Radarr policy.
-- `search_show(query: str, limit: int = 5)` returns normalized Sonarr series
-  matches, capped at 10 results.
-- `add_show(tvdbId: int, title: str | None = None, anime: bool = False,
-  seasons: list[int] | None = None)` adds a series using the approved Sonarr
-  policy. Use `seasons` when the user asks for specific seasons; omit it when
-  the user wants the whole show.
-- `media_status()` checks basic Radarr and Sonarr connectivity.
-- `download_status()` checks Radarr and Sonarr queues and returns a sanitized,
-  read-only download summary.
+- `search_media(query: str, media_type: str = "any", season: int | None = None,
+  limit: int = 5)` searches Radarr and/or Sonarr and returns factual
+  file-based availability.
+- `request_movie(tmdbId: int, title: str | None = None)` requests a movie using
+  the configured Radarr policy.
+- `request_series(tvdbId: int, title: str | None = None,
+  seasons: list[int], anime: bool = False)` requests a series using the
+  configured Sonarr policy. `seasons` is required; pass every wanted season
+  explicitly.
 - `request_status(query: str | None = None, limit: int = 10)` checks active
   queues plus monitored missing media and returns whether requests are
   downloading, waiting for release, or waiting for a suitable release.
+- `download_status()` checks Radarr and Sonarr queues and returns a sanitized,
+  read-only download summary.
 - `browse_library(...)` browses available Radarr/Sonarr library items with
   filters for media type, genre, query, year, runtime, language, and limit.
-- `recommend_from_library(prompt: str, media_type: str = "any", limit: int = 5)`
-  returns watch-now library candidates using local keyword and genre matching.
-- `similar_in_library(title: str, media_type: str = "any", limit: int = 5)`
-  returns available library items with overlapping genres and metadata.
+- `media_status()` checks basic Radarr and Sonarr connectivity.
+
+The older service methods `search_movie`, `search_show`, `add_movie`,
+`add_show`, `recommend_from_library`, and `similar_in_library` remain in the
+Python service for compatibility, but they are not registered as public MCP
+tools.
 
 ## Development
 

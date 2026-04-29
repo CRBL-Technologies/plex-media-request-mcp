@@ -136,6 +136,45 @@ class MediaRequestService:
         self.session = session or requests.Session()
         self.timeout_seconds = timeout_seconds
 
+    def search_media(
+        self,
+        query: str,
+        media_type: str = "any",
+        season: int | None = None,
+        limit: int = 5,
+    ) -> dict[str, Any]:
+        query = _require_text(query, "query")
+        requested_type = _normalize_media_type(media_type)
+        requested_season = _optional_season(season)
+        result_limit = _normalize_limit(limit)
+
+        items: list[dict[str, Any]] = []
+        if requested_type in {"movie", "any"}:
+            movie_results = _ensure_list(
+                self._get_radarr("/api/v3/movie/lookup", params={"term": query})
+            )
+            movies = _ensure_list(self._get_radarr("/api/v3/movie"))
+            items.extend(
+                _shape_search_movie_item(item, _movie_library_match(item, movies))
+                for item in movie_results
+            )
+
+        if requested_type in {"series", "any"}:
+            series_results = _ensure_list(
+                self._get_sonarr("/api/v3/series/lookup", params={"term": query})
+            )
+            series = _ensure_list(self._get_sonarr("/api/v3/series"))
+            items.extend(
+                _shape_search_series_item(
+                    item,
+                    _series_library_match(item, series),
+                    requested_season,
+                )
+                for item in series_results
+            )
+
+        return {"ok": True, "items": items[:result_limit]}
+
     def search_movie(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
         query = _require_text(query, "query")
         result_limit = _normalize_limit(limit)
@@ -143,6 +182,11 @@ class MediaRequestService:
         return [_shape_movie_result(item) for item in _ensure_list(results)][
             :result_limit
         ]
+
+    def request_movie(
+        self, tmdbId: int, title: str | None = None
+    ) -> dict[str, Any]:
+        return self.add_movie(tmdbId=tmdbId, title=title)
 
     def add_movie(self, tmdbId: int, title: str | None = None) -> dict[str, Any]:
         tmdb_id = _require_positive_int(tmdbId, "tmdbId")
@@ -207,6 +251,72 @@ class MediaRequestService:
         return [_shape_show_result(item) for item in _ensure_list(results)][
             :result_limit
         ]
+
+    def request_series(
+        self,
+        tvdbId: int,
+        title: str | None = None,
+        seasons: list[int] | None = None,
+        anime: bool = False,
+    ) -> dict[str, Any]:
+        tvdb_id = _require_positive_int(tvdbId, "tvdbId")
+        requested_title = _optional_text(title)
+        profile_name = (
+            self.config.sonarr_anime_quality_profile_name
+            if anime
+            else self.config.sonarr_normal_quality_profile_name
+        )
+        try:
+            requested_seasons = _require_requested_seasons(seasons)
+        except ValueError as exc:
+            return {
+                "status": "error",
+                "title": requested_title,
+                "tvdbId": tvdb_id,
+                "profileUsed": profile_name,
+                "message": str(exc),
+            }
+
+        try:
+            existing = self._find_existing_show(tvdb_id)
+            if existing is not None:
+                season_update = _with_season_monitoring(existing, requested_seasons)
+                if "error" in season_update:
+                    return {
+                        "status": "error",
+                        "title": existing.get("title") or requested_title,
+                        "tvdbId": tvdb_id,
+                        "profileUsed": profile_name,
+                        "monitoredSeasons": requested_seasons,
+                        "message": season_update["error"],
+                    }
+
+                availability = _series_availability(existing, requested_seasons)
+                return {
+                    "status": "already_exists",
+                    "title": existing.get("title") or requested_title,
+                    "tvdbId": tvdb_id,
+                    "profileUsed": profile_name,
+                    "monitoredSeasons": requested_seasons,
+                    "available": availability["availableEpisodes"] > 0,
+                    "availability": availability,
+                }
+
+            return self.add_show(
+                tvdbId=tvdb_id,
+                title=requested_title,
+                anime=anime,
+                seasons=requested_seasons,
+            )
+        except ArrApiError as exc:
+            return {
+                "status": "error",
+                "title": requested_title,
+                "tvdbId": tvdb_id,
+                "profileUsed": profile_name,
+                "monitoredSeasons": requested_seasons,
+                "message": str(exc),
+            }
 
     def add_show(
         self,
@@ -622,42 +732,43 @@ def create_server() -> Any:
     mcp = FastMCP("plex-media-request")
 
     @mcp.tool()
-    def search_movie(query: str, limit: int = 5) -> list[dict[str, Any]]:
-        return service.search_movie(query, limit=limit)
-
-    @mcp.tool()
-    def add_movie(tmdbId: int, title: str | None = None) -> dict[str, Any]:
-        return service.add_movie(tmdbId=tmdbId, title=title)
-
-    @mcp.tool()
-    def search_show(query: str, limit: int = 5) -> list[dict[str, Any]]:
-        return service.search_show(query, limit=limit)
-
-    @mcp.tool()
-    def add_show(
-        tvdbId: int,
-        title: str | None = None,
-        anime: bool = False,
-        seasons: list[int] | None = None,
+    def search_media(
+        query: str,
+        media_type: str = "any",
+        season: int | None = None,
+        limit: int = 5,
     ) -> dict[str, Any]:
-        """Add a TV show. Use seasons for specific seasons; omit for whole show."""
-        return service.add_show(
-            tvdbId=tvdbId, title=title, anime=anime, seasons=seasons
+        """Search movies and series with factual file-based availability."""
+        return service.search_media(
+            query=query, media_type=media_type, season=season, limit=limit
         )
 
     @mcp.tool()
-    def media_status() -> dict[str, Any]:
-        return service.media_status()
+    def request_movie(tmdbId: int, title: str | None = None) -> dict[str, Any]:
+        """Request a movie by TMDB ID using the configured Radarr policy."""
+        return service.request_movie(tmdbId=tmdbId, title=title)
 
     @mcp.tool()
-    def download_status() -> dict[str, Any]:
-        return service.download_status()
+    def request_series(
+        tvdbId: int,
+        title: str | None = None,
+        seasons: list[int] | None = None,
+        anime: bool = False,
+    ) -> dict[str, Any]:
+        """Request a series by TVDB ID. Always pass explicit season numbers."""
+        return service.request_series(
+            tvdbId=tvdbId, title=title, seasons=seasons, anime=anime
+        )
 
     @mcp.tool()
     def request_status(
         query: str | None = None, limit: int = 10
     ) -> dict[str, Any]:
         return service.request_status(query=query, limit=limit)
+
+    @mcp.tool()
+    def download_status() -> dict[str, Any]:
+        return service.download_status()
 
     @mcp.tool()
     def browse_library(
@@ -682,20 +793,8 @@ def create_server() -> Any:
         )
 
     @mcp.tool()
-    def recommend_from_library(
-        prompt: str, media_type: str = "any", limit: int = 5
-    ) -> list[dict[str, Any]]:
-        return service.recommend_from_library(
-            prompt=prompt, media_type=media_type, limit=limit
-        )
-
-    @mcp.tool()
-    def similar_in_library(
-        title: str, media_type: str = "any", limit: int = 5
-    ) -> list[dict[str, Any]]:
-        return service.similar_in_library(
-            title=title, media_type=media_type, limit=limit
-        )
+    def media_status() -> dict[str, Any]:
+        return service.media_status()
 
     return mcp
 
@@ -741,6 +840,56 @@ def _shape_show_result(item: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _shape_search_movie_item(
+    item: Mapping[str, Any], library_match: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    result = {
+        "media_type": "movie",
+        "title": _clean_text(item.get("title")),
+        "year": _positive_int_or_none(item.get("year")),
+        "tmdbId": _positive_int_or_none(item.get("tmdbId")),
+        "exists": library_match is not None,
+        "available": bool(library_match and _movie_has_file(library_match)),
+    }
+    _copy_if_not_none(result, "imdbId", _clean_text(item.get("imdbId")))
+    _copy_if_not_none(
+        result, "runtimeMinutes", _positive_int_or_none(item.get("runtime"))
+    )
+    _copy_if_not_none(result, "overview", _clean_text(item.get("overview")))
+    _copy_if_not_none(result, "posterUrl", _poster_url(item.get("images")))
+    return result
+
+
+def _shape_search_series_item(
+    item: Mapping[str, Any],
+    library_match: Mapping[str, Any] | None,
+    season: int | None,
+) -> dict[str, Any]:
+    season_filter = [season] if season is not None else None
+    availability = (
+        _series_availability(library_match, season_filter)
+        if library_match is not None
+        else _empty_series_availability(item, season_filter)
+    )
+    season_source = library_match if library_match is not None else item
+    result = {
+        "media_type": "series",
+        "title": _clean_text(item.get("title")),
+        "year": _positive_int_or_none(item.get("year")),
+        "tvdbId": _positive_int_or_none(item.get("tvdbId")),
+        "exists": library_match is not None,
+        "available": availability["availableEpisodes"] > 0,
+        "seasons": _series_season_numbers(season_source),
+        "availability": availability,
+    }
+    _copy_if_not_none(result, "imdbId", _clean_text(item.get("imdbId")))
+    _copy_if_not_none(result, "tmdbId", _positive_int_or_none(item.get("tmdbId")))
+    _copy_if_not_none(result, "status", _clean_text(item.get("status")))
+    _copy_if_not_none(result, "overview", _clean_text(item.get("overview")))
+    _copy_if_not_none(result, "posterUrl", _poster_url(item.get("images")))
+    return result
+
+
 def _shape_library_movie(item: Mapping[str, Any]) -> dict[str, Any]:
     result = {
         "title": _clean_text(item.get("title")),
@@ -750,12 +899,12 @@ def _shape_library_movie(item: Mapping[str, Any]) -> dict[str, Any]:
     }
     _copy_if_not_none(result, "genres", _clean_string_list(item.get("genres")))
     _copy_if_not_none(
-        result, "runtime_minutes", _positive_int_or_none(item.get("runtime"))
+        result, "runtimeMinutes", _positive_int_or_none(item.get("runtime"))
     )
     _copy_if_not_none(result, "overview", _clean_text(item.get("overview")))
-    _copy_if_not_none(result, "imdb_id", _clean_text(item.get("imdbId")))
-    _copy_if_not_none(result, "tmdb_id", _positive_int_or_none(item.get("tmdbId")))
-    _copy_if_not_none(result, "poster_url", _poster_url(item.get("images")))
+    _copy_if_not_none(result, "imdbId", _clean_text(item.get("imdbId")))
+    _copy_if_not_none(result, "tmdbId", _positive_int_or_none(item.get("tmdbId")))
+    _copy_if_not_none(result, "posterUrl", _poster_url(item.get("images")))
     _copy_if_not_none(result, "language", _language_name(item))
     return result
 
@@ -768,15 +917,207 @@ def _shape_library_series(item: Mapping[str, Any]) -> dict[str, Any]:
         "available": True,
     }
     _copy_if_not_none(result, "genres", _clean_string_list(item.get("genres")))
-    _copy_if_not_none(result, "seasons", _season_count(item))
+    _copy_if_not_none(result, "seasons", _series_season_numbers(item))
     _copy_if_not_none(result, "status", _clean_text(item.get("status")))
     _copy_if_not_none(result, "overview", _clean_text(item.get("overview")))
-    _copy_if_not_none(result, "imdb_id", _clean_text(item.get("imdbId")))
-    _copy_if_not_none(result, "tmdb_id", _positive_int_or_none(item.get("tmdbId")))
-    _copy_if_not_none(result, "tvdb_id", _positive_int_or_none(item.get("tvdbId")))
-    _copy_if_not_none(result, "poster_url", _poster_url(item.get("images")))
+    _copy_if_not_none(result, "imdbId", _clean_text(item.get("imdbId")))
+    _copy_if_not_none(result, "tmdbId", _positive_int_or_none(item.get("tmdbId")))
+    _copy_if_not_none(result, "tvdbId", _positive_int_or_none(item.get("tvdbId")))
+    _copy_if_not_none(result, "posterUrl", _poster_url(item.get("images")))
     _copy_if_not_none(result, "language", _language_name(item))
+    result["availability"] = _series_availability(item)
     return result
+
+
+def _movie_library_match(
+    item: Mapping[str, Any], movies: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    tmdb_id = _positive_int_or_none(item.get("tmdbId"))
+    if tmdb_id is not None:
+        match = _find_by_id(movies, "tmdbId", tmdb_id)
+        if match is not None:
+            return match
+
+    item_key = _normalized_lookup_key(item.get("title"))
+    item_year = _positive_int_or_none(item.get("year"))
+    if not item_key:
+        return None
+
+    for movie in movies:
+        movie_year = _positive_int_or_none(movie.get("year"))
+        if item_year is not None and movie_year is not None and item_year != movie_year:
+            continue
+        if item_key in _movie_match_keys(movie):
+            return movie
+    return None
+
+
+def _series_library_match(
+    item: Mapping[str, Any], series: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    tvdb_id = _positive_int_or_none(item.get("tvdbId"))
+    if tvdb_id is not None:
+        match = _find_by_id(series, "tvdbId", tvdb_id)
+        if match is not None:
+            return match
+
+    item_key = _normalized_lookup_key(item.get("title"))
+    item_year = _positive_int_or_none(item.get("year"))
+    if not item_key:
+        return None
+
+    for show in series:
+        show_year = _positive_int_or_none(show.get("year"))
+        if item_year is not None and show_year is not None and item_year != show_year:
+            continue
+        if item_key in _series_match_keys(show):
+            return show
+    return None
+
+
+def _series_match_keys(show: Mapping[str, Any]) -> set[str]:
+    keys: set[str] = set()
+    for value in (
+        show.get("title"),
+        show.get("cleanTitle"),
+        _strip_slug_year(show.get("titleSlug")),
+        show.get("titleSlug"),
+    ):
+        normalized = _normalized_lookup_key(value)
+        if normalized:
+            keys.add(normalized)
+
+    alternate_titles = show.get("alternateTitles")
+    if isinstance(alternate_titles, list):
+        for alternate_title in alternate_titles:
+            if isinstance(alternate_title, str):
+                normalized = _normalized_lookup_key(alternate_title)
+            elif isinstance(alternate_title, dict):
+                normalized = _normalized_lookup_key(alternate_title.get("title"))
+            else:
+                normalized = ""
+            if normalized:
+                keys.add(normalized)
+    return keys
+
+
+def _series_availability(
+    item: Mapping[str, Any], seasons: list[int] | None = None
+) -> dict[str, Any]:
+    requested = set(seasons) if seasons is not None else None
+    season_summaries = [
+        summary
+        for season in _ensure_list(item.get("seasons"))
+        for summary in [_season_availability(season)]
+        if summary is not None
+        and (requested is None or summary["season"] in requested)
+    ]
+
+    has_season_counts = any(
+        summary["availableEpisodes"] > 0 or summary["totalEpisodes"] > 0
+        for summary in season_summaries
+    )
+    if season_summaries and (has_season_counts or requested is not None):
+        available = sum(summary["availableEpisodes"] for summary in season_summaries)
+        total = sum(summary["totalEpisodes"] for summary in season_summaries)
+        missing = sum(summary["missingEpisodes"] for summary in season_summaries)
+        return {
+            "availableEpisodes": available,
+            "missingEpisodes": missing,
+            "totalEpisodes": total,
+            "seasons": season_summaries,
+        }
+    if requested is not None:
+        return {
+            "availableEpisodes": 0,
+            "missingEpisodes": 0,
+            "totalEpisodes": 0,
+            "seasons": [],
+        }
+
+    statistics = item.get("statistics")
+    if not isinstance(statistics, dict):
+        statistics = item
+    available = _episode_count(statistics, ("episodeFileCount",))
+    total = _episode_count(statistics, ("totalEpisodeCount", "episodeCount"))
+    if total == 0 and available > 0:
+        total = available
+    return {
+        "availableEpisodes": available,
+        "missingEpisodes": max(total - available, 0),
+        "totalEpisodes": total,
+        "seasons": [],
+    }
+
+
+def _empty_series_availability(
+    item: Mapping[str, Any], seasons: list[int] | None = None
+) -> dict[str, Any]:
+    requested = set(seasons) if seasons is not None else None
+    season_summaries = [
+        {
+            "season": season,
+            "available": False,
+            "availableEpisodes": 0,
+            "missingEpisodes": 0,
+            "totalEpisodes": 0,
+        }
+        for season in _series_season_numbers(item)
+        if requested is None or season in requested
+    ]
+    return {
+        "availableEpisodes": 0,
+        "missingEpisodes": 0,
+        "totalEpisodes": 0,
+        "seasons": season_summaries,
+    }
+
+
+def _season_availability(season: Mapping[str, Any]) -> dict[str, Any] | None:
+    season_number = _non_negative_int_or_none(season.get("seasonNumber"))
+    if season_number is None:
+        return None
+
+    statistics = season.get("statistics")
+    if not isinstance(statistics, dict):
+        statistics = season
+
+    available = _episode_count(statistics, ("episodeFileCount",))
+    total = _episode_count(statistics, ("totalEpisodeCount", "episodeCount"))
+    if total == 0 and available > 0:
+        total = available
+    missing = max(total - available, 0)
+    return {
+        "season": season_number,
+        "available": available > 0,
+        "availableEpisodes": available,
+        "missingEpisodes": missing,
+        "totalEpisodes": total,
+    }
+
+
+def _series_season_numbers(item: Mapping[str, Any]) -> list[int]:
+    seasons = sorted(
+        season_number
+        for season in _ensure_list(item.get("seasons"))
+        for season_number in [_non_negative_int_or_none(season.get("seasonNumber"))]
+        if season_number is not None
+    )
+    if seasons:
+        return seasons
+
+    season_count = item.get("seasonCount")
+    if isinstance(season_count, int) and not isinstance(season_count, bool):
+        return list(range(1, season_count + 1))
+    return []
+
+
+def _episode_count(statistics: Mapping[str, Any], keys: tuple[str, ...]) -> int:
+    for key in keys:
+        count = _non_negative_int_or_none(statistics.get(key))
+        if count is not None:
+            return count
+    return 0
 
 
 def _normalize_media_type(media_type: str) -> str:
@@ -806,7 +1147,7 @@ def _library_item_matches_filters(
         return False
     if year_max is not None and (year is None or year > year_max):
         return False
-    runtime = _positive_int_or_none(item.get("runtime_minutes"))
+    runtime = _positive_int_or_none(item.get("runtimeMinutes"))
     if runtime_max is not None and item.get("media_type") == "movie":
         if runtime is None or runtime > runtime_max:
             return False
@@ -864,7 +1205,7 @@ def _recommendation_score(
     if keyword_matches:
         reasons.append("matches keywords: " + ", ".join(keyword_matches[:3]))
 
-    runtime = _positive_int_or_none(item.get("runtime_minutes"))
+    runtime = _positive_int_or_none(item.get("runtimeMinutes"))
     if runtime is not None and prompt_tokens & {"short", "quick"} and runtime <= 100:
         score += 2
         reasons.append("short runtime")
@@ -979,6 +1320,21 @@ def _normalize_requested_seasons(seasons: list[int] | None) -> list[int] | None:
             )
         normalized.add(season)
     return sorted(normalized)
+
+
+def _require_requested_seasons(seasons: list[int] | None) -> list[int]:
+    normalized = _normalize_requested_seasons(seasons)
+    if normalized is None:
+        raise ValueError("seasons must be an explicit non-empty list")
+    return normalized
+
+
+def _optional_season(season: int | None) -> int | None:
+    if season is None:
+        return None
+    if isinstance(season, bool) or not isinstance(season, int) or season < 0:
+        raise ValueError("season must be a non-negative integer")
+    return season
 
 
 def _with_season_monitoring(
@@ -1226,7 +1582,12 @@ def _series_has_file(item: Mapping[str, Any]) -> bool:
     if isinstance(statistics, dict):
         if _positive_int_or_none(statistics.get("episodeFileCount")) is not None:
             return True
-    return _positive_int_or_none(item.get("episodeFileCount")) is not None
+    if _positive_int_or_none(item.get("episodeFileCount")) is not None:
+        return True
+    return any(
+        summary["availableEpisodes"] > 0
+        for summary in _series_availability(item).get("seasons", [])
+    )
 
 
 def _media_id(item: Mapping[str, Any]) -> int | None:
@@ -1237,6 +1598,14 @@ def _positive_int_or_none(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, int) and value > 0:
+        return value
+    return None
+
+
+def _non_negative_int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 0:
         return value
     return None
 

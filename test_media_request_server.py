@@ -1065,6 +1065,72 @@ class RequestSeriesTests(unittest.TestCase):
         )
         self.assertEqual(len(session.requests), 1)
 
+    def test_request_series_existing_updates_monitoring_and_starts_season_search(self) -> None:
+        existing = {
+            "id": 77,
+            "title": "Existing Show",
+            "tvdbId": 123,
+            "monitored": True,
+            "seasons": [
+                {
+                    "seasonNumber": 1,
+                    "monitored": True,
+                    "statistics": {"episodeFileCount": 2, "episodeCount": 10},
+                },
+                {
+                    "seasonNumber": 2,
+                    "monitored": False,
+                    "statistics": {"episodeFileCount": 0, "episodeCount": 8},
+                },
+            ],
+        }
+        updated = {
+            **existing,
+            "seasons": [
+                {
+                    "seasonNumber": 1,
+                    "monitored": False,
+                    "statistics": {"episodeFileCount": 2, "episodeCount": 10},
+                },
+                {
+                    "seasonNumber": 2,
+                    "monitored": True,
+                    "statistics": {"episodeFileCount": 0, "episodeCount": 8},
+                },
+            ],
+        }
+        session = FakeSession([[existing], updated, {"id": 99, "name": "SeasonSearch"}])
+        service = server.MediaRequestService(config(), session=session)
+
+        result = service.request_series(123, seasons=[2])
+
+        self.assertEqual(result["status"], "already_exists")
+        self.assertTrue(result["monitoringUpdated"])
+        self.assertTrue(result["searchSubmitted"])
+        self.assertEqual(result["monitoredSeasons"], [2])
+        self.assertEqual([request["method"] for request in session.requests], ["GET", "PUT", "POST"])
+        put = session.requests[1]
+        self.assertEqual(put["url"], "http://sonarr:8989/api/v3/series/77")
+        self.assertEqual(
+            put["json"]["seasons"],
+            [
+                {
+                    "seasonNumber": 1,
+                    "monitored": False,
+                    "statistics": {"episodeFileCount": 2, "episodeCount": 10},
+                },
+                {
+                    "seasonNumber": 2,
+                    "monitored": True,
+                    "statistics": {"episodeFileCount": 0, "episodeCount": 8},
+                },
+            ],
+        )
+        self.assertEqual(
+            session.requests[2]["json"],
+            {"name": "SeasonSearch", "seriesId": 77, "seasonNumber": 2},
+        )
+
 
 class RequestPolicyTests(unittest.TestCase):
     def test_request_movie_includes_immediate_post_request_status(self) -> None:

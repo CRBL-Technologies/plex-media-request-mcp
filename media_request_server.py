@@ -276,17 +276,35 @@ class MediaRequestService:
                         "message": season_update["error"],
                     }
 
-                availability = _series_availability(existing, requested_seasons)
+                updated = dict(existing)
+                updated["monitored"] = True
+                updated["seasons"] = season_update["seasons"]
+                series_id = _positive_int_or_none(existing.get("id"))
+                if series_id is not None:
+                    updated = self._put_sonarr(f"/api/v3/series/{series_id}", json=updated)
+                    for season_number in requested_seasons:
+                        self._post_sonarr(
+                            "/api/v3/command",
+                            json={
+                                "name": "SeasonSearch",
+                                "seriesId": series_id,
+                                "seasonNumber": season_number,
+                            },
+                        )
+
+                availability = _series_availability(updated, requested_seasons)
                 result = {
                     "status": "already_exists",
-                    "title": existing.get("title") or requested_title,
+                    "title": updated.get("title") or existing.get("title") or requested_title,
                     "tvdbId": tvdb_id,
                     "profileUsed": profile_name,
                     "monitoredSeasons": requested_seasons,
+                    "monitoringUpdated": series_id is not None,
+                    "searchSubmitted": series_id is not None,
                     "available": availability["availableEpisodes"] > 0,
                     "availability": availability,
                 }
-                return self._with_post_request_status(result, existing.get("title") or requested_title)
+                return self._with_post_request_status(result, updated.get("title") or existing.get("title") or requested_title)
 
             return self._add_series(
                 tvdbId=tvdb_id,
@@ -833,6 +851,16 @@ class MediaRequestService:
     def _post_sonarr(self, path: str, json: Mapping[str, Any]) -> dict[str, Any]:
         response = self._request(
             "POST",
+            self.config.sonarr_url,
+            self.config.sonarr_api_key,
+            path,
+            json=json,
+        )
+        return response if isinstance(response, dict) else {}
+
+    def _put_sonarr(self, path: str, json: Mapping[str, Any]) -> dict[str, Any]:
+        response = self._request(
+            "PUT",
             self.config.sonarr_url,
             self.config.sonarr_api_key,
             path,

@@ -265,7 +265,9 @@ class MediaRequestService:
         try:
             existing = self._find_existing_show(tvdb_id)
             if existing is not None:
-                season_update = _with_season_monitoring(existing, requested_seasons)
+                season_update = _with_season_monitoring(
+                    existing, requested_seasons, preserve_existing=True
+                )
                 if "error" in season_update:
                     return {
                         "status": "error",
@@ -1395,7 +1397,9 @@ def _optional_season(season: int | None) -> int | None:
 
 
 def _with_season_monitoring(
-    series: Mapping[str, Any], requested_seasons: list[int]
+    series: Mapping[str, Any],
+    requested_seasons: list[int],
+    preserve_existing: bool = False,
 ) -> dict[str, Any]:
     seasons = _ensure_list(series.get("seasons"))
     available_seasons = sorted(
@@ -1419,7 +1423,8 @@ def _with_season_monitoring(
         "seasons": [
             {
                 **season,
-                "monitored": season.get("seasonNumber") in requested,
+                "monitored": season.get("seasonNumber") in requested
+                or (preserve_existing and season.get("monitored") is True),
             }
             for season in seasons
         ]

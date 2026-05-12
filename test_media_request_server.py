@@ -1065,7 +1065,7 @@ class RequestSeriesTests(unittest.TestCase):
         )
         self.assertEqual(len(session.requests), 1)
 
-    def test_request_series_existing_updates_monitoring_and_starts_season_search(self) -> None:
+    def test_request_series_existing_adds_monitoring_and_starts_season_search(self) -> None:
         existing = {
             "id": 77,
             "title": "Existing Show",
@@ -1089,7 +1089,7 @@ class RequestSeriesTests(unittest.TestCase):
             "seasons": [
                 {
                     "seasonNumber": 1,
-                    "monitored": False,
+                    "monitored": True,
                     "statistics": {"episodeFileCount": 2, "episodeCount": 10},
                 },
                 {
@@ -1116,7 +1116,7 @@ class RequestSeriesTests(unittest.TestCase):
             [
                 {
                     "seasonNumber": 1,
-                    "monitored": False,
+                    "monitored": True,
                     "statistics": {"episodeFileCount": 2, "episodeCount": 10},
                 },
                 {

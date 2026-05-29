@@ -941,15 +941,26 @@ class McpToolTests(unittest.TestCase):
         fastmcp_module = types.ModuleType("mcp.server.fastmcp")
         fastmcp_module.FastMCP = FakeFastMCP
 
-        with patch.dict(
-            sys.modules,
-            {
-                "mcp": mcp_module,
-                "mcp.server": server_module,
-                "mcp.server.fastmcp": fastmcp_module,
-            },
-        ), patch.dict(os.environ, env_config(), clear=True):
-            mcp = server.create_server()
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(
+                sys.modules,
+                {
+                    "mcp": mcp_module,
+                    "mcp.server": server_module,
+                    "mcp.server.fastmcp": fastmcp_module,
+                },
+            ), patch.dict(
+                os.environ,
+                env_config(
+                    {
+                        server.ENV_REQUEST_DB_PATH: os.path.join(
+                            directory, "requests.sqlite3"
+                        )
+                    }
+                ),
+                clear=True,
+            ):
+                mcp = server.create_server()
 
         self.assertEqual(
             mcp.tools,

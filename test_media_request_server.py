@@ -11,6 +11,7 @@ from unittest.mock import patch
 from typing import Any
 
 import media_request_server as server
+import radarr_webhook_bridge as webhook_bridge
 
 
 class FakeResponse:
@@ -1818,6 +1819,26 @@ class RequestStoreTests(unittest.TestCase):
             self.assertIsNotNone(rows[0][1])
             self.assertEqual(rows[1][0], "Blade Runner")
             self.assertIsNone(rows[1][1])
+
+
+class RadarrWebhookBridgeTests(unittest.TestCase):
+    def test_extract_radarr_movie_id_accepts_positive_ints(self) -> None:
+        self.assertEqual(webhook_bridge.extract_radarr_movie_id({"movie": {"id": 44}}), 44)
+        self.assertEqual(webhook_bridge.extract_radarr_movie_id({"movie": {"id": "55"}}), 55)
+
+    def test_extract_radarr_movie_id_rejects_missing_or_invalid_values(self) -> None:
+        self.assertIsNone(webhook_bridge.extract_radarr_movie_id({}))
+        self.assertIsNone(webhook_bridge.extract_radarr_movie_id({"movie": None}))
+        self.assertIsNone(webhook_bridge.extract_radarr_movie_id({"movie": {"id": 0}}))
+        self.assertIsNone(webhook_bridge.extract_radarr_movie_id({"movie": {"id": True}}))
+        self.assertIsNone(webhook_bridge.extract_radarr_movie_id({"movie": {"id": "abc"}}))
+
+    def test_should_handle_only_file_available_radarr_events(self) -> None:
+        self.assertTrue(webhook_bridge.should_handle_radarr_event({"eventType": "Download"}))
+        self.assertTrue(webhook_bridge.should_handle_radarr_event({"eventType": "Rename"}))
+        self.assertTrue(webhook_bridge.should_handle_radarr_event({"eventType": "MovieFileUpgrade"}))
+        self.assertFalse(webhook_bridge.should_handle_radarr_event({"eventType": "Grab"}))
+        self.assertFalse(webhook_bridge.should_handle_radarr_event({"eventType": "MovieDelete"}))
 
 
 if __name__ == "__main__":

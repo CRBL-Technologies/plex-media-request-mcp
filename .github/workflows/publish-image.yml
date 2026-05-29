@@ -29,8 +29,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract Docker metadata
-        id: meta
+      - name: Extract MCP Docker metadata
+        id: meta_mcp
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/crbl-technologies/plex-media-request-mcp
@@ -40,12 +40,35 @@ jobs:
             type=ref,event=tag
             type=sha,format=short
 
-      - name: Build and push image
+      - name: Build and push MCP image
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: ./Dockerfile
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ${{ steps.meta_mcp.outputs.tags }}
+          labels: ${{ steps.meta_mcp.outputs.labels }}
+          cache-from: type=gha,scope=mcp
+          cache-to: type=gha,mode=max,scope=mcp
+
+      - name: Extract webhook bridge Docker metadata
+        id: meta_webhook
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/crbl-technologies/plex-media-request-webhook-bridge
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,format=short
+
+      - name: Build and push webhook bridge image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.webhook
+          push: true
+          tags: ${{ steps.meta_webhook.outputs.tags }}
+          labels: ${{ steps.meta_webhook.outputs.labels }}
+          cache-from: type=gha,scope=webhook
+          cache-to: type=gha,mode=max,scope=webhook

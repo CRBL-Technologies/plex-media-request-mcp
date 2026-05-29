@@ -4,7 +4,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     HERMES_HOME=/opt/data \
     PLEX_MEDIA_REQUEST_WEBHOOK_HOST=0.0.0.0 \
-    PLEX_MEDIA_REQUEST_WEBHOOK_PORT=8080
+    PLEX_MEDIA_REQUEST_WEBHOOK_PORT=18081
 
 WORKDIR /app
 
@@ -20,6 +20,6 @@ RUN mkdir -p /opt/data/state && chown -R app:app /opt/data /app
 
 USER app
 
-EXPOSE 8080
+EXPOSE 18081
 
 ENTRYPOINT ["python", "/app/radarr_webhook_bridge.py"]

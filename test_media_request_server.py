@@ -963,6 +963,7 @@ class McpToolTests(unittest.TestCase):
                 "browse_library",
                 "media_status",
                 "notify_movie_available",
+                "notify_series_available",
                 "notify_available_requests",
             ],
         )
@@ -1820,8 +1821,98 @@ class RequestStoreTests(unittest.TestCase):
             self.assertEqual(rows[1][0], "Blade Runner")
             self.assertIsNone(rows[1][1])
 
+    def test_notify_series_available_sends_when_requested_seasons_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = server.RequestStore(os.path.join(directory, "requests.sqlite3"))
+            request_id = store.add_request(
+                media_type="series",
+                title="Fringe",
+                year=2008,
+                requested_by_chat_id=100000001,
+                sonarr_series_id=77,
+                tvdb_id=82066,
+                season_numbers=[1],
+            )
+            sent: list[tuple[int, str]] = []
+            service = server.MediaRequestService(
+                config(),
+                session=FakeSession([
+                    {
+                        "id": 77,
+                        "title": "Fringe",
+                        "year": 2008,
+                        "seasons": [
+                            {
+                                "seasonNumber": 1,
+                                "statistics": {"episodeFileCount": 20, "totalEpisodeCount": 20},
+                            }
+                        ],
+                    }
+                ]),
+                request_store=store,
+                telegram_sender=lambda chat_id, text: sent.append((chat_id, text)) is None,
+            )
+
+            result = service.notify_series_available(77)
+
+            self.assertEqual(result["checked"], 1)
+            self.assertEqual(result["notified"], 1)
+            self.assertEqual(result["notifications"][0]["id"], request_id)
+            self.assertEqual(sent, [(100000001, "✅ Fringe (2008) season 1 is now available on Plex.")])
+            with sqlite3.connect(store.db_path) as connection:
+                row = connection.execute(
+                    "SELECT status, notified_available_at FROM media_requests WHERE id = ?",
+                    (request_id,),
+                ).fetchone()
+            self.assertEqual(row[0], "available")
+            self.assertIsNotNone(row[1])
+
+    def test_notify_series_available_waits_until_requested_seasons_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = server.RequestStore(os.path.join(directory, "requests.sqlite3"))
+            store.add_request(
+                media_type="series",
+                title="Fringe",
+                year=2008,
+                requested_by_chat_id=100000001,
+                sonarr_series_id=77,
+                tvdb_id=82066,
+                season_numbers=[1],
+            )
+            sent: list[tuple[int, str]] = []
+            service = server.MediaRequestService(
+                config(),
+                session=FakeSession([
+                    {
+                        "id": 77,
+                        "title": "Fringe",
+                        "year": 2008,
+                        "seasons": [
+                            {
+                                "seasonNumber": 1,
+                                "statistics": {"episodeFileCount": 19, "totalEpisodeCount": 20},
+                            }
+                        ],
+                    }
+                ]),
+                request_store=store,
+                telegram_sender=lambda chat_id, text: sent.append((chat_id, text)) is None,
+            )
+
+            result = service.notify_series_available(77)
+
+            self.assertEqual(result["checked"], 1)
+            self.assertEqual(result["notified"], 0)
+            self.assertEqual(sent, [])
+            with sqlite3.connect(store.db_path) as connection:
+                row = connection.execute("SELECT notified_available_at FROM media_requests").fetchone()
+            self.assertIsNone(row[0])
+
 
 class RadarrWebhookBridgeTests(unittest.TestCase):
+    def test_default_webhook_port_is_unique(self) -> None:
+        self.assertEqual(webhook_bridge.DEFAULT_PORT, 18081)
+
     def test_extract_radarr_movie_id_accepts_positive_ints(self) -> None:
         self.assertEqual(webhook_bridge.extract_radarr_movie_id({"movie": {"id": 44}}), 44)
         self.assertEqual(webhook_bridge.extract_radarr_movie_id({"movie": {"id": "55"}}), 55)
@@ -1833,12 +1924,29 @@ class RadarrWebhookBridgeTests(unittest.TestCase):
         self.assertIsNone(webhook_bridge.extract_radarr_movie_id({"movie": {"id": True}}))
         self.assertIsNone(webhook_bridge.extract_radarr_movie_id({"movie": {"id": "abc"}}))
 
+    def test_extract_sonarr_series_id_accepts_positive_ints(self) -> None:
+        self.assertEqual(webhook_bridge.extract_sonarr_series_id({"series": {"id": 77}}), 77)
+        self.assertEqual(webhook_bridge.extract_sonarr_series_id({"series": {"id": "88"}}), 88)
+
+    def test_extract_sonarr_series_id_rejects_missing_or_invalid_values(self) -> None:
+        self.assertIsNone(webhook_bridge.extract_sonarr_series_id({}))
+        self.assertIsNone(webhook_bridge.extract_sonarr_series_id({"series": None}))
+        self.assertIsNone(webhook_bridge.extract_sonarr_series_id({"series": {"id": 0}}))
+        self.assertIsNone(webhook_bridge.extract_sonarr_series_id({"series": {"id": False}}))
+        self.assertIsNone(webhook_bridge.extract_sonarr_series_id({"series": {"id": "abc"}}))
+
     def test_should_handle_only_file_available_radarr_events(self) -> None:
         self.assertTrue(webhook_bridge.should_handle_radarr_event({"eventType": "Download"}))
         self.assertTrue(webhook_bridge.should_handle_radarr_event({"eventType": "Rename"}))
         self.assertTrue(webhook_bridge.should_handle_radarr_event({"eventType": "MovieFileUpgrade"}))
         self.assertFalse(webhook_bridge.should_handle_radarr_event({"eventType": "Grab"}))
         self.assertFalse(webhook_bridge.should_handle_radarr_event({"eventType": "MovieDelete"}))
+
+    def test_should_handle_only_file_available_sonarr_events(self) -> None:
+        self.assertTrue(webhook_bridge.should_handle_sonarr_event({"eventType": "Download"}))
+        self.assertTrue(webhook_bridge.should_handle_sonarr_event({"eventType": "EpisodeFileUpgrade"}))
+        self.assertFalse(webhook_bridge.should_handle_sonarr_event({"eventType": "Grab"}))
+        self.assertFalse(webhook_bridge.should_handle_sonarr_event({"eventType": "SeriesDelete"}))
 
 
 if __name__ == "__main__":

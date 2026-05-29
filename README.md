@@ -81,41 +81,26 @@ mcp_servers:
 The env file should contain the same `PLEX_MEDIA_REQUEST_*` variables documented
 below, plus `TELEGRAM_BOT_TOKEN` if availability notifications are enabled.
 
-The Radarr webhook listener is a separate HTTP service image:
+The Radarr/Sonarr webhook listener is a separate HTTP service image:
 
 ```text
 ghcr.io/crbl-technologies/plex-media-request-webhook-bridge:latest
 ```
 
-Use that image in Docker Compose when Radarr needs to call a persistent HTTP
-endpoint:
+Use that image in Docker Compose when Radarr or Sonarr needs to call a persistent
+HTTP endpoint. The bridge defaults to port `18081` and intentionally has no
+built-in auth; keep it on an internal Docker network and do not expose it to the
+public internet.
 
 ```yaml
 services:
   media-request-webhook:
     image: ghcr.io/crbl-technologies/plex-media-request-webhook-bridge:latest
     restart: unless-stopped
-    ports:
-      - "8080:8080"
-    environment:
-      HERMES_HOME: /opt/data
-      PLEX_MEDIA_REQUEST_WEBHOOK_TOKEN: replace-with-shared-secret
-      PLEX_MEDIA_REQUEST_DB_PATH: /opt/data/state/media_requests.sqlite3
-      PLEX_MEDIA_REQUEST_RADARR_BASE_URL: http://radarr:7878
-      PLEX_MEDIA_REQUEST_RADARR_API_KEY: replace-with-radarr-api-key
-      PLEX_MEDIA_REQUEST_RADARR_QUALITY_PROFILE_ID: "25"
-      PLEX_MEDIA_REQUEST_RADARR_QUALITY_PROFILE_NAME: HD Bluray + WEB - Original
-      PLEX_MEDIA_REQUEST_RADARR_ROOT_FOLDER_PATH: /movies
-      PLEX_MEDIA_REQUEST_RADARR_TAG_IDS: "12"
-      PLEX_MEDIA_REQUEST_SONARR_BASE_URL: http://sonarr:8989
-      PLEX_MEDIA_REQUEST_SONARR_API_KEY: replace-with-sonarr-api-key
-      PLEX_MEDIA_REQUEST_SONARR_NORMAL_QUALITY_PROFILE_ID: "25"
-      PLEX_MEDIA_REQUEST_SONARR_NORMAL_QUALITY_PROFILE_NAME: WEB-1080p - Original
-      PLEX_MEDIA_REQUEST_SONARR_ANIME_QUALITY_PROFILE_ID: "26"
-      PLEX_MEDIA_REQUEST_SONARR_ANIME_QUALITY_PROFILE_NAME: Remux-1080p - Anime - Original
-      PLEX_MEDIA_REQUEST_SONARR_ROOT_FOLDER_PATH: /tv
-      PLEX_MEDIA_REQUEST_SONARR_TAG_IDS: "7"
-      TELEGRAM_BOT_TOKEN: replace-with-telegram-bot-token
+    env_file:
+      - ./media-request.env
+    expose:
+      - "18081"
     volumes:
       - media-request-state:/opt/data/state
 
@@ -123,16 +108,44 @@ volumes:
   media-request-state:
 ```
 
-Configure Radarr Connect to POST to:
+`media-request.env` contains the same Arr/Telegram settings used by the MCP
+server, for example:
 
-```text
-http://media-request-webhook:8080/radarr?token=replace-with-shared-secret
+```dotenv
+HERMES_HOME=/opt/data
+PLEX_MEDIA_REQUEST_DB_PATH=/opt/data/state/media_requests.sqlite3
+PLEX_MEDIA_REQUEST_RADARR_BASE_URL=http://radarr:7878
+PLEX_MEDIA_REQUEST_RADARR_API_KEY=replace-with-radarr-api-key
+PLEX_MEDIA_REQUEST_RADARR_QUALITY_PROFILE_ID=25
+PLEX_MEDIA_REQUEST_RADARR_QUALITY_PROFILE_NAME=HD Bluray + WEB - Original
+PLEX_MEDIA_REQUEST_RADARR_ROOT_FOLDER_PATH=/movies
+PLEX_MEDIA_REQUEST_RADARR_TAG_IDS=12
+PLEX_MEDIA_REQUEST_SONARR_BASE_URL=http://sonarr:8989
+PLEX_MEDIA_REQUEST_SONARR_API_KEY=replace-with-sonarr-api-key
+PLEX_MEDIA_REQUEST_SONARR_NORMAL_QUALITY_PROFILE_ID=25
+PLEX_MEDIA_REQUEST_SONARR_NORMAL_QUALITY_PROFILE_NAME=WEB-1080p - Original
+PLEX_MEDIA_REQUEST_SONARR_ANIME_QUALITY_PROFILE_ID=26
+PLEX_MEDIA_REQUEST_SONARR_ANIME_QUALITY_PROFILE_NAME=Remux-1080p - Anime - Original
+PLEX_MEDIA_REQUEST_SONARR_ROOT_FOLDER_PATH=/tv
+PLEX_MEDIA_REQUEST_SONARR_TAG_IDS=7
+TELEGRAM_BOT_TOKEN=replace-with-telegram-bot-token
 ```
 
-or send the token as `X-Webhook-Token`. The bridge accepts Radarr `Download`,
-`Rename`, and `MovieFileUpgrade` events, extracts `movie.id`, then calls the
-narrow `notify_movie_available(radarr_movie_id)` path. The notification path
-still verifies Radarr says the movie has a file before sending Telegram.
+The env vars are required because the webhook bridge is standalone: it must read
+the same request SQLite DB, verify availability from Radarr/Sonarr, and send the
+Telegram notification. Keeping them in one `env_file` avoids duplicating a long
+environment block in Compose.
+
+Configure Connect webhooks to POST to these internal URLs:
+
+```text
+http://media-request-webhook:18081/radarr
+http://media-request-webhook:18081/sonarr
+```
+
+Radarr events call `notify_movie_available(radarr_movie_id)`. Sonarr events call
+`notify_series_available(sonarr_series_id)`, which only notifies once all stored
+requested seasons for that requester are complete.
 
 ## Hermes Example
 

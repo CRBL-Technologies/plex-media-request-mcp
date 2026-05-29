@@ -267,6 +267,24 @@ class RequestStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def pending_series_notifications_for_sonarr_id(
+        self, sonarr_series_id: int
+    ) -> list[dict[str, Any]]:
+        with sqlite3.connect(self.db_path) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                """
+                SELECT * FROM media_requests
+                WHERE media_type = 'series'
+                  AND sonarr_series_id = ?
+                  AND requested_by_chat_id IS NOT NULL
+                  AND notified_available_at IS NULL
+                ORDER BY created_at ASC
+                """,
+                (sonarr_series_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def mark_notified(self, request_id: int) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with sqlite3.connect(self.db_path) as connection:
@@ -667,6 +685,75 @@ class MediaRequestService:
                 continue
             self.request_store.mark_notified(request_id)
             notified.append({"id": request_id, "title": title_with_year, "chatId": chat_id})
+
+        return {
+            "ok": True,
+            "checked": len(rows),
+            "notified": len(notified),
+            "notifications": notified,
+            "skipped": skipped,
+        }
+
+    def notify_series_available(self, sonarr_series_id: int) -> dict[str, Any]:
+        """Notify requesters for one Sonarr series when requested seasons are available."""
+        if self.request_store is None:
+            return {"ok": False, "notified": 0, "checked": 0, "message": "Request store is not configured."}
+
+        series_id = _positive_int_or_none(sonarr_series_id)
+        if series_id is None:
+            return {"ok": False, "notified": 0, "checked": 0, "message": "sonarr_series_id must be a positive integer."}
+
+        rows = self.request_store.pending_series_notifications_for_sonarr_id(series_id)
+        if not rows:
+            return {"ok": True, "checked": 0, "notified": 0, "notifications": [], "skipped": []}
+
+        try:
+            series = self._get_sonarr(f"/api/v3/series/{series_id}")
+        except ArrApiError as exc:
+            return {
+                "ok": True,
+                "checked": len(rows),
+                "notified": 0,
+                "notifications": [],
+                "skipped": [{"sonarrSeriesId": series_id, "reason": str(exc)}],
+            }
+
+        if not isinstance(series, dict):
+            return {"ok": True, "checked": len(rows), "notified": 0, "notifications": [], "skipped": []}
+
+        notified: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        for row in rows:
+            request_id = _positive_int_or_none(row.get("id"))
+            chat_id = _positive_int_or_none(row.get("requested_by_chat_id"))
+            seasons = _decode_season_numbers(row.get("season_numbers"))
+            if request_id is None or chat_id is None:
+                skipped.append({"id": request_id, "reason": "missing request or chat ID"})
+                continue
+            if not seasons:
+                skipped.append({"id": request_id, "reason": "missing requested seasons"})
+                continue
+
+            availability = _series_availability(series, seasons)
+            if availability["totalEpisodes"] <= 0 or availability["missingEpisodes"] > 0:
+                skipped.append(
+                    {
+                        "id": request_id,
+                        "reason": "requested seasons are not fully available",
+                        "availability": availability,
+                    }
+                )
+                continue
+
+            title = _clean_text(series.get("title")) or _clean_text(row.get("title")) or "Your series"
+            year = _positive_int_or_none(series.get("year")) or _positive_int_or_none(row.get("year"))
+            title_with_year = f"{title} ({year})" if year else title
+            message = f"✅ {title_with_year} {_format_season_list(seasons)} is now available on Plex."
+            if not self.telegram_sender(chat_id, message):
+                skipped.append({"id": request_id, "reason": "Telegram send failed"})
+                continue
+            self.request_store.mark_notified(request_id)
+            notified.append({"id": request_id, "title": title_with_year, "seasons": seasons, "chatId": chat_id})
 
         return {
             "ok": True,
@@ -1367,6 +1454,11 @@ def create_server() -> Any:
     def notify_movie_available(radarr_movie_id: int) -> dict[str, Any]:
         """Webhook target: notify requesters for one Radarr movie ID after import/download."""
         return service.notify_movie_available(radarr_movie_id=radarr_movie_id)
+
+    @mcp.tool()
+    def notify_series_available(sonarr_series_id: int) -> dict[str, Any]:
+        """Webhook target: notify requesters for one Sonarr series ID when requested seasons are available."""
+        return service.notify_series_available(sonarr_series_id=sonarr_series_id)
 
     @mcp.tool()
     def notify_available_requests(limit: int = 100) -> dict[str, Any]:
@@ -2392,6 +2484,24 @@ def _require_positive_int(value: int, name: str) -> int:
     if not isinstance(value, int) or value <= 0:
         raise ValueError(f"{name} must be a positive integer")
     return value
+
+
+def _decode_season_numbers(value: Any) -> list[int]:
+    if value is None:
+        return []
+    try:
+        decoded = json.loads(value) if isinstance(value, str) else value
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(decoded, list):
+        return []
+    seasons = sorted(
+        season
+        for item in decoded
+        for season in [_positive_int_or_none(item)]
+        if season is not None
+    )
+    return seasons
 
 
 def _send_telegram_message(chat_id: int, text: str) -> bool:

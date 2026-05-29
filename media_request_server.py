@@ -60,6 +60,7 @@ REQUIRED_ENV_VARS = (
 DEFAULT_TIMEOUT_SECONDS = 15
 MAX_SEARCH_RESULTS = 10
 MAX_STATUS_RESULTS = QUEUE_PAGE_SIZE
+DB_BUSY_TIMEOUT_MS = 5000
 
 
 class ArrApiError(RuntimeError):
@@ -180,8 +181,20 @@ class RequestStore:
         return cls(hermes_home / "state" / "media_requests.sqlite3")
 
     def _initialize(self) -> None:
-        with sqlite3.connect(self.db_path) as connection:
+        with self._connect() as connection:
             connection.executescript(self.SCHEMA)
+
+    def _connect(self, *, row_factory: bool = False) -> sqlite3.Connection:
+        connection = sqlite3.connect(
+            self.db_path, timeout=DB_BUSY_TIMEOUT_MS / 1000
+        )
+        connection.execute(f"PRAGMA busy_timeout = {DB_BUSY_TIMEOUT_MS}")
+        connection.execute("PRAGMA journal_mode = WAL")
+        connection.execute("PRAGMA synchronous = NORMAL")
+        connection.execute("PRAGMA foreign_keys = ON")
+        if row_factory:
+            connection.row_factory = sqlite3.Row
+        return connection
 
     def add_request(
         self,
@@ -202,7 +215,7 @@ class RequestStore:
     ) -> int:
         now = datetime.now(timezone.utc).isoformat()
         seasons_json = json.dumps(season_numbers) if season_numbers is not None else None
-        with sqlite3.connect(self.db_path) as connection:
+        with self._connect() as connection:
             cursor = connection.execute(
                 """
                 INSERT INTO media_requests (
@@ -233,8 +246,7 @@ class RequestStore:
             return int(cursor.lastrowid)
 
     def pending_movie_notifications(self, limit: int = 100) -> list[dict[str, Any]]:
-        with sqlite3.connect(self.db_path) as connection:
-            connection.row_factory = sqlite3.Row
+        with self._connect(row_factory=True) as connection:
             rows = connection.execute(
                 """
                 SELECT * FROM media_requests
@@ -252,8 +264,7 @@ class RequestStore:
     def pending_movie_notifications_for_radarr_id(
         self, radarr_movie_id: int
     ) -> list[dict[str, Any]]:
-        with sqlite3.connect(self.db_path) as connection:
-            connection.row_factory = sqlite3.Row
+        with self._connect(row_factory=True) as connection:
             rows = connection.execute(
                 """
                 SELECT * FROM media_requests
@@ -270,8 +281,7 @@ class RequestStore:
     def pending_series_notifications_for_sonarr_id(
         self, sonarr_series_id: int
     ) -> list[dict[str, Any]]:
-        with sqlite3.connect(self.db_path) as connection:
-            connection.row_factory = sqlite3.Row
+        with self._connect(row_factory=True) as connection:
             rows = connection.execute(
                 """
                 SELECT * FROM media_requests
@@ -287,7 +297,7 @@ class RequestStore:
 
     def mark_notified(self, request_id: int) -> None:
         now = datetime.now(timezone.utc).isoformat()
-        with sqlite3.connect(self.db_path) as connection:
+        with self._connect() as connection:
             connection.execute(
                 """
                 UPDATE media_requests

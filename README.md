@@ -137,6 +137,8 @@ PLEX_MEDIA_REQUEST_SONARR_ANIME_QUALITY_PROFILE_NAME=Remux-1080p - Anime - Origi
 PLEX_MEDIA_REQUEST_SONARR_ROOT_FOLDER_PATH=/tv
 PLEX_MEDIA_REQUEST_SONARR_TAG_IDS=7
 TELEGRAM_BOT_TOKEN=replace-with-telegram-bot-token
+# Optional; defaults to 65536 bytes.
+PLEX_MEDIA_REQUEST_WEBHOOK_MAX_BODY_BYTES=65536
 ```
 
 The env vars are required because the webhook bridge is standalone: it must read
@@ -169,6 +171,9 @@ http://media-request-webhook:18081/sonarr
 Radarr events call `notify_movie_available(radarr_movie_id)`. Sonarr events call
 `notify_series_available(sonarr_series_id)`, which only notifies once all stored
 requested seasons for that requester are complete.
+
+The webhook bridge rejects oversized request bodies, malformed
+`Content-Length`, and explicit non-JSON content types before parsing the payload.
 
 ## Hermes Example
 

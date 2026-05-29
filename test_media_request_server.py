@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import sqlite3
@@ -35,6 +36,33 @@ class FakeSession:
     def request(self, method: str, url: str, **kwargs: Any) -> FakeResponse:
         self.requests.append({"method": method, "url": url, **kwargs})
         return FakeResponse(self.responses.pop(0))
+
+
+class FakeWebhookHandler:
+    def __init__(
+        self,
+        body: bytes,
+        headers: dict[str, str],
+        max_body_bytes: int = webhook_bridge.DEFAULT_MAX_BODY_BYTES,
+    ) -> None:
+        self.headers = headers
+        self.rfile = io.BytesIO(body)
+        self.wfile = io.BytesIO()
+        self.server = types.SimpleNamespace(max_body_bytes=max_body_bytes)
+        self.status: int | None = None
+        self.response_headers: dict[str, str] = {}
+
+    def send_response(self, status: int) -> None:
+        self.status = status
+
+    def send_header(self, name: str, value: str) -> None:
+        self.response_headers[name] = value
+
+    def end_headers(self) -> None:
+        return None
+
+    def response_json(self) -> dict[str, Any]:
+        return json.loads(self.wfile.getvalue().decode("utf-8"))
 
 
 def config() -> server.ArrConfig:
@@ -1716,6 +1744,20 @@ class RequestStoreTests(unittest.TestCase):
                 os.path.join(directory, "state", "media_requests.sqlite3"),
             )
             self.assertTrue(os.path.exists(store.db_path))
+
+    def test_request_store_configures_sqlite_for_shared_container_access(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = server.RequestStore(os.path.join(directory, "requests.sqlite3"))
+
+            with store._connect() as connection:
+                journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+                busy_timeout = connection.execute("PRAGMA busy_timeout").fetchone()[0]
+                foreign_keys = connection.execute("PRAGMA foreign_keys").fetchone()[0]
+
+            self.assertEqual(journal_mode.lower(), "wal")
+            self.assertEqual(busy_timeout, server.DB_BUSY_TIMEOUT_MS)
+            self.assertEqual(foreign_keys, 1)
+
     def test_notify_available_requests_sends_movie_notifications_once(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = server.RequestStore(os.path.join(directory, "requests.sqlite3"))
@@ -1923,6 +1965,88 @@ class RequestStoreTests(unittest.TestCase):
 class RadarrWebhookBridgeTests(unittest.TestCase):
     def test_default_webhook_port_is_unique(self) -> None:
         self.assertEqual(webhook_bridge.DEFAULT_PORT, 18081)
+
+    def test_load_max_body_bytes_validates_env_value(self) -> None:
+        self.assertEqual(
+            webhook_bridge._load_max_body_bytes(None),
+            webhook_bridge.DEFAULT_MAX_BODY_BYTES,
+        )
+        self.assertEqual(webhook_bridge._load_max_body_bytes("1024"), 1024)
+        with self.assertRaisesRegex(RuntimeError, webhook_bridge.ENV_MAX_BODY_BYTES):
+            webhook_bridge._load_max_body_bytes("0")
+        with self.assertRaisesRegex(RuntimeError, webhook_bridge.ENV_MAX_BODY_BYTES):
+            webhook_bridge._load_max_body_bytes("large")
+
+    def test_webhook_payload_accepts_json_content_type(self) -> None:
+        body = b'{"eventType": "Download"}'
+        handler = FakeWebhookHandler(
+            body,
+            {
+                "Content-Type": "application/json; charset=utf-8",
+                "Content-Length": str(len(body)),
+            },
+        )
+
+        payload = webhook_bridge.ArrWebhookHandler._read_payload(handler)
+
+        self.assertEqual(payload, {"eventType": "Download"})
+        self.assertIsNone(handler.status)
+
+    def test_webhook_payload_rejects_non_json_content_type(self) -> None:
+        body = b'{"eventType": "Download"}'
+        handler = FakeWebhookHandler(
+            body,
+            {
+                "Content-Type": "text/plain",
+                "Content-Length": str(len(body)),
+            },
+        )
+
+        payload = webhook_bridge.ArrWebhookHandler._read_payload(handler)
+
+        self.assertIsNone(payload)
+        self.assertEqual(handler.status, 415)
+        self.assertEqual(
+            handler.response_json()["error"],
+            "content type must be application/json",
+        )
+
+    def test_webhook_payload_rejects_invalid_content_length(self) -> None:
+        handler = FakeWebhookHandler(
+            b"{}",
+            {"Content-Type": "application/json", "Content-Length": "not-a-number"},
+        )
+
+        payload = webhook_bridge.ArrWebhookHandler._read_payload(handler)
+
+        self.assertIsNone(payload)
+        self.assertEqual(handler.status, 400)
+        self.assertEqual(handler.response_json()["error"], "invalid Content-Length")
+
+    def test_webhook_payload_rejects_oversized_body_before_reading(self) -> None:
+        handler = FakeWebhookHandler(
+            b"{}",
+            {"Content-Type": "application/json", "Content-Length": "3"},
+            max_body_bytes=2,
+        )
+
+        payload = webhook_bridge.ArrWebhookHandler._read_payload(handler)
+
+        self.assertIsNone(payload)
+        self.assertEqual(handler.status, 413)
+        self.assertEqual(handler.response_json()["error"], "request body too large")
+
+    def test_webhook_payload_sanitizes_invalid_json_errors(self) -> None:
+        handler = FakeWebhookHandler(
+            b"{",
+            {"Content-Type": "application/json", "Content-Length": "1"},
+        )
+
+        payload = webhook_bridge.ArrWebhookHandler._read_payload(handler)
+
+        self.assertIsNone(payload)
+        self.assertEqual(handler.status, 400)
+        self.assertEqual(handler.response_json()["error"], "invalid JSON body")
 
     def test_extract_radarr_movie_id_accepts_positive_ints(self) -> None:
         self.assertEqual(webhook_bridge.extract_radarr_movie_id({"movie": {"id": 44}}), 44)

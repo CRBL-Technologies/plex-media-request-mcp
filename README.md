@@ -43,6 +43,44 @@ Tag IDs are optional comma-separated lists. Radarr and Sonarr keep separate tag
 namespaces, so create the visible tag in each app and use that app's numeric tag
 ID in the matching env var.
 
+## Container Image
+
+The repository publishes a Docker image to GitHub Container Registry on pushes to
+`main` and on version tags:
+
+```text
+ghcr.io/crbl-technologies/plex-media-request-mcp:latest
+```
+
+For a private repository/package, log in from the Docker host before pulling:
+
+```bash
+docker login ghcr.io -u YOUR_GITHUB_USERNAME
+# password: GitHub token with read access to the package
+```
+
+This image is an MCP stdio server, so it should be launched by the client that
+speaks MCP instead of as a detached long-running web service. For example, when
+Hermes starts the MCP process, point the MCP command at Docker:
+
+```yaml
+mcp_servers:
+  media:
+    command: docker
+    args:
+      - run
+      - --rm
+      - -i
+      - --env-file
+      - /path/to/media-request.env
+      - -v
+      - media-request-state:/opt/data/state
+      - ghcr.io/crbl-technologies/plex-media-request-mcp:latest
+```
+
+The env file should contain the same `PLEX_MEDIA_REQUEST_*` variables documented
+below, plus `TELEGRAM_BOT_TOKEN` if availability notifications are enabled.
+
 ## Hermes Example
 
 ```yaml
@@ -66,6 +104,8 @@ mcp_servers:
       PLEX_MEDIA_REQUEST_SONARR_ANIME_QUALITY_PROFILE_NAME: replace-with-sonarr-anime-quality-profile-name
       PLEX_MEDIA_REQUEST_SONARR_ROOT_FOLDER_PATH: replace-with-sonarr-root-folder-path
       PLEX_MEDIA_REQUEST_SONARR_TAG_IDS: replace-with-sonarr-tag-ids
+      # Optional; defaults to $HERMES_HOME/state/media_requests.sqlite3, or /opt/data/state/media_requests.sqlite3 when HERMES_HOME is unset.
+      PLEX_MEDIA_REQUEST_DB_PATH: /opt/data/state/media_requests.sqlite3
 ```
 
 ## Tools
@@ -73,12 +113,19 @@ mcp_servers:
 - `search_media(query: str, media_type: str = "any", season: int | None = None,
   limit: int = 5)` searches Radarr and/or Sonarr and returns factual
   file-based availability.
-- `request_movie(tmdbId: int, title: str | None = None)` requests a movie using
-  the configured Radarr policy.
+- `request_movie(tmdbId: int, title: str | None = None,
+  requested_by_user_id: int | None = None,
+  requested_by_chat_id: int | None = None,
+  requested_by_username: str | None = None)` requests a movie using the configured
+  Radarr policy and records an accepted request in SQLite when the server is
+  running.
 - `request_series(tvdbId: int, title: str | None = None,
-  seasons: list[int], anime: bool = False)` requests a series using the
-  configured Sonarr policy. `seasons` is required; pass every wanted season
-  explicitly.
+  seasons: list[int], anime: bool = False,
+  requested_by_user_id: int | None = None,
+  requested_by_chat_id: int | None = None,
+  requested_by_username: str | None = None)` requests a series using the
+  configured Sonarr policy and records an accepted request in SQLite when the
+  server is running. `seasons` is required; pass every wanted season explicitly.
 - `request_status(query: str | None = None, limit: int = 10)` checks active
   queues plus monitored missing media and returns whether requests are
   downloading, waiting for release, or waiting for a suitable release.
@@ -87,6 +134,12 @@ mcp_servers:
 - `browse_library(...)` browses available Radarr/Sonarr library items with
   filters for media type, genre, query, year, runtime, language, and limit.
 - `media_status()` checks basic Radarr and Sonarr connectivity.
+- `notify_movie_available(radarr_movie_id: int)` is the narrow webhook/backfill
+  target for notifying stored requesters after one Radarr movie becomes
+  available.
+- `notify_available_requests(limit: int = 100)` is a manual backfill helper that
+  checks pending stored movie requests and sends one-shot availability
+  notifications.
 
 ## Tool Specification
 

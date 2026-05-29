@@ -1,0 +1,11 @@
+.git
+.github
+.pytest_cache
+__pycache__
+*.py[cod]
+*.sqlite3
+*.db
+.env
+.env.*
+!.env.example
+.DS_Store

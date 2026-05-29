@@ -512,6 +512,14 @@ components:
           minimum: 1
         title:
           type: [string, "null"]
+        requested_by_user_id:
+          type: [integer, "null"]
+          minimum: 1
+        requested_by_chat_id:
+          type: [integer, "null"]
+          minimum: 1
+        requested_by_username:
+          type: [string, "null"]
 
     RequestMovieResponse:
       type: object
@@ -549,6 +557,14 @@ components:
         anime:
           type: boolean
           default: false
+        requested_by_user_id:
+          type: [integer, "null"]
+          minimum: 1
+        requested_by_chat_id:
+          type: [integer, "null"]
+          minimum: 1
+        requested_by_username:
+          type: [string, "null"]
 
     RequestSeriesResponse:
       type: object

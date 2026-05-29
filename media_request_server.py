@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import os
+from pathlib import Path
 import re
+import sqlite3
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from urllib.parse import urlparse
 
 import requests
@@ -34,6 +37,8 @@ ENV_SONARR_ANIME_QUALITY_PROFILE_NAME = (
 )
 ENV_SONARR_ROOT_FOLDER_PATH = "PLEX_MEDIA_REQUEST_SONARR_ROOT_FOLDER_PATH"
 ENV_SONARR_TAG_IDS = "PLEX_MEDIA_REQUEST_SONARR_TAG_IDS"
+ENV_REQUEST_DB_PATH = "PLEX_MEDIA_REQUEST_DB_PATH"
+ENV_TELEGRAM_BOT_TOKEN = "TELEGRAM_BOT_TOKEN"
 QUEUE_PAGE_SIZE = 250
 QUEUE_PARAMS = {"page": 1, "pageSize": QUEUE_PAGE_SIZE}
 
@@ -128,16 +133,167 @@ def load_config(env: Mapping[str, str] | None = None) -> ArrConfig:
     )
 
 
+
+class RequestStore:
+    """SQLite-backed durable record of accepted media requests."""
+
+    SCHEMA = """
+    CREATE TABLE IF NOT EXISTS media_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        media_type TEXT NOT NULL CHECK (media_type IN ('movie', 'series')),
+        title TEXT,
+        year INTEGER,
+        requested_by_user_id INTEGER,
+        requested_by_chat_id INTEGER,
+        requested_by_username TEXT,
+        radarr_movie_id INTEGER,
+        sonarr_series_id INTEGER,
+        tmdb_id INTEGER,
+        tvdb_id INTEGER,
+        imdb_id TEXT,
+        season_numbers TEXT,
+        status TEXT NOT NULL DEFAULT 'requested',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        notified_available_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_media_requests_movie_pending
+        ON media_requests(media_type, radarr_movie_id, notified_available_at);
+    CREATE INDEX IF NOT EXISTS idx_media_requests_series_pending
+        ON media_requests(media_type, sonarr_series_id, notified_available_at);
+    CREATE INDEX IF NOT EXISTS idx_media_requests_requester
+        ON media_requests(requested_by_chat_id, requested_by_user_id);
+    """
+
+    def __init__(self, db_path: str | os.PathLike[str]) -> None:
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._initialize()
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> "RequestStore":
+        values = os.environ if env is None else env
+        configured = values.get(ENV_REQUEST_DB_PATH, "").strip()
+        if configured:
+            return cls(configured)
+        hermes_home = Path(values.get("HERMES_HOME", "").strip() or "/opt/data")
+        return cls(hermes_home / "state" / "media_requests.sqlite3")
+
+    def _initialize(self) -> None:
+        with sqlite3.connect(self.db_path) as connection:
+            connection.executescript(self.SCHEMA)
+
+    def add_request(
+        self,
+        *,
+        media_type: str,
+        title: str | None,
+        year: int | None = None,
+        requested_by_user_id: int | None = None,
+        requested_by_chat_id: int | None = None,
+        requested_by_username: str | None = None,
+        radarr_movie_id: int | None = None,
+        sonarr_series_id: int | None = None,
+        tmdb_id: int | None = None,
+        tvdb_id: int | None = None,
+        imdb_id: str | None = None,
+        season_numbers: list[int] | None = None,
+        status: str = "requested",
+    ) -> int:
+        now = datetime.now(timezone.utc).isoformat()
+        seasons_json = json.dumps(season_numbers) if season_numbers is not None else None
+        with sqlite3.connect(self.db_path) as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO media_requests (
+                    media_type, title, year,
+                    requested_by_user_id, requested_by_chat_id, requested_by_username,
+                    radarr_movie_id, sonarr_series_id, tmdb_id, tvdb_id, imdb_id,
+                    season_numbers, status, created_at, updated_at, notified_available_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    media_type,
+                    title,
+                    year,
+                    requested_by_user_id,
+                    requested_by_chat_id,
+                    requested_by_username,
+                    radarr_movie_id,
+                    sonarr_series_id,
+                    tmdb_id,
+                    tvdb_id,
+                    imdb_id,
+                    seasons_json,
+                    status,
+                    now,
+                    now,
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def pending_movie_notifications(self, limit: int = 100) -> list[dict[str, Any]]:
+        with sqlite3.connect(self.db_path) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                """
+                SELECT * FROM media_requests
+                WHERE media_type = 'movie'
+                  AND radarr_movie_id IS NOT NULL
+                  AND requested_by_chat_id IS NOT NULL
+                  AND notified_available_at IS NULL
+                ORDER BY created_at ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def pending_movie_notifications_for_radarr_id(
+        self, radarr_movie_id: int
+    ) -> list[dict[str, Any]]:
+        with sqlite3.connect(self.db_path) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                """
+                SELECT * FROM media_requests
+                WHERE media_type = 'movie'
+                  AND radarr_movie_id = ?
+                  AND requested_by_chat_id IS NOT NULL
+                  AND notified_available_at IS NULL
+                ORDER BY created_at ASC
+                """,
+                (radarr_movie_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_notified(self, request_id: int) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute(
+                """
+                UPDATE media_requests
+                SET notified_available_at = ?, updated_at = ?, status = 'available'
+                WHERE id = ?
+                """,
+                (now, now, request_id),
+            )
+
+
 class MediaRequestService:
     def __init__(
         self,
         config: ArrConfig,
         session: requests.Session | None = None,
         timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+        request_store: RequestStore | None = None,
+        telegram_sender: Callable[[int, str], bool] | None = None,
     ) -> None:
         self.config = config
         self.session = session or requests.Session()
         self.timeout_seconds = timeout_seconds
+        self.request_store = request_store
+        self.telegram_sender = telegram_sender or _send_telegram_message
 
     def search_media(
         self,
@@ -179,7 +335,12 @@ class MediaRequestService:
         return {"ok": True, "items": items[:result_limit]}
 
     def request_movie(
-        self, tmdbId: int, title: str | None = None
+        self,
+        tmdbId: int,
+        title: str | None = None,
+        requested_by_user_id: int | None = None,
+        requested_by_chat_id: int | None = None,
+        requested_by_username: str | None = None,
     ) -> dict[str, Any]:
         tmdb_id = _require_positive_int(tmdbId, "tmdbId")
         requested_title = _optional_text(title)
@@ -188,12 +349,23 @@ class MediaRequestService:
             existing = self._find_existing_movie(tmdb_id)
             if existing is not None:
                 existing_title = existing.get("title") or requested_title
-                return {
+                result = {
                     "status": "already_exists",
                     "title": existing_title,
                     "tmdbId": tmdb_id,
+                    "radarrMovieId": _positive_int_or_none(existing.get("id")),
                     "message": f"{existing_title or 'Movie'} is already in Radarr.",
                 }
+                self._record_movie_request(
+                    result,
+                    movie=existing,
+                    tmdb_id=tmdb_id,
+                    title=existing_title,
+                    requested_by_user_id=requested_by_user_id,
+                    requested_by_chat_id=requested_by_chat_id,
+                    requested_by_username=requested_by_username,
+                )
+                return result
 
             movie = self._lookup_movie_by_tmdb(tmdb_id)
             if movie is None:
@@ -223,11 +395,21 @@ class MediaRequestService:
                 "status": "added",
                 "title": added_title,
                 "tmdbId": tmdb_id,
+                "radarrMovieId": _positive_int_or_none(response.get("id")),
                 "message": (
                     f"{added_title or 'Movie'} was added to Radarr using "
                     f"{self.config.radarr_quality_profile_name}."
                 ),
             }
+            self._record_movie_request(
+                result,
+                movie=response if response else movie,
+                tmdb_id=tmdb_id,
+                title=added_title,
+                requested_by_user_id=requested_by_user_id,
+                requested_by_chat_id=requested_by_chat_id,
+                requested_by_username=requested_by_username,
+            )
             return self._with_post_request_status(result, added_title)
         except ArrApiError as exc:
             return {
@@ -243,6 +425,9 @@ class MediaRequestService:
         title: str | None = None,
         seasons: list[int] | None = None,
         anime: bool = False,
+        requested_by_user_id: int | None = None,
+        requested_by_chat_id: int | None = None,
+        requested_by_username: str | None = None,
     ) -> dict[str, Any]:
         tvdb_id = _require_positive_int(tvdbId, "tvdbId")
         requested_title = _optional_text(title)
@@ -299,6 +484,7 @@ class MediaRequestService:
                     "status": "already_exists",
                     "title": updated.get("title") or existing.get("title") or requested_title,
                     "tvdbId": tvdb_id,
+                    "sonarrSeriesId": series_id,
                     "profileUsed": profile_name,
                     "monitoredSeasons": requested_seasons,
                     "monitoringUpdated": series_id is not None,
@@ -306,6 +492,16 @@ class MediaRequestService:
                     "available": availability["availableEpisodes"] > 0,
                     "availability": availability,
                 }
+                self._record_series_request(
+                    result,
+                    series=updated,
+                    tvdb_id=tvdb_id,
+                    title=updated.get("title") or existing.get("title") or requested_title,
+                    seasons=requested_seasons,
+                    requested_by_user_id=requested_by_user_id,
+                    requested_by_chat_id=requested_by_chat_id,
+                    requested_by_username=requested_by_username,
+                )
                 return self._with_post_request_status(result, updated.get("title") or existing.get("title") or requested_title)
 
             return self._add_series(
@@ -313,6 +509,9 @@ class MediaRequestService:
                 title=requested_title,
                 anime=anime,
                 seasons=requested_seasons,
+                requested_by_user_id=requested_by_user_id,
+                requested_by_chat_id=requested_by_chat_id,
+                requested_by_username=requested_by_username,
             )
         except ArrApiError as exc:
             return {
@@ -330,6 +529,9 @@ class MediaRequestService:
         title: str | None,
         anime: bool,
         seasons: list[int],
+        requested_by_user_id: int | None = None,
+        requested_by_chat_id: int | None = None,
+        requested_by_username: str | None = None,
     ) -> dict[str, Any]:
         tvdb_id = _require_positive_int(tvdbId, "tvdbId")
         requested_title = _optional_text(title)
@@ -387,6 +589,7 @@ class MediaRequestService:
                 "status": "added",
                 "title": added_title,
                 "tvdbId": tvdb_id,
+                "sonarrSeriesId": _positive_int_or_none(response.get("id")),
                 "profileUsed": profile_name,
                 "monitoredSeasons": requested_seasons,
                 "message": (
@@ -394,6 +597,16 @@ class MediaRequestService:
                     f"{_format_season_list(requested_seasons)} monitored."
                 ),
             }
+            self._record_series_request(
+                result,
+                series=response if response else series,
+                tvdb_id=tvdb_id,
+                title=added_title,
+                seasons=requested_seasons,
+                requested_by_user_id=requested_by_user_id,
+                requested_by_chat_id=requested_by_chat_id,
+                requested_by_username=requested_by_username,
+            )
             return self._with_post_request_status(result, added_title)
         except ArrApiError as exc:
             return {
@@ -409,6 +622,150 @@ class MediaRequestService:
             "radarr": self._service_status("radarr"),
             "sonarr": self._service_status("sonarr"),
         }
+
+    def notify_movie_available(self, radarr_movie_id: int) -> dict[str, Any]:
+        """Notify requesters for one Radarr movie when a webhook says it is available."""
+        if self.request_store is None:
+            return {"ok": False, "notified": 0, "checked": 0, "message": "Request store is not configured."}
+
+        movie_id = _positive_int_or_none(radarr_movie_id)
+        if movie_id is None:
+            return {"ok": False, "notified": 0, "checked": 0, "message": "radarr_movie_id must be a positive integer."}
+
+        rows = self.request_store.pending_movie_notifications_for_radarr_id(movie_id)
+        if not rows:
+            return {"ok": True, "checked": 0, "notified": 0, "notifications": [], "skipped": []}
+
+        try:
+            movie = self._get_radarr(f"/api/v3/movie/{movie_id}")
+        except ArrApiError as exc:
+            return {
+                "ok": True,
+                "checked": len(rows),
+                "notified": 0,
+                "notifications": [],
+                "skipped": [{"radarrMovieId": movie_id, "reason": str(exc)}],
+            }
+
+        if not isinstance(movie, dict) or not _movie_has_file(movie):
+            return {"ok": True, "checked": len(rows), "notified": 0, "notifications": [], "skipped": []}
+
+        notified: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        for row in rows:
+            request_id = _positive_int_or_none(row.get("id"))
+            chat_id = _positive_int_or_none(row.get("requested_by_chat_id"))
+            if request_id is None or chat_id is None:
+                skipped.append({"id": request_id, "reason": "missing request or chat ID"})
+                continue
+            title = _clean_text(movie.get("title")) or _clean_text(row.get("title")) or "Your movie"
+            year = _positive_int_or_none(movie.get("year")) or _positive_int_or_none(row.get("year"))
+            title_with_year = f"{title} ({year})" if year else title
+            message = f"✅ {title_with_year} is now available on Plex."
+            if not self.telegram_sender(chat_id, message):
+                skipped.append({"id": request_id, "reason": "Telegram send failed"})
+                continue
+            self.request_store.mark_notified(request_id)
+            notified.append({"id": request_id, "title": title_with_year, "chatId": chat_id})
+
+        return {
+            "ok": True,
+            "checked": len(rows),
+            "notified": len(notified),
+            "notifications": notified,
+            "skipped": skipped,
+        }
+
+    def notify_available_requests(self, limit: int = 100) -> dict[str, Any]:
+        """Manual backfill helper; webhook flow should call notify_movie_available."""
+        if self.request_store is None:
+            return {"ok": False, "notified": 0, "checked": 0, "message": "Request store is not configured."}
+
+        checked = 0
+        total_notified: list[dict[str, Any]] = []
+        total_skipped: list[dict[str, Any]] = []
+        for row in self.request_store.pending_movie_notifications(limit=limit):
+            movie_id = _positive_int_or_none(row.get("radarr_movie_id"))
+            if movie_id is None:
+                total_skipped.append({"id": _positive_int_or_none(row.get("id")), "reason": "missing movie ID"})
+                continue
+            result = self.notify_movie_available(movie_id)
+            checked += int(result.get("checked") or 0)
+            total_notified.extend(result.get("notifications") or [])
+            total_skipped.extend(result.get("skipped") or [])
+
+        return {
+            "ok": True,
+            "checked": checked,
+            "notified": len(total_notified),
+            "notifications": total_notified,
+            "skipped": total_skipped,
+        }
+
+    def _record_movie_request(
+        self,
+        result: dict[str, Any],
+        *,
+        movie: Mapping[str, Any],
+        tmdb_id: int,
+        title: str | None,
+        requested_by_user_id: int | None,
+        requested_by_chat_id: int | None,
+        requested_by_username: str | None,
+    ) -> None:
+        if self.request_store is None:
+            return
+        try:
+            request_id = self.request_store.add_request(
+                media_type="movie",
+                title=_clean_text(title) or _clean_text(movie.get("title")),
+                year=_positive_int_or_none(movie.get("year")),
+                requested_by_user_id=_positive_int_or_none(requested_by_user_id),
+                requested_by_chat_id=_positive_int_or_none(requested_by_chat_id),
+                requested_by_username=_optional_text(requested_by_username),
+                radarr_movie_id=_positive_int_or_none(movie.get("id")),
+                tmdb_id=tmdb_id,
+                imdb_id=_clean_text(movie.get("imdbId")),
+                status="requested",
+            )
+        except Exception as exc:
+            result["requestRecord"] = {"recorded": False, "error": str(exc)}
+            return
+        result["requestRecord"] = {"recorded": True, "id": request_id}
+
+    def _record_series_request(
+        self,
+        result: dict[str, Any],
+        *,
+        series: Mapping[str, Any],
+        tvdb_id: int,
+        title: str | None,
+        seasons: list[int],
+        requested_by_user_id: int | None,
+        requested_by_chat_id: int | None,
+        requested_by_username: str | None,
+    ) -> None:
+        if self.request_store is None:
+            return
+        try:
+            request_id = self.request_store.add_request(
+                media_type="series",
+                title=_clean_text(title) or _clean_text(series.get("title")),
+                year=_positive_int_or_none(series.get("year")),
+                requested_by_user_id=_positive_int_or_none(requested_by_user_id),
+                requested_by_chat_id=_positive_int_or_none(requested_by_chat_id),
+                requested_by_username=_optional_text(requested_by_username),
+                sonarr_series_id=_positive_int_or_none(series.get("id")),
+                tmdb_id=_positive_int_or_none(series.get("tmdbId")),
+                tvdb_id=tvdb_id,
+                imdb_id=_clean_text(series.get("imdbId")),
+                season_numbers=seasons,
+                status="requested",
+            )
+        except Exception as exc:
+            result["requestRecord"] = {"recorded": False, "error": str(exc)}
+            return
+        result["requestRecord"] = {"recorded": True, "id": request_id}
 
     def _with_post_request_status(
         self, result: dict[str, Any], title: str | None
@@ -910,7 +1267,7 @@ def create_server() -> Any:
             "The Python MCP SDK is required. Install dependencies from requirements.txt."
         ) from exc
 
-    service = MediaRequestService(load_config())
+    service = MediaRequestService(load_config(), request_store=RequestStore.from_env())
     mcp = FastMCP("plex-media-request")
 
     @mcp.tool()
@@ -926,9 +1283,21 @@ def create_server() -> Any:
         )
 
     @mcp.tool()
-    def request_movie(tmdbId: int, title: str | None = None) -> dict[str, Any]:
-        """Request a movie by TMDB ID using the configured Radarr policy."""
-        return service.request_movie(tmdbId=tmdbId, title=title)
+    def request_movie(
+        tmdbId: int,
+        title: str | None = None,
+        requested_by_user_id: int | None = None,
+        requested_by_chat_id: int | None = None,
+        requested_by_username: str | None = None,
+    ) -> dict[str, Any]:
+        """Request a movie by TMDB ID and record who requested it when provided."""
+        return service.request_movie(
+            tmdbId=tmdbId,
+            title=title,
+            requested_by_user_id=requested_by_user_id,
+            requested_by_chat_id=requested_by_chat_id,
+            requested_by_username=requested_by_username,
+        )
 
     @mcp.tool()
     def request_series(
@@ -936,10 +1305,19 @@ def create_server() -> Any:
         title: str | None = None,
         seasons: list[int] | None = None,
         anime: bool = False,
+        requested_by_user_id: int | None = None,
+        requested_by_chat_id: int | None = None,
+        requested_by_username: str | None = None,
     ) -> dict[str, Any]:
-        """Request a series by TVDB ID. Always pass explicit season numbers."""
+        """Request a series by TVDB ID. Always pass explicit season numbers and requester info when available."""
         return service.request_series(
-            tvdbId=tvdbId, title=title, seasons=seasons, anime=anime
+            tvdbId=tvdbId,
+            title=title,
+            seasons=seasons,
+            anime=anime,
+            requested_by_user_id=requested_by_user_id,
+            requested_by_chat_id=requested_by_chat_id,
+            requested_by_username=requested_by_username,
         )
 
     @mcp.tool()
@@ -984,6 +1362,16 @@ def create_server() -> Any:
     @mcp.tool()
     def media_status() -> dict[str, Any]:
         return service.media_status()
+
+    @mcp.tool()
+    def notify_movie_available(radarr_movie_id: int) -> dict[str, Any]:
+        """Webhook target: notify requesters for one Radarr movie ID after import/download."""
+        return service.notify_movie_available(radarr_movie_id=radarr_movie_id)
+
+    @mcp.tool()
+    def notify_available_requests(limit: int = 100) -> dict[str, Any]:
+        """Manual backfill helper. Do not use for routine availability notifications."""
+        return service.notify_available_requests(limit=limit)
 
     return mcp
 
@@ -2004,6 +2392,26 @@ def _require_positive_int(value: int, name: str) -> int:
     if not isinstance(value, int) or value <= 0:
         raise ValueError(f"{name} must be a positive integer")
     return value
+
+
+def _send_telegram_message(chat_id: int, text: str) -> bool:
+    token = os.getenv(ENV_TELEGRAM_BOT_TOKEN, "").strip()
+    if not token:
+        return False
+    try:
+        response = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data={
+                "chat_id": str(chat_id),
+                "text": text,
+                "disable_web_page_preview": "true",
+            },
+            timeout=DEFAULT_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        return True
+    except requests.RequestException:
+        return False
 
 
 if __name__ == "__main__":

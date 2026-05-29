@@ -73,6 +73,10 @@ mcp_servers:
       - -i
       - --env-file
       - /path/to/media-request.env
+      - -e
+      - PUID=1000
+      - -e
+      - PGID=1000
       - -v
       - media-request-state:/opt/data/state
       - ghcr.io/crbl-technologies/plex-media-request-mcp:latest
@@ -99,6 +103,10 @@ services:
     restart: unless-stopped
     env_file:
       - ./media-request.env
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      UMASK: "0002"
     expose:
       - "18081"
     volumes:
@@ -135,6 +143,21 @@ The env vars are required because the webhook bridge is standalone: it must read
 the same request SQLite DB, verify availability from Radarr/Sonarr, and send the
 Telegram notification. Keeping them in one `env_file` avoids duplicating a long
 environment block in Compose.
+
+Both container images support `PUID`, `PGID`, and `UMASK` so the MCP process and
+webhook bridge can write the same SQLite state directory. Set `PUID`/`PGID` to
+the numeric owner of your mounted state path. For example, on a NAS bind mount:
+
+```bash
+id your-media-user
+sudo chown -R PUID:PGID /volume2/docker/hermes-media/data/state
+sudo chmod -R ug+rwX /volume2/docker/hermes-media/data/state
+sudo find /volume2/docker/hermes-media/data/state -type d -exec chmod g+s {} +
+```
+
+If Hermes launches the MCP image with `docker run`, pass the same `PUID` and
+`PGID` there as well. If Hermes runs the Python MCP process directly, use the
+UID/GID of that Hermes process for the webhook bridge.
 
 Configure Connect webhooks to POST to these internal URLs:
 

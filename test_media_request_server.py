@@ -8,10 +8,11 @@ import sys
 import tempfile
 import types
 import unittest
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
+from typing import Any, Iterator
 from unittest.mock import patch
-from typing import Any
 
 import media_request_server as server
 import radarr_webhook_bridge as webhook_bridge
@@ -28,6 +29,18 @@ SYNTHETIC_REQUESTER_4 = "synthetic-requester-4"
 SYNTHETIC_TIMESTAMP_1 = "2026-01-01T00:01:00+00:00"
 SYNTHETIC_TIMESTAMP_2 = "2026-01-01T00:02:00+00:00"
 SYNTHETIC_TIMESTAMP_3 = "2026-01-01T00:03:00+00:00"
+
+
+@contextmanager
+def sqlite_test_connection(
+    path: str | os.PathLike[str],
+) -> Iterator[sqlite3.Connection]:
+    connection = sqlite3.connect(path)
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
 
 
 class FakeResponse:
@@ -181,9 +194,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(loaded.sonarr_url, "http://sonarr:8989")
 
     def test_load_config_requires_numeric_profile_ids(self) -> None:
-        with self.assertRaisesRegex(
-            RuntimeError, server.ENV_RADARR_QUALITY_PROFILE_ID
-        ):
+        with self.assertRaisesRegex(RuntimeError, server.ENV_RADARR_QUALITY_PROFILE_ID):
             server.load_config(
                 env_config({server.ENV_RADARR_QUALITY_PROFILE_ID: "not-a-number"})
             )
@@ -296,7 +307,7 @@ class SearchMediaTests(unittest.TestCase):
         service = server.MediaRequestService(config(), session=session)
 
         result = service.search_media(
-            'my brilliant SYNTHETIC_REQUESTER_4', media_type="series", season=1
+            "my brilliant SYNTHETIC_REQUESTER_4", media_type="series", season=1
         )
 
         item = result["items"][0]
@@ -352,7 +363,7 @@ class SearchMediaTests(unittest.TestCase):
         service = server.MediaRequestService(config(), session=session)
 
         result = service.search_media(
-            'my brilliant SYNTHETIC_REQUESTER_4', media_type="series", season=4
+            "my brilliant SYNTHETIC_REQUESTER_4", media_type="series", season=4
         )
 
         item = result["items"][0]
@@ -436,7 +447,10 @@ class DownloadStatusTests(unittest.TestCase):
             },
         )
         self.assertEqual(
-            [(request["method"], request["url"], request["params"]) for request in session.requests],
+            [
+                (request["method"], request["url"], request["params"])
+                for request in session.requests
+            ],
             [
                 ("GET", "http://radarr:7878/api/v3/queue", server.QUEUE_PARAMS),
                 ("GET", "http://sonarr:8989/api/v3/queue", server.QUEUE_PARAMS),
@@ -749,7 +763,9 @@ class RequestStatusTests(unittest.TestCase):
         self.assertEqual(len(result["items"]), 1)
         self.assertEqual(result["items"][0]["title"], "Alien")
 
-    def test_request_status_default_limit_can_return_more_than_ten_queue_items(self) -> None:
+    def test_request_status_default_limit_can_return_more_than_ten_queue_items(
+        self,
+    ) -> None:
         queue_records = [
             {
                 "movieId": index,
@@ -985,23 +1001,26 @@ class McpToolTests(unittest.TestCase):
         fastmcp_module.FastMCP = FakeFastMCP
 
         with tempfile.TemporaryDirectory() as directory:
-            with patch.dict(
-                sys.modules,
-                {
-                    "mcp": mcp_module,
-                    "mcp.server": server_module,
-                    "mcp.server.fastmcp": fastmcp_module,
-                },
-            ), patch.dict(
-                os.environ,
-                env_config(
+            with (
+                patch.dict(
+                    sys.modules,
                     {
-                        server.ENV_REQUEST_DB_PATH: os.path.join(
-                            directory, "requests.sqlite3"
-                        )
-                    }
+                        "mcp": mcp_module,
+                        "mcp.server": server_module,
+                        "mcp.server.fastmcp": fastmcp_module,
+                    },
                 ),
-                clear=True,
+                patch.dict(
+                    os.environ,
+                    env_config(
+                        {
+                            server.ENV_REQUEST_DB_PATH: os.path.join(
+                                directory, "requests.sqlite3"
+                            )
+                        }
+                    ),
+                    clear=True,
+                ),
             ):
                 mcp = server.create_server()
 
@@ -1125,7 +1144,9 @@ class RequestSeriesTests(unittest.TestCase):
         )
         self.assertEqual(len(session.requests), 1)
 
-    def test_request_series_existing_adds_monitoring_and_starts_season_search(self) -> None:
+    def test_request_series_existing_adds_monitoring_and_starts_season_search(
+        self,
+    ) -> None:
         existing = {
             "id": 77,
             "title": "Existing Show",
@@ -1168,7 +1189,9 @@ class RequestSeriesTests(unittest.TestCase):
         self.assertTrue(result["monitoringUpdated"])
         self.assertTrue(result["searchSubmitted"])
         self.assertEqual(result["monitoredSeasons"], [2])
-        self.assertEqual([request["method"] for request in session.requests], ["GET", "PUT", "POST"])
+        self.assertEqual(
+            [request["method"] for request in session.requests], ["GET", "PUT", "POST"]
+        )
         put = session.requests[1]
         self.assertEqual(put["url"], "http://sonarr:8989/api/v3/series/77")
         self.assertEqual(
@@ -1190,6 +1213,49 @@ class RequestSeriesTests(unittest.TestCase):
             session.requests[2]["json"],
             {"name": "SeasonSearch", "seriesId": 77, "seasonNumber": 2},
         )
+
+    def test_existing_anime_series_applies_profile_and_keeps_state_on_numeric_put(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = server.RequestStore(os.path.join(directory, "requests.sqlite3"))
+            existing = {
+                "id": 77,
+                "title": "Example Anime",
+                "tvdbId": 7001,
+                "qualityProfileId": 1,
+                "seasons": [
+                    {
+                        "seasonNumber": 1,
+                        "monitored": False,
+                        "statistics": {
+                            "episodeFileCount": 1,
+                            "totalEpisodeCount": 12,
+                        },
+                    }
+                ],
+            }
+            session = FakeSession([[existing], 77, {"id": 99}])
+            service = server.MediaRequestService(
+                config(), session=session, request_store=store
+            )
+
+            result = service.request_series(
+                7001,
+                seasons=[1],
+                anime=True,
+                requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_1,
+            )
+
+            self.assertEqual(result["status"], "already_exists")
+            self.assertEqual(result["profileUsed"], "Sonarr Anime Profile")
+            self.assertEqual(session.requests[1]["json"]["qualityProfileId"], 602)
+            with sqlite_test_connection(store.db_path) as connection:
+                row = connection.execute(
+                    "SELECT sonarr_series_id, status, notified_available_at "
+                    "FROM media_requests"
+                ).fetchone()
+            self.assertEqual(row, (77, "requested", None))
 
 
 class RequestPolicyTests(unittest.TestCase):
@@ -1221,7 +1287,9 @@ class RequestPolicyTests(unittest.TestCase):
         result = service.request_movie(348)
 
         self.assertEqual(result["status"], "added")
-        self.assertEqual(result["postRequestStatus"]["items"][0]["status"], "downloading")
+        self.assertEqual(
+            result["postRequestStatus"]["items"][0]["status"], "downloading"
+        )
         self.assertEqual(result["postRequestStatus"]["items"][0]["eta"], "00:12:00")
 
     def test_request_series_includes_immediate_post_request_status(self) -> None:
@@ -1266,7 +1334,9 @@ class RequestPolicyTests(unittest.TestCase):
         result = service.request_series(82066, seasons=[1])
 
         self.assertEqual(result["status"], "added")
-        self.assertEqual(result["postRequestStatus"]["items"][0]["status"], "downloading")
+        self.assertEqual(
+            result["postRequestStatus"]["items"][0]["status"], "downloading"
+        )
         self.assertEqual(result["postRequestStatus"]["items"][0]["eta"], "00:10:00")
 
     def test_request_movie_enforces_configured_radarr_policy(self) -> None:
@@ -1298,6 +1368,41 @@ class RequestPolicyTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "already_exists")
         self.assertEqual(len(session.requests), 1)
+
+    def test_request_movie_repairs_missing_existing_movie_and_starts_search(
+        self,
+    ) -> None:
+        existing = {
+            "id": 44,
+            "title": "Alien",
+            "tmdbId": 348,
+            "hasFile": False,
+            "monitored": False,
+            "qualityProfileId": 1,
+        }
+        updated = {
+            **existing,
+            "monitored": True,
+            "qualityProfileId": 501,
+        }
+        session = FakeSession([[existing], updated, {"id": 99}])
+        service = server.MediaRequestService(config(), session=session)
+
+        result = service.request_movie(348)
+
+        self.assertEqual(result["status"], "already_exists")
+        self.assertTrue(result["monitoringUpdated"])
+        self.assertTrue(result["searchSubmitted"])
+        self.assertEqual(
+            [request["method"] for request in session.requests],
+            ["GET", "PUT", "POST"],
+        )
+        self.assertTrue(session.requests[1]["json"]["monitored"])
+        self.assertEqual(session.requests[1]["json"]["qualityProfileId"], 501)
+        self.assertEqual(
+            session.requests[2]["json"],
+            {"name": "MoviesSearch", "movieIds": [44]},
+        )
 
     def test_request_series_enforces_normal_profile(self) -> None:
         session = FakeSession(
@@ -1389,10 +1494,7 @@ class RequestPolicyTests(unittest.TestCase):
         self.assertEqual(result["monitoredSeasons"], [1, 2])
         self.assertIn("seasons 1-2 monitored", result["message"])
         self.assertEqual(
-            [
-                season["monitored"]
-                for season in session.requests[-1]["json"]["seasons"]
-            ],
+            [season["monitored"] for season in session.requests[-1]["json"]["seasons"]],
             [False, True, True, False],
         )
 
@@ -1538,7 +1640,9 @@ class RepairBlockedImportsTests(unittest.TestCase):
                         "folderName": "The.Cleaning.Lady.S04E02",
                         "series": {"id": 140, "title": "The Cleaning Lady"},
                         "seasonNumber": 4,
-                        "episodes": [{"id": 9396, "seasonNumber": 4, "episodeNumber": 2}],
+                        "episodes": [
+                            {"id": 9396, "seasonNumber": 4, "episodeNumber": 2}
+                        ],
                         "quality": {"quality": {"id": 3, "name": "WEBDL-1080p"}},
                         "languages": [{"id": 1, "name": "English"}],
                         "releaseGroup": "FLUX",
@@ -1593,8 +1697,18 @@ class RepairBlockedImportsTests(unittest.TestCase):
                     ]
                 },
                 [
-                    {"path": "/downloads/a.mkv", "series": {"id": 140}, "episodes": [{"id": 9396}], "rejections": []},
-                    {"path": "/downloads/b.mkv", "series": {"id": 140}, "episodes": [{"id": 9396}], "rejections": []},
+                    {
+                        "path": "/downloads/a.mkv",
+                        "series": {"id": 140},
+                        "episodes": [{"id": 9396}],
+                        "rejections": [],
+                    },
+                    {
+                        "path": "/downloads/b.mkv",
+                        "series": {"id": 140},
+                        "episodes": [{"id": 9396}],
+                        "rejections": [],
+                    },
                 ],
             ]
         )
@@ -1646,7 +1760,7 @@ class RequestStoreTests(unittest.TestCase):
 
             self.assertEqual(result["status"], "added")
             self.assertEqual(result["requestRecord"], {"recorded": True, "id": 1})
-            with sqlite3.connect(store.db_path) as connection:
+            with sqlite_test_connection(store.db_path) as connection:
                 row = connection.execute(
                     """
                     SELECT media_type, title, year, requested_by_user_id,
@@ -1711,7 +1825,7 @@ class RequestStoreTests(unittest.TestCase):
 
             self.assertEqual(repeated_id, first_id)
             self.assertNotEqual(other_chat_id, first_id)
-            with sqlite3.connect(store.db_path) as connection:
+            with sqlite_test_connection(store.db_path) as connection:
                 rows = connection.execute(
                     """
                     SELECT id, requested_by_chat_id, tmdb_id
@@ -1739,9 +1853,19 @@ class RequestStoreTests(unittest.TestCase):
             }
             service = server.MediaRequestService(
                 config(),
-                session=FakeSession([[missing_movie], [missing_movie]]),
+                session=FakeSession(
+                    [
+                        [missing_movie],
+                        missing_movie,
+                        {},
+                        [missing_movie],
+                        missing_movie,
+                        {},
+                    ]
+                ),
                 request_store=store,
             )
+            service._with_post_request_status = lambda result, title: result
             group_chat_id = -SYNTHETIC_TELEGRAM_ID_5
 
             first = service.request_movie(
@@ -1757,19 +1881,19 @@ class RequestStoreTests(unittest.TestCase):
                 requested_by_username=SYNTHETIC_REQUESTER_2,
             )
 
-            self.assertEqual(first["requestRecord"]["id"], repeated["requestRecord"]["id"])
-            with sqlite3.connect(store.db_path) as connection:
+            self.assertEqual(
+                first["requestRecord"]["id"], repeated["requestRecord"]["id"]
+            )
+            with sqlite_test_connection(store.db_path) as connection:
                 rows = connection.execute(
                     "SELECT requested_by_chat_id FROM media_requests"
                 ).fetchall()
             self.assertEqual(rows, [(group_chat_id,)])
 
             sent: list[tuple[int, str]] = []
-            service.session = FakeSession(
-                [{**missing_movie, "hasFile": True}]
-            )
-            service.telegram_sender = (
-                lambda chat_id, text: sent.append((chat_id, text)) is None
+            service.session = FakeSession([{**missing_movie, "hasFile": True}])
+            service.telegram_sender = lambda chat_id, text: (
+                sent.append((chat_id, text)) is None
             )
             result = service.notify_movie_available(854)
 
@@ -1799,7 +1923,7 @@ class RequestStoreTests(unittest.TestCase):
             }
             service = server.MediaRequestService(
                 config(),
-                session=FakeSession([[missing_movie]]),
+                session=FakeSession([[missing_movie], missing_movie, {}]),
                 request_store=store,
             )
 
@@ -1811,21 +1935,21 @@ class RequestStoreTests(unittest.TestCase):
             )
 
             self.assertEqual(result["requestRecord"]["id"], request_id)
-            with sqlite3.connect(store.db_path) as connection:
+            with sqlite_test_connection(store.db_path) as connection:
                 row = connection.execute(
                     "SELECT status, notified_available_at FROM media_requests WHERE id = ?",
                     (request_id,),
                 ).fetchone()
             self.assertEqual(row, ("requested", None))
 
-    def test_initialize_removes_pending_movie_duplicates_before_unique_index(self) -> None:
+    def test_initialize_removes_pending_movie_duplicates_before_unique_index(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             db_path = os.path.join(directory, "requests.sqlite3")
             store = server.RequestStore(db_path)
             with store._connect() as connection:
-                connection.execute(
-                    "DROP INDEX uq_media_requests_movie_chat_pending"
-                )
+                connection.execute("DROP INDEX uq_media_requests_movie_chat_pending")
                 for created_at, radarr_movie_id in (
                     (SYNTHETIC_TIMESTAMP_2, 111),
                     (SYNTHETIC_TIMESTAMP_3, 854),
@@ -1849,7 +1973,7 @@ class RequestStoreTests(unittest.TestCase):
 
             server.RequestStore(db_path)
 
-            with sqlite3.connect(db_path) as connection:
+            with sqlite_test_connection(db_path) as connection:
                 rows = connection.execute(
                     """
                     SELECT id, radarr_movie_id FROM media_requests
@@ -1919,7 +2043,7 @@ class RequestStoreTests(unittest.TestCase):
 
             self.assertEqual(result["status"], "added")
             self.assertEqual(result["requestRecord"], {"recorded": True, "id": 1})
-            with sqlite3.connect(store.db_path) as connection:
+            with sqlite_test_connection(store.db_path) as connection:
                 row = connection.execute(
                     """
                     SELECT media_type, title, year, requested_by_user_id,
@@ -1987,19 +2111,29 @@ class RequestStoreTests(unittest.TestCase):
             sent: list[tuple[int, str]] = []
             service = server.MediaRequestService(
                 config(),
-                session=FakeSession([
-                    {"id": 44, "title": "Alien", "year": 1979, "hasFile": True}
-                ]),
+                session=FakeSession(
+                    [{"id": 44, "title": "Alien", "year": 1979, "hasFile": True}]
+                ),
                 request_store=store,
-                telegram_sender=lambda chat_id, text: sent.append((chat_id, text)) is None,
+                telegram_sender=lambda chat_id, text: (
+                    sent.append((chat_id, text)) is None
+                ),
             )
 
             result = service.notify_available_requests()
 
             self.assertEqual(result["notified"], 1)
             self.assertEqual(result["notifications"][0]["id"], request_id)
-            self.assertEqual(sent, [(SYNTHETIC_TELEGRAM_ID_1, "✅ Alien (1979) is now available on Plex.")])
-            with sqlite3.connect(store.db_path) as connection:
+            self.assertEqual(
+                sent,
+                [
+                    (
+                        SYNTHETIC_TELEGRAM_ID_1,
+                        "✅ Alien (1979) is now available on Plex.",
+                    )
+                ],
+            )
+            with sqlite_test_connection(store.db_path) as connection:
                 row = connection.execute(
                     "SELECT status, notified_available_at FROM media_requests WHERE id = ?",
                     (request_id,),
@@ -2053,9 +2187,7 @@ class RequestStoreTests(unittest.TestCase):
                 first_result = first.result(timeout=2)
 
             self.assertEqual(len(sent), 1)
-            self.assertEqual(
-                first_result["notified"] + second_result["notified"], 1
-            )
+            self.assertEqual(first_result["notified"] + second_result["notified"], 1)
 
     def test_notify_available_requests_waits_until_movie_has_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2071,11 +2203,13 @@ class RequestStoreTests(unittest.TestCase):
             sent: list[tuple[int, str]] = []
             service = server.MediaRequestService(
                 config(),
-                session=FakeSession([
-                    {"id": 44, "title": "Alien", "year": 1979, "hasFile": False}
-                ]),
+                session=FakeSession(
+                    [{"id": 44, "title": "Alien", "year": 1979, "hasFile": False}]
+                ),
                 request_store=store,
-                telegram_sender=lambda chat_id, text: sent.append((chat_id, text)) is None,
+                telegram_sender=lambda chat_id, text: (
+                    sent.append((chat_id, text)) is None
+                ),
             )
 
             result = service.notify_available_requests()
@@ -2083,11 +2217,94 @@ class RequestStoreTests(unittest.TestCase):
             self.assertEqual(result["checked"], 1)
             self.assertEqual(result["notified"], 0)
             self.assertEqual(sent, [])
-            with sqlite3.connect(store.db_path) as connection:
+            with sqlite_test_connection(store.db_path) as connection:
                 row = connection.execute(
                     "SELECT notified_available_at FROM media_requests"
                 ).fetchone()
             self.assertIsNone(row[0])
+
+    def test_notify_available_requests_retries_pending_series(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = server.RequestStore(os.path.join(directory, "requests.sqlite3"))
+            request_id = store.add_request(
+                media_type="series",
+                title="Example Show",
+                requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_1,
+                sonarr_series_id=77,
+                tvdb_id=7001,
+                season_numbers=[1],
+            )
+            sent: list[tuple[int, str]] = []
+            service = server.MediaRequestService(
+                config(),
+                session=FakeSession(
+                    [
+                        {
+                            "id": 77,
+                            "title": "Example Show",
+                            "seasons": [
+                                {
+                                    "seasonNumber": 1,
+                                    "statistics": {
+                                        "episodeFileCount": 8,
+                                        "totalEpisodeCount": 8,
+                                    },
+                                }
+                            ],
+                        }
+                    ]
+                ),
+                request_store=store,
+                telegram_sender=lambda chat_id, text: (
+                    sent.append((chat_id, text)) is None
+                ),
+            )
+
+            result = service.notify_available_requests()
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["notified"], 1)
+            self.assertEqual(result["notifications"][0]["id"], request_id)
+            self.assertEqual(len(sent), 1)
+
+    def test_durable_retry_scans_past_the_public_batch_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = server.RequestStore(os.path.join(directory, "requests.sqlite3"))
+            for movie_id in range(1, 102):
+                store.add_request(
+                    media_type="movie",
+                    title=f"Example Movie {movie_id}",
+                    requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_1,
+                    radarr_movie_id=movie_id,
+                    tmdb_id=10_000 + movie_id,
+                )
+            service = server.MediaRequestService(
+                config(),
+                request_store=store,
+                telegram_sender=lambda chat_id, text: True,
+            )
+
+            def movie_for_path(path: str) -> dict[str, Any]:
+                movie_id = int(path.rsplit("/", 1)[1])
+                return {
+                    "id": movie_id,
+                    "title": f"Example Movie {movie_id}",
+                    "hasFile": movie_id == 101,
+                }
+
+            service._get_radarr = movie_for_path
+
+            result = service.retry_all_available_requests()
+
+            self.assertEqual(result["checked"], 101)
+            self.assertEqual(result["notified"], 1)
+            self.assertEqual(result["notifications"][0]["title"], "Example Movie 101")
+
+    def test_public_notification_retry_rejects_invalid_limit(self) -> None:
+        service = server.MediaRequestService(config())
+
+        with self.assertRaisesRegex(ValueError, "limit must be a positive integer"):
+            service.notify_available_requests(limit=-1)
 
     def test_notify_movie_available_only_checks_webhook_movie_id(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2111,11 +2328,13 @@ class RequestStoreTests(unittest.TestCase):
             sent: list[tuple[int, str]] = []
             service = server.MediaRequestService(
                 config(),
-                session=FakeSession([
-                    {"id": 44, "title": "Alien", "year": 1979, "hasFile": True}
-                ]),
+                session=FakeSession(
+                    [{"id": 44, "title": "Alien", "year": 1979, "hasFile": True}]
+                ),
                 request_store=store,
-                telegram_sender=lambda chat_id, text: sent.append((chat_id, text)) is None,
+                telegram_sender=lambda chat_id, text: (
+                    sent.append((chat_id, text)) is None
+                ),
             )
 
             result = service.notify_movie_available(44)
@@ -2123,8 +2342,16 @@ class RequestStoreTests(unittest.TestCase):
             self.assertEqual(result["checked"], 1)
             self.assertEqual(result["notified"], 1)
             self.assertEqual(result["notifications"][0]["id"], alien_id)
-            self.assertEqual(sent, [(SYNTHETIC_TELEGRAM_ID_1, "✅ Alien (1979) is now available on Plex.")])
-            with sqlite3.connect(store.db_path) as connection:
+            self.assertEqual(
+                sent,
+                [
+                    (
+                        SYNTHETIC_TELEGRAM_ID_1,
+                        "✅ Alien (1979) is now available on Plex.",
+                    )
+                ],
+            )
+            with sqlite_test_connection(store.db_path) as connection:
                 rows = connection.execute(
                     "SELECT title, notified_available_at FROM media_requests ORDER BY id"
                 ).fetchall()
@@ -2132,7 +2359,9 @@ class RequestStoreTests(unittest.TestCase):
             self.assertEqual(rows[1][0], "Blade Runner")
             self.assertIsNone(rows[1][1])
 
-    def test_notify_series_available_sends_when_requested_seasons_complete(self) -> None:
+    def test_notify_series_available_sends_when_requested_seasons_complete(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = server.RequestStore(os.path.join(directory, "requests.sqlite3"))
             request_id = store.add_request(
@@ -2147,21 +2376,28 @@ class RequestStoreTests(unittest.TestCase):
             sent: list[tuple[int, str]] = []
             service = server.MediaRequestService(
                 config(),
-                session=FakeSession([
-                    {
-                        "id": 77,
-                        "title": "Fringe",
-                        "year": 2008,
-                        "seasons": [
-                            {
-                                "seasonNumber": 1,
-                                "statistics": {"episodeFileCount": 20, "totalEpisodeCount": 20},
-                            }
-                        ],
-                    }
-                ]),
+                session=FakeSession(
+                    [
+                        {
+                            "id": 77,
+                            "title": "Fringe",
+                            "year": 2008,
+                            "seasons": [
+                                {
+                                    "seasonNumber": 1,
+                                    "statistics": {
+                                        "episodeFileCount": 20,
+                                        "totalEpisodeCount": 20,
+                                    },
+                                }
+                            ],
+                        }
+                    ]
+                ),
                 request_store=store,
-                telegram_sender=lambda chat_id, text: sent.append((chat_id, text)) is None,
+                telegram_sender=lambda chat_id, text: (
+                    sent.append((chat_id, text)) is None
+                ),
             )
 
             result = service.notify_series_available(77)
@@ -2169,8 +2405,16 @@ class RequestStoreTests(unittest.TestCase):
             self.assertEqual(result["checked"], 1)
             self.assertEqual(result["notified"], 1)
             self.assertEqual(result["notifications"][0]["id"], request_id)
-            self.assertEqual(sent, [(SYNTHETIC_TELEGRAM_ID_1, "✅ Fringe (2008) season 1 is now available on Plex.")])
-            with sqlite3.connect(store.db_path) as connection:
+            self.assertEqual(
+                sent,
+                [
+                    (
+                        SYNTHETIC_TELEGRAM_ID_1,
+                        "✅ Fringe (2008) season 1 is now available on Plex.",
+                    )
+                ],
+            )
+            with sqlite_test_connection(store.db_path) as connection:
                 row = connection.execute(
                     "SELECT status, notified_available_at FROM media_requests WHERE id = ?",
                     (request_id,),
@@ -2178,7 +2422,9 @@ class RequestStoreTests(unittest.TestCase):
             self.assertEqual(row[0], "available")
             self.assertIsNotNone(row[1])
 
-    def test_notify_series_available_waits_until_requested_seasons_complete(self) -> None:
+    def test_notify_series_available_waits_until_requested_seasons_complete(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = server.RequestStore(os.path.join(directory, "requests.sqlite3"))
             store.add_request(
@@ -2193,21 +2439,28 @@ class RequestStoreTests(unittest.TestCase):
             sent: list[tuple[int, str]] = []
             service = server.MediaRequestService(
                 config(),
-                session=FakeSession([
-                    {
-                        "id": 77,
-                        "title": "Fringe",
-                        "year": 2008,
-                        "seasons": [
-                            {
-                                "seasonNumber": 1,
-                                "statistics": {"episodeFileCount": 19, "totalEpisodeCount": 20},
-                            }
-                        ],
-                    }
-                ]),
+                session=FakeSession(
+                    [
+                        {
+                            "id": 77,
+                            "title": "Fringe",
+                            "year": 2008,
+                            "seasons": [
+                                {
+                                    "seasonNumber": 1,
+                                    "statistics": {
+                                        "episodeFileCount": 19,
+                                        "totalEpisodeCount": 20,
+                                    },
+                                }
+                            ],
+                        }
+                    ]
+                ),
                 request_store=store,
-                telegram_sender=lambda chat_id, text: sent.append((chat_id, text)) is None,
+                telegram_sender=lambda chat_id, text: (
+                    sent.append((chat_id, text)) is None
+                ),
             )
 
             result = service.notify_series_available(77)
@@ -2215,9 +2468,591 @@ class RequestStoreTests(unittest.TestCase):
             self.assertEqual(result["checked"], 1)
             self.assertEqual(result["notified"], 0)
             self.assertEqual(sent, [])
-            with sqlite3.connect(store.db_path) as connection:
-                row = connection.execute("SELECT notified_available_at FROM media_requests").fetchone()
+            with sqlite_test_connection(store.db_path) as connection:
+                row = connection.execute(
+                    "SELECT notified_available_at FROM media_requests"
+                ).fetchone()
             self.assertIsNone(row[0])
+
+
+class CorrectnessRegressionTests(unittest.TestCase):
+    def test_series_specials_subscription_notifies_when_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = server.RequestStore(os.path.join(directory, "requests.sqlite3"))
+            store.add_request(
+                media_type="series",
+                title="Example Show",
+                requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_1,
+                sonarr_series_id=77,
+                tvdb_id=7001,
+                season_numbers=[0],
+            )
+            sent: list[tuple[int, str]] = []
+            service = server.MediaRequestService(
+                config(),
+                session=FakeSession(
+                    [
+                        {
+                            "id": 77,
+                            "title": "Example Show",
+                            "seasons": [
+                                {
+                                    "seasonNumber": 0,
+                                    "statistics": {
+                                        "episodeFileCount": 2,
+                                        "totalEpisodeCount": 2,
+                                    },
+                                }
+                            ],
+                        }
+                    ]
+                ),
+                request_store=store,
+                telegram_sender=lambda chat_id, text: (
+                    sent.append((chat_id, text)) is None
+                ),
+            )
+
+            result = service.notify_series_available(77)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["notified"], 1)
+            self.assertEqual(
+                sent,
+                [
+                    (
+                        SYNTHETIC_TELEGRAM_ID_1,
+                        "✅ Example Show specials is now available on Plex.",
+                    )
+                ],
+            )
+
+    def test_series_notification_requires_every_requested_season_to_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = server.RequestStore(os.path.join(directory, "requests.sqlite3"))
+            store.add_request(
+                media_type="series",
+                title="Example Show",
+                requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_1,
+                sonarr_series_id=77,
+                tvdb_id=7001,
+                season_numbers=[1, 2],
+            )
+            sent: list[tuple[int, str]] = []
+            service = server.MediaRequestService(
+                config(),
+                session=FakeSession(
+                    [
+                        {
+                            "id": 77,
+                            "title": "Example Show",
+                            "seasons": [
+                                {
+                                    "seasonNumber": 1,
+                                    "statistics": {
+                                        "episodeFileCount": 8,
+                                        "totalEpisodeCount": 8,
+                                    },
+                                }
+                            ],
+                        }
+                    ]
+                ),
+                request_store=store,
+                telegram_sender=lambda chat_id, text: (
+                    sent.append((chat_id, text)) is None
+                ),
+            )
+
+            result = service.notify_series_available(77)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["notified"], 0)
+            self.assertEqual(
+                result["skipped"][0]["availability"]["missingSeasons"], [2]
+            )
+            self.assertEqual(sent, [])
+
+    def test_series_notification_waits_for_a_requested_season_with_no_episodes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = server.RequestStore(os.path.join(directory, "requests.sqlite3"))
+            store.add_request(
+                media_type="series",
+                title="Example Show",
+                requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_1,
+                sonarr_series_id=77,
+                tvdb_id=7001,
+                season_numbers=[1, 2],
+            )
+            service = server.MediaRequestService(
+                config(),
+                session=FakeSession(
+                    [
+                        {
+                            "id": 77,
+                            "title": "Example Show",
+                            "seasons": [
+                                {
+                                    "seasonNumber": 1,
+                                    "statistics": {
+                                        "episodeFileCount": 8,
+                                        "totalEpisodeCount": 8,
+                                    },
+                                },
+                                {
+                                    "seasonNumber": 2,
+                                    "statistics": {
+                                        "episodeFileCount": 0,
+                                        "totalEpisodeCount": 0,
+                                    },
+                                },
+                            ],
+                        }
+                    ]
+                ),
+                request_store=store,
+                telegram_sender=lambda chat_id, text: True,
+            )
+
+            result = service.notify_series_available(77)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["notified"], 0)
+
+    def test_pending_series_requests_keep_distinct_season_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = server.RequestStore(os.path.join(directory, "requests.sqlite3"))
+
+            def add(seasons: list[int]) -> int:
+                return store.add_request(
+                    media_type="series",
+                    title="Example Show",
+                    requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_1,
+                    sonarr_series_id=77,
+                    tvdb_id=7001,
+                    season_numbers=seasons,
+                )
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                first_id, second_id = pool.map(add, ([1], [2, 1]))
+
+            self.assertNotEqual(second_id, first_id)
+            connection = sqlite3.connect(store.db_path)
+            try:
+                rows = connection.execute(
+                    "SELECT id, season_numbers FROM media_requests"
+                ).fetchall()
+            finally:
+                connection.close()
+            self.assertEqual(
+                sorted(row[1] for row in rows),
+                ["[1, 2]", "[1]"],
+            )
+
+    def test_store_migration_merges_legacy_series_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = os.path.join(directory, "requests.sqlite3")
+            connection = sqlite3.connect(db_path)
+            try:
+                connection.executescript(server.RequestStore.SCHEMA)
+                for season_numbers in ("[0, 1]", "[1, 0, 1]"):
+                    connection.execute(
+                        """
+                        INSERT INTO media_requests (
+                            media_type, title, requested_by_chat_id,
+                            sonarr_series_id, tvdb_id, season_numbers,
+                            status, created_at, updated_at
+                        ) VALUES ('series', 'Example Show', ?, 77, 7001, ?,
+                                  'requested', '2026-01-01', '2026-01-01')
+                        """,
+                        (SYNTHETIC_TELEGRAM_ID_1, season_numbers),
+                    )
+                connection.commit()
+            finally:
+                connection.close()
+
+            store = server.RequestStore(db_path)
+            connection = sqlite3.connect(store.db_path)
+            try:
+                rows = connection.execute(
+                    "SELECT season_numbers FROM media_requests"
+                ).fetchall()
+            finally:
+                connection.close()
+
+            self.assertEqual(rows, [("[0, 1]",)])
+
+    def test_new_series_aliases_merge_split_exact_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = server.RequestStore(os.path.join(directory, "requests.sqlite3"))
+            tvdb_only = store.add_request(
+                media_type="series",
+                title="Example Show",
+                requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_1,
+                tvdb_id=7001,
+                season_numbers=[1],
+            )
+            sonarr_only = store.add_request(
+                media_type="series",
+                title="Example Show",
+                requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_1,
+                sonarr_series_id=77,
+                season_numbers=[1],
+            )
+
+            merged = store.add_request(
+                media_type="series",
+                title="Example Show",
+                requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_1,
+                sonarr_series_id=77,
+                tvdb_id=7001,
+                season_numbers=[1],
+            )
+
+            self.assertIn(merged, {tvdb_only, sonarr_only})
+            connection = sqlite3.connect(store.db_path)
+            try:
+                rows = connection.execute(
+                    "SELECT sonarr_series_id, tvdb_id, season_numbers FROM media_requests"
+                ).fetchall()
+            finally:
+                connection.close()
+            self.assertEqual(rows, [(77, 7001, "[1]")])
+
+    def test_new_series_request_is_not_consumed_by_inflight_notification(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = server.RequestStore(os.path.join(directory, "requests.sqlite3"))
+            first_id = store.add_request(
+                media_type="series",
+                title="Example Show",
+                requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_1,
+                sonarr_series_id=77,
+                tvdb_id=7001,
+                season_numbers=[1],
+            )
+            original_pending = store.pending_series_notifications_for_sonarr_id
+            second_id: int | None = None
+
+            def pending_with_new_request(series_id: int) -> list[dict[str, Any]]:
+                nonlocal second_id
+                rows = original_pending(series_id)
+                second_id = store.add_request(
+                    media_type="series",
+                    title="Example Show",
+                    requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_1,
+                    sonarr_series_id=77,
+                    tvdb_id=7001,
+                    season_numbers=[2],
+                )
+                return rows
+
+            store.pending_series_notifications_for_sonarr_id = pending_with_new_request
+            service = server.MediaRequestService(
+                config(),
+                session=FakeSession(
+                    [
+                        {
+                            "id": 77,
+                            "title": "Example Show",
+                            "seasons": [
+                                {
+                                    "seasonNumber": 1,
+                                    "statistics": {
+                                        "episodeFileCount": 8,
+                                        "totalEpisodeCount": 8,
+                                    },
+                                }
+                            ],
+                        }
+                    ]
+                ),
+                request_store=store,
+                telegram_sender=lambda chat_id, text: True,
+            )
+
+            result = service.notify_series_available(77)
+
+            self.assertEqual(result["notified"], 1)
+            self.assertIsNotNone(second_id)
+            connection = sqlite3.connect(store.db_path)
+            try:
+                rows = connection.execute(
+                    "SELECT id, status, notified_available_at FROM media_requests ORDER BY id"
+                ).fetchall()
+            finally:
+                connection.close()
+            self.assertEqual(rows[0][0:2], (first_id, "available"))
+            self.assertIsNotNone(rows[0][2])
+            self.assertEqual(rows[1], (second_id, "requested", None))
+
+    def test_request_status_reports_partial_and_complete_series(self) -> None:
+        session = FakeSession(
+            [
+                {"records": []},
+                {"records": []},
+                [],
+                [
+                    {
+                        "id": 7,
+                        "title": "Partial Show",
+                        "monitored": True,
+                        "seasons": [
+                            {
+                                "seasonNumber": 1,
+                                "monitored": True,
+                                "statistics": {
+                                    "episodeFileCount": 2,
+                                    "totalEpisodeCount": 3,
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "id": 8,
+                        "title": "Complete Show",
+                        "monitored": True,
+                        "seasons": [
+                            {
+                                "seasonNumber": 1,
+                                "monitored": True,
+                                "statistics": {
+                                    "episodeFileCount": 3,
+                                    "totalEpisodeCount": 3,
+                                },
+                            }
+                        ],
+                    },
+                ],
+            ]
+        )
+
+        result = server.MediaRequestService(config(), session=session).request_status()
+
+        statuses = {item["title"]: item["status"] for item in result["items"]}
+        self.assertEqual(statuses["Partial Show"], "partially_available")
+        self.assertEqual(statuses["Complete Show"], "available")
+
+    def test_request_store_connection_is_closed_after_context(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = server.RequestStore(os.path.join(directory, "requests.sqlite3"))
+
+            with store._connect() as connection:
+                self.assertEqual(connection.execute("SELECT 1").fetchone()[0], 1)
+
+            with self.assertRaises(sqlite3.ProgrammingError):
+                connection.execute("SELECT 1")
+
+    def test_telegram_failure_is_retryable_and_does_not_mark_notified(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = server.RequestStore(os.path.join(directory, "requests.sqlite3"))
+            request_id = store.add_request(
+                media_type="movie",
+                title="Example Movie",
+                requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_1,
+                radarr_movie_id=44,
+                tmdb_id=4001,
+            )
+            service = server.MediaRequestService(
+                config(),
+                session=FakeSession(
+                    [{"id": 44, "title": "Example Movie", "hasFile": True}]
+                ),
+                request_store=store,
+                telegram_sender=lambda chat_id, text: False,
+            )
+
+            result = service.notify_movie_available(44)
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["notified"], 0)
+            connection = sqlite3.connect(store.db_path)
+            try:
+                row = connection.execute(
+                    "SELECT status, notified_available_at FROM media_requests WHERE id = ?",
+                    (request_id,),
+                ).fetchone()
+            finally:
+                connection.close()
+            self.assertEqual(row, ("requested", None))
+
+    def test_already_available_movie_does_not_create_pending_notification(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = server.RequestStore(os.path.join(directory, "requests.sqlite3"))
+            service = server.MediaRequestService(
+                config(),
+                session=FakeSession(
+                    [
+                        [
+                            {
+                                "id": 44,
+                                "title": "Example Movie",
+                                "tmdbId": 4001,
+                                "hasFile": True,
+                            }
+                        ]
+                    ]
+                ),
+                request_store=store,
+            )
+
+            result = service.request_movie(
+                4001,
+                requested_by_user_id=SYNTHETIC_TELEGRAM_ID_2,
+                requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_1,
+            )
+
+            self.assertEqual(result["status"], "already_exists")
+            with sqlite_test_connection(store.db_path) as connection:
+                row = connection.execute(
+                    "SELECT status, notified_available_at FROM media_requests"
+                ).fetchone()
+            self.assertEqual(row[0], "available")
+            self.assertIsNotNone(row[1])
+            self.assertEqual(store.pending_movie_notifications(), [])
+
+    def test_already_complete_series_does_not_create_pending_notification(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = server.RequestStore(os.path.join(directory, "requests.sqlite3"))
+            existing = {
+                "id": 77,
+                "title": "Example Show",
+                "tvdbId": 7001,
+                "seasons": [
+                    {
+                        "seasonNumber": 1,
+                        "monitored": True,
+                        "statistics": {
+                            "episodeFileCount": 8,
+                            "totalEpisodeCount": 8,
+                        },
+                    }
+                ],
+            }
+            service = server.MediaRequestService(
+                config(),
+                session=FakeSession([[existing], existing, {"id": 99}]),
+                request_store=store,
+            )
+
+            result = service.request_series(
+                7001,
+                seasons=[1],
+                requested_by_user_id=SYNTHETIC_TELEGRAM_ID_2,
+                requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_1,
+            )
+
+            self.assertEqual(result["status"], "already_exists")
+            with sqlite_test_connection(store.db_path) as connection:
+                row = connection.execute(
+                    "SELECT status, notified_available_at FROM media_requests"
+                ).fetchone()
+            self.assertEqual(row[0], "available")
+            self.assertIsNotNone(row[1])
+            self.assertEqual(store.pending_series_notifications(), [])
+
+    def test_movie_add_conflict_refetches_and_records_requester(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = server.RequestStore(os.path.join(directory, "requests.sqlite3"))
+            service = server.MediaRequestService(config(), request_store=store)
+            existing_calls = iter(
+                [None, {"id": 44, "title": "Example Movie", "tmdbId": 4001}]
+            )
+            service._find_existing_movie = lambda tmdb_id: next(existing_calls)
+            service._lookup_movie_by_tmdb = lambda tmdb_id: {
+                "title": "Example Movie",
+                "tmdbId": tmdb_id,
+            }
+
+            def fail_add(path: str, json: dict[str, Any]) -> dict[str, Any]:
+                if path == "/api/v3/movie":
+                    raise server.ArrApiError("duplicate", status_code=409)
+                return {}
+
+            service._post_radarr = fail_add
+            service._put_radarr = lambda path, json: dict(json)
+            service._with_post_request_status = lambda result, title: result
+
+            result = service.request_movie(
+                4001,
+                requested_by_user_id=SYNTHETIC_TELEGRAM_ID_2,
+                requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_1,
+            )
+
+            self.assertEqual(result["status"], "already_exists")
+            self.assertTrue(result["requestRecord"]["recorded"])
+
+    def test_series_add_conflict_refetches_and_records_requested_seasons(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = server.RequestStore(os.path.join(directory, "requests.sqlite3"))
+            service = server.MediaRequestService(config(), request_store=store)
+            series = {
+                "title": "Example Show",
+                "tvdbId": 7001,
+                "seasons": [
+                    {"seasonNumber": 1, "monitored": False},
+                    {"seasonNumber": 2, "monitored": False},
+                ],
+            }
+            existing_calls = iter([None, {**series, "id": 77}])
+            service._find_existing_show = lambda tvdb_id: next(existing_calls)
+            service._lookup_show_by_tvdb = lambda tvdb_id: series
+
+            def post(path: str, json: dict[str, Any]) -> dict[str, Any]:
+                if path == "/api/v3/series":
+                    raise server.ArrApiError("duplicate", status_code=409)
+                return {}
+
+            service._post_sonarr = post
+            service._put_sonarr = lambda path, json: json
+            service._with_post_request_status = lambda result, title: result
+
+            result = service.request_series(
+                7001,
+                seasons=[2],
+                requested_by_user_id=SYNTHETIC_TELEGRAM_ID_2,
+                requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_1,
+            )
+
+            self.assertEqual(result["status"], "already_exists")
+            self.assertTrue(result["requestRecord"]["recorded"])
+            connection = sqlite3.connect(store.db_path)
+            try:
+                row = connection.execute(
+                    "SELECT sonarr_series_id, tvdb_id, season_numbers FROM media_requests"
+                ).fetchone()
+            finally:
+                connection.close()
+            self.assertEqual(row, (77, 7001, "[2]"))
+
+    def test_webhook_retry_response_is_sanitized(self) -> None:
+        handler = FakeWebhookHandler(b"", {})
+
+        webhook_bridge._notification_response(
+            handler,
+            service="radarr",
+            identifier_name="radarrMovieId",
+            identifier=44,
+            result={
+                "ok": False,
+                "checked": 1,
+                "notified": 0,
+                "notifications": [
+                    {
+                        "chatId": SYNTHETIC_TELEGRAM_ID_1,
+                        "title": "Private Request Title",
+                    }
+                ],
+                "skipped": [{"reason": "internal detail"}],
+            },
+        )
+
+        serialized = handler.wfile.getvalue().decode("utf-8")
+        self.assertEqual(handler.status, 503)
+        self.assertNotIn("chatId", serialized)
+        self.assertNotIn("Private Request Title", serialized)
+        self.assertNotIn("internal detail", serialized)
 
 
 class RadarrWebhookBridgeTests(unittest.TestCase):
@@ -2234,6 +3069,39 @@ class RadarrWebhookBridgeTests(unittest.TestCase):
             webhook_bridge._load_max_body_bytes("0")
         with self.assertRaisesRegex(RuntimeError, webhook_bridge.ENV_MAX_BODY_BYTES):
             webhook_bridge._load_max_body_bytes("large")
+
+    def test_load_retry_interval_validates_env_value(self) -> None:
+        self.assertEqual(
+            webhook_bridge._load_retry_interval_seconds(None),
+            webhook_bridge.DEFAULT_RETRY_INTERVAL_SECONDS,
+        )
+        self.assertEqual(webhook_bridge._load_retry_interval_seconds("0"), 0)
+        self.assertEqual(webhook_bridge._load_retry_interval_seconds("30"), 30)
+        with self.assertRaisesRegex(
+            RuntimeError, webhook_bridge.ENV_RETRY_INTERVAL_SECONDS
+        ):
+            webhook_bridge._load_retry_interval_seconds("-1")
+        with self.assertRaisesRegex(
+            RuntimeError, webhook_bridge.ENV_RETRY_INTERVAL_SECONDS
+        ):
+            webhook_bridge._load_retry_interval_seconds("soon")
+
+    def test_retry_worker_runs_pending_backfill(self) -> None:
+        stop_event = Event()
+
+        class FakeRetryService:
+            calls = 0
+
+            def retry_all_available_requests(self) -> dict[str, Any]:
+                self.calls += 1
+                stop_event.set()
+                return {"ok": True, "checked": 0, "notified": 0}
+
+        service = FakeRetryService()
+
+        webhook_bridge.retry_pending_notifications(service, stop_event, 0.001)
+
+        self.assertEqual(service.calls, 1)
 
     def test_webhook_payload_accepts_json_content_type(self) -> None:
         body = b'{"eventType": "Download"}'
@@ -2307,39 +3175,77 @@ class RadarrWebhookBridgeTests(unittest.TestCase):
         self.assertEqual(handler.response_json()["error"], "invalid JSON body")
 
     def test_extract_radarr_movie_id_accepts_positive_ints(self) -> None:
-        self.assertEqual(webhook_bridge.extract_radarr_movie_id({"movie": {"id": 44}}), 44)
-        self.assertEqual(webhook_bridge.extract_radarr_movie_id({"movie": {"id": "55"}}), 55)
+        self.assertEqual(
+            webhook_bridge.extract_radarr_movie_id({"movie": {"id": 44}}), 44
+        )
+        self.assertEqual(
+            webhook_bridge.extract_radarr_movie_id({"movie": {"id": "55"}}), 55
+        )
 
     def test_extract_radarr_movie_id_rejects_missing_or_invalid_values(self) -> None:
         self.assertIsNone(webhook_bridge.extract_radarr_movie_id({}))
         self.assertIsNone(webhook_bridge.extract_radarr_movie_id({"movie": None}))
         self.assertIsNone(webhook_bridge.extract_radarr_movie_id({"movie": {"id": 0}}))
-        self.assertIsNone(webhook_bridge.extract_radarr_movie_id({"movie": {"id": True}}))
-        self.assertIsNone(webhook_bridge.extract_radarr_movie_id({"movie": {"id": "abc"}}))
+        self.assertIsNone(
+            webhook_bridge.extract_radarr_movie_id({"movie": {"id": True}})
+        )
+        self.assertIsNone(
+            webhook_bridge.extract_radarr_movie_id({"movie": {"id": "abc"}})
+        )
 
     def test_extract_sonarr_series_id_accepts_positive_ints(self) -> None:
-        self.assertEqual(webhook_bridge.extract_sonarr_series_id({"series": {"id": 77}}), 77)
-        self.assertEqual(webhook_bridge.extract_sonarr_series_id({"series": {"id": "88"}}), 88)
+        self.assertEqual(
+            webhook_bridge.extract_sonarr_series_id({"series": {"id": 77}}), 77
+        )
+        self.assertEqual(
+            webhook_bridge.extract_sonarr_series_id({"series": {"id": "88"}}), 88
+        )
 
     def test_extract_sonarr_series_id_rejects_missing_or_invalid_values(self) -> None:
         self.assertIsNone(webhook_bridge.extract_sonarr_series_id({}))
         self.assertIsNone(webhook_bridge.extract_sonarr_series_id({"series": None}))
-        self.assertIsNone(webhook_bridge.extract_sonarr_series_id({"series": {"id": 0}}))
-        self.assertIsNone(webhook_bridge.extract_sonarr_series_id({"series": {"id": False}}))
-        self.assertIsNone(webhook_bridge.extract_sonarr_series_id({"series": {"id": "abc"}}))
+        self.assertIsNone(
+            webhook_bridge.extract_sonarr_series_id({"series": {"id": 0}})
+        )
+        self.assertIsNone(
+            webhook_bridge.extract_sonarr_series_id({"series": {"id": False}})
+        )
+        self.assertIsNone(
+            webhook_bridge.extract_sonarr_series_id({"series": {"id": "abc"}})
+        )
 
     def test_should_handle_only_file_available_radarr_events(self) -> None:
-        self.assertTrue(webhook_bridge.should_handle_radarr_event({"eventType": "Download"}))
-        self.assertTrue(webhook_bridge.should_handle_radarr_event({"eventType": "Rename"}))
-        self.assertTrue(webhook_bridge.should_handle_radarr_event({"eventType": "MovieFileUpgrade"}))
-        self.assertFalse(webhook_bridge.should_handle_radarr_event({"eventType": "Grab"}))
-        self.assertFalse(webhook_bridge.should_handle_radarr_event({"eventType": "MovieDelete"}))
+        self.assertTrue(
+            webhook_bridge.should_handle_radarr_event({"eventType": "Download"})
+        )
+        self.assertTrue(
+            webhook_bridge.should_handle_radarr_event({"eventType": "Rename"})
+        )
+        self.assertTrue(
+            webhook_bridge.should_handle_radarr_event({"eventType": "MovieFileUpgrade"})
+        )
+        self.assertFalse(
+            webhook_bridge.should_handle_radarr_event({"eventType": "Grab"})
+        )
+        self.assertFalse(
+            webhook_bridge.should_handle_radarr_event({"eventType": "MovieDelete"})
+        )
 
     def test_should_handle_only_file_available_sonarr_events(self) -> None:
-        self.assertTrue(webhook_bridge.should_handle_sonarr_event({"eventType": "Download"}))
-        self.assertTrue(webhook_bridge.should_handle_sonarr_event({"eventType": "EpisodeFileUpgrade"}))
-        self.assertFalse(webhook_bridge.should_handle_sonarr_event({"eventType": "Grab"}))
-        self.assertFalse(webhook_bridge.should_handle_sonarr_event({"eventType": "SeriesDelete"}))
+        self.assertTrue(
+            webhook_bridge.should_handle_sonarr_event({"eventType": "Download"})
+        )
+        self.assertTrue(
+            webhook_bridge.should_handle_sonarr_event(
+                {"eventType": "EpisodeFileUpgrade"}
+            )
+        )
+        self.assertFalse(
+            webhook_bridge.should_handle_sonarr_event({"eventType": "Grab"})
+        )
+        self.assertFalse(
+            webhook_bridge.should_handle_sonarr_event({"eventType": "SeriesDelete"})
+        )
 
 
 if __name__ == "__main__":

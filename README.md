@@ -139,6 +139,8 @@ PLEX_MEDIA_REQUEST_SONARR_TAG_IDS=7
 TELEGRAM_BOT_TOKEN=replace-with-telegram-bot-token
 # Optional; defaults to 65536 bytes.
 PLEX_MEDIA_REQUEST_WEBHOOK_MAX_BODY_BYTES=65536
+# Optional; disabled by default. Set to 300 for five-minute durable retries.
+PLEX_MEDIA_REQUEST_NOTIFICATION_RETRY_INTERVAL_SECONDS=300
 ```
 
 The env vars are required because the webhook bridge is standalone: it must read
@@ -169,11 +171,17 @@ http://media-request-webhook:18081/sonarr
 ```
 
 Radarr events call `notify_movie_available(radarr_movie_id)`. Sonarr events call
-`notify_series_available(sonarr_series_id)`, which only notifies once all stored
-requested seasons for that requester are complete.
+`notify_series_available(sonarr_series_id)`, which only notifies once all seasons
+for that stored request are complete. Requests for distinct season sets remain
+independent, while exact repeats are deduplicated.
 
 The webhook bridge rejects oversized request bodies, malformed
 `Content-Length`, and explicit non-JSON content types before parsing the payload.
+It returns HTTP 503 when an Arr lookup or Telegram delivery fails and keeps the
+request pending. Because Arr webhook delivery is not a durable retry queue, the
+bridge also rechecks pending movie and series notifications every five minutes
+when the retry interval is enabled. Its HTTP responses and retry logs contain
+only aggregate counts.
 
 ## Hermes Example
 
@@ -220,9 +228,10 @@ mcp_servers:
   requested_by_username: str | None = None)` requests a series using the
   configured Sonarr policy and records an accepted request in SQLite when the
   server is running. `seasons` is required; pass every wanted season explicitly.
-- `request_status(query: str | None = None, limit: int = 10)` checks active
-  queues plus monitored missing media and returns whether requests are
-  downloading, waiting for release, or waiting for a suitable release.
+- `request_status(query: str | None = None, limit: int = 250)` checks active
+  queues plus monitored media and returns whether requests are downloading,
+  partially available, available, waiting for release, or waiting for a
+  suitable release.
 - `download_status()` checks Radarr and Sonarr queues and returns a sanitized,
   read-only download summary.
 - `browse_library(...)` browses available Radarr/Sonarr library items with
@@ -231,9 +240,8 @@ mcp_servers:
 - `notify_movie_available(radarr_movie_id: int)` is the narrow webhook/backfill
   target for notifying stored requesters after one Radarr movie becomes
   available.
-- `notify_available_requests(limit: int = 100)` is a manual backfill helper that
-  checks pending stored movie requests and sends one-shot availability
-  notifications.
+- `notify_available_requests(limit: int = 100)` retries pending stored movie and
+  series requests and sends one-shot availability notifications.
 
 ## Tool Specification
 
@@ -243,8 +251,22 @@ schemas, examples, and the sanitized fields returned by the current tools.
 
 ## Development
 
-Run tests with:
+Install the locked development dependencies and run the verification suite with:
 
 ```bash
-python3 -m unittest -v
+python3 -m pip install --require-hashes -r requirements-dev.txt
+python3 -W error::ResourceWarning -m unittest -q
+ruff check .
+ruff format --check .
+mypy --check-untyped-defs media_request_server.py radarr_webhook_bridge.py scripts/check_public_repo.py
+openapi-spec-validator docs/openapi.yaml
+pip-audit -r requirements.txt
+```
+
+`requirements.txt` and `requirements-dev.txt` are generated lock files. Update
+their inputs in `requirements.in` or `requirements-dev.in`, then regenerate both:
+
+```bash
+uv pip compile --python-version 3.12 --generate-hashes requirements.in -o requirements.txt
+uv pip compile --python-version 3.12 --generate-hashes requirements-dev.in -o requirements-dev.txt
 ```

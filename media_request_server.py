@@ -7,9 +7,10 @@ from pathlib import Path
 import re
 import sqlite3
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterator, Mapping
 from urllib.parse import urlparse
 
 import requests
@@ -60,12 +61,17 @@ REQUIRED_ENV_VARS = (
 DEFAULT_TIMEOUT_SECONDS = 15
 MAX_SEARCH_RESULTS = 10
 MAX_STATUS_RESULTS = QUEUE_PAGE_SIZE
+MAX_NOTIFICATION_BATCH_SIZE = 1000
 DB_BUSY_TIMEOUT_MS = 5000
 NOTIFICATION_CLAIM_TIMEOUT_SECONDS = 600
 
 
 class ArrApiError(RuntimeError):
     """Raised when a Radarr or Sonarr API call fails."""
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 @dataclass(frozen=True)
@@ -135,7 +141,6 @@ def load_config(env: Mapping[str, str] | None = None) -> ArrConfig:
     )
 
 
-
 class RequestStore:
     """SQLite-backed durable record of accepted media requests."""
 
@@ -167,14 +172,34 @@ class RequestStore:
         ON media_requests(requested_by_chat_id, requested_by_user_id);
     """
 
-    UNIQUE_INDEX_SCHEMA = """
-    CREATE UNIQUE INDEX IF NOT EXISTS uq_media_requests_movie_chat_pending
-        ON media_requests(requested_by_chat_id, tmdb_id)
-        WHERE media_type = 'movie'
-          AND requested_by_chat_id IS NOT NULL
-          AND tmdb_id IS NOT NULL
-          AND notified_available_at IS NULL;
-    """
+    UNIQUE_INDEXES = (
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_media_requests_movie_chat_pending
+            ON media_requests(requested_by_chat_id, tmdb_id)
+            WHERE media_type = 'movie'
+              AND requested_by_chat_id IS NOT NULL
+              AND tmdb_id IS NOT NULL
+              AND notified_available_at IS NULL
+        """,
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_media_requests_series_chat_tvdb_pending
+            ON media_requests(requested_by_chat_id, tvdb_id, season_numbers)
+            WHERE media_type = 'series'
+              AND requested_by_chat_id IS NOT NULL
+              AND tvdb_id IS NOT NULL
+              AND season_numbers IS NOT NULL
+              AND notified_available_at IS NULL
+        """,
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_media_requests_series_chat_sonarr_pending
+            ON media_requests(requested_by_chat_id, sonarr_series_id, season_numbers)
+            WHERE media_type = 'series'
+              AND requested_by_chat_id IS NOT NULL
+              AND sonarr_series_id IS NOT NULL
+              AND season_numbers IS NOT NULL
+              AND notified_available_at IS NULL
+        """,
+    )
 
     def __init__(self, db_path: str | os.PathLike[str]) -> None:
         self.db_path = Path(db_path)
@@ -196,7 +221,9 @@ class RequestStore:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 self._deduplicate_pending_movie_requests(connection)
-                connection.execute(self.UNIQUE_INDEX_SCHEMA)
+                self._deduplicate_pending_series_requests(connection)
+                for statement in self.UNIQUE_INDEXES:
+                    connection.execute(statement)
             except Exception:
                 connection.rollback()
                 raise
@@ -223,17 +250,175 @@ class RequestStore:
             """
         )
 
-    def _connect(self, *, row_factory: bool = False) -> sqlite3.Connection:
-        connection = sqlite3.connect(
-            self.db_path, timeout=DB_BUSY_TIMEOUT_MS / 1000
+    @staticmethod
+    def _deduplicate_pending_series_requests(
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Merge exact duplicate pending series subscriptions.
+
+        TVDB ID is the stable identity, while Sonarr ID lets older/incomplete rows
+        join the same component. A bridge row containing both identifiers also
+        merges legacy rows that contain only one of them. Distinct season sets stay
+        separate so one completed season cannot be delayed by a later request.
+        """
+        columns = (
+            "id",
+            "title",
+            "year",
+            "requested_by_user_id",
+            "requested_by_chat_id",
+            "requested_by_username",
+            "sonarr_series_id",
+            "tmdb_id",
+            "tvdb_id",
+            "imdb_id",
+            "season_numbers",
+            "status",
+            "created_at",
+            "updated_at",
         )
-        connection.execute(f"PRAGMA busy_timeout = {DB_BUSY_TIMEOUT_MS}")
-        connection.execute("PRAGMA journal_mode = WAL")
-        connection.execute("PRAGMA synchronous = NORMAL")
-        connection.execute("PRAGMA foreign_keys = ON")
-        if row_factory:
-            connection.row_factory = sqlite3.Row
-        return connection
+        rows = connection.execute(
+            f"""
+            SELECT {", ".join(columns)}
+            FROM media_requests
+            WHERE media_type = 'series'
+              AND requested_by_chat_id IS NOT NULL
+              AND notified_available_at IS NULL
+              AND (tvdb_id IS NOT NULL OR sonarr_series_id IS NOT NULL)
+            ORDER BY id
+            """
+        ).fetchall()
+        records = {int(row[0]): dict(zip(columns, row)) for row in rows}
+        for request_id, record in records.items():
+            seasons = _decode_season_numbers(record["season_numbers"])
+            record["normalized_seasons"] = seasons
+            connection.execute(
+                "UPDATE media_requests SET season_numbers = ? WHERE id = ?",
+                (json.dumps(seasons), request_id),
+            )
+        parent = {request_id: request_id for request_id in records}
+
+        def find(request_id: int) -> int:
+            while parent[request_id] != request_id:
+                parent[request_id] = parent[parent[request_id]]
+                request_id = parent[request_id]
+            return request_id
+
+        def union(left: int, right: int) -> None:
+            left_root = find(left)
+            right_root = find(right)
+            if left_root != right_root:
+                parent[right_root] = left_root
+
+        owners: dict[tuple[int, tuple[int, ...], str, int], int] = {}
+        for request_id, record in records.items():
+            chat_id = int(record["requested_by_chat_id"])
+            season_key = tuple(record["normalized_seasons"])
+            aliases: list[tuple[int, tuple[int, ...], str, int]] = []
+            if record["tvdb_id"] is not None:
+                aliases.append((chat_id, season_key, "tvdb", int(record["tvdb_id"])))
+            if record["sonarr_series_id"] is not None:
+                aliases.append(
+                    (
+                        chat_id,
+                        season_key,
+                        "sonarr",
+                        int(record["sonarr_series_id"]),
+                    )
+                )
+            for alias in aliases:
+                owner = owners.get(alias)
+                if owner is None:
+                    owners[alias] = request_id
+                else:
+                    union(request_id, owner)
+
+        components: dict[int, list[int]] = {}
+        for request_id in records:
+            components.setdefault(find(request_id), []).append(request_id)
+
+        merge_fields = (
+            "title",
+            "year",
+            "requested_by_user_id",
+            "requested_by_username",
+            "sonarr_series_id",
+            "tmdb_id",
+            "tvdb_id",
+            "imdb_id",
+        )
+        for request_ids in components.values():
+            if len(request_ids) < 2:
+                continue
+            newest_first = sorted(request_ids, reverse=True)
+            keep_id = newest_first[0]
+            seasons = records[keep_id]["normalized_seasons"]
+            merged = {
+                field: next(
+                    (
+                        records[request_id][field]
+                        for request_id in newest_first
+                        if records[request_id][field] is not None
+                    ),
+                    None,
+                )
+                for field in merge_fields
+            }
+            merged["created_at"] = min(
+                str(records[request_id]["created_at"]) for request_id in request_ids
+            )
+            merged["updated_at"] = max(
+                str(records[request_id]["updated_at"]) for request_id in request_ids
+            )
+            merged["status"] = records[keep_id]["status"]
+            connection.execute(
+                """
+                UPDATE media_requests
+                SET title = ?, year = ?, requested_by_user_id = ?,
+                    requested_by_username = ?, sonarr_series_id = ?, tmdb_id = ?,
+                    tvdb_id = ?, imdb_id = ?, season_numbers = ?, status = ?,
+                    created_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    merged["title"],
+                    merged["year"],
+                    merged["requested_by_user_id"],
+                    merged["requested_by_username"],
+                    merged["sonarr_series_id"],
+                    merged["tmdb_id"],
+                    merged["tvdb_id"],
+                    merged["imdb_id"],
+                    json.dumps(seasons),
+                    merged["status"],
+                    merged["created_at"],
+                    merged["updated_at"],
+                    keep_id,
+                ),
+            )
+            delete_ids = [
+                request_id for request_id in request_ids if request_id != keep_id
+            ]
+            placeholders = ", ".join("?" for _ in delete_ids)
+            connection.execute(
+                f"DELETE FROM media_requests WHERE id IN ({placeholders})",
+                tuple(delete_ids),
+            )
+
+    @contextmanager
+    def _connect(self, *, row_factory: bool = False) -> Iterator[sqlite3.Connection]:
+        connection = sqlite3.connect(self.db_path, timeout=DB_BUSY_TIMEOUT_MS / 1000)
+        try:
+            connection.execute(f"PRAGMA busy_timeout = {DB_BUSY_TIMEOUT_MS}")
+            connection.execute("PRAGMA journal_mode = WAL")
+            connection.execute("PRAGMA synchronous = NORMAL")
+            connection.execute("PRAGMA foreign_keys = ON")
+            if row_factory:
+                connection.row_factory = sqlite3.Row
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def add_request(
         self,
@@ -252,19 +437,34 @@ class RequestStore:
         season_numbers: list[int] | None = None,
         status: str = "requested",
         reactivate_notified: bool = False,
+        already_available: bool = False,
     ) -> int:
         now = datetime.now(timezone.utc).isoformat()
-        seasons_json = json.dumps(season_numbers) if season_numbers is not None else None
+        initial_status = "available" if already_available else status
+        initial_notified_at = now if already_available else None
+        seasons_json = (
+            json.dumps(_decode_season_numbers(season_numbers))
+            if media_type == "series"
+            else json.dumps(season_numbers)
+            if season_numbers is not None
+            else None
+        )
         deduplicate_movie = (
             media_type == "movie"
             and requested_by_chat_id is not None
             and tmdb_id is not None
         )
+        deduplicate_series = (
+            media_type == "series"
+            and requested_by_chat_id is not None
+            and (tvdb_id is not None or sonarr_series_id is not None)
+        )
         with self._connect() as connection:
-            if deduplicate_movie:
+            if deduplicate_movie or deduplicate_series:
                 # Serialize writers so two simultaneous requests cannot both miss
                 # the lookup and insert duplicate notification subscriptions.
                 connection.execute("BEGIN IMMEDIATE")
+            if deduplicate_movie:
                 existing = connection.execute(
                     """
                     SELECT id
@@ -288,9 +488,15 @@ class RequestStore:
                             requested_by_username = COALESCE(?, requested_by_username),
                             radarr_movie_id = COALESCE(?, radarr_movie_id),
                             imdb_id = COALESCE(?, imdb_id),
-                            status = CASE WHEN ? THEN 'requested' ELSE status END,
+                            status = CASE
+                                WHEN ? THEN 'available'
+                                WHEN ? THEN 'requested'
+                                ELSE status
+                            END,
                             notified_available_at = CASE
-                                WHEN ? THEN NULL ELSE notified_available_at
+                                WHEN ? THEN ?
+                                WHEN ? THEN NULL
+                                ELSE notified_available_at
                             END,
                             updated_at = ?
                         WHERE id = ?
@@ -302,8 +508,79 @@ class RequestStore:
                             requested_by_username,
                             radarr_movie_id,
                             imdb_id,
+                            already_available,
                             reactivate_notified,
+                            already_available,
+                            now,
                             reactivate_notified,
+                            now,
+                            request_id,
+                        ),
+                    )
+                    return request_id
+            elif deduplicate_series:
+                predicates: list[str] = []
+                identity_values: list[int] = []
+                if tvdb_id is not None:
+                    predicates.append("tvdb_id = ?")
+                    identity_values.append(tvdb_id)
+                if sonarr_series_id is not None:
+                    predicates.append("sonarr_series_id = ?")
+                    identity_values.append(sonarr_series_id)
+                existing = connection.execute(
+                    f"""
+                    SELECT id, season_numbers
+                    FROM media_requests
+                    WHERE media_type = 'series'
+                      AND requested_by_chat_id = ?
+                      AND notified_available_at IS NULL
+                      AND season_numbers = ?
+                      AND ({" OR ".join(predicates)})
+                    ORDER BY id DESC
+                    """,
+                    (requested_by_chat_id, seasons_json, *identity_values),
+                ).fetchall()
+                if existing:
+                    request_id = int(existing[0][0])
+                    duplicate_ids = [int(row[0]) for row in existing[1:]]
+                    if duplicate_ids:
+                        placeholders = ", ".join("?" for _ in duplicate_ids)
+                        connection.execute(
+                            f"DELETE FROM media_requests WHERE id IN ({placeholders})",
+                            tuple(duplicate_ids),
+                        )
+                    connection.execute(
+                        """
+                        UPDATE media_requests
+                        SET title = COALESCE(?, title),
+                            year = COALESCE(?, year),
+                            requested_by_user_id = COALESCE(?, requested_by_user_id),
+                            requested_by_username = COALESCE(?, requested_by_username),
+                            sonarr_series_id = COALESCE(?, sonarr_series_id),
+                            tmdb_id = COALESCE(?, tmdb_id),
+                            tvdb_id = COALESCE(?, tvdb_id),
+                            imdb_id = COALESCE(?, imdb_id),
+                            season_numbers = ?,
+                            status = CASE WHEN ? THEN 'available' ELSE status END,
+                            notified_available_at = CASE
+                                WHEN ? THEN ? ELSE notified_available_at
+                            END,
+                            updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            title,
+                            year,
+                            requested_by_user_id,
+                            requested_by_username,
+                            sonarr_series_id,
+                            tmdb_id,
+                            tvdb_id,
+                            imdb_id,
+                            seasons_json,
+                            already_available,
+                            already_available,
+                            now,
                             now,
                             request_id,
                         ),
@@ -317,7 +594,7 @@ class RequestStore:
                     requested_by_user_id, requested_by_chat_id, requested_by_username,
                     radarr_movie_id, sonarr_series_id, tmdb_id, tvdb_id, imdb_id,
                     season_numbers, status, created_at, updated_at, notified_available_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     media_type,
@@ -332,26 +609,33 @@ class RequestStore:
                     tvdb_id,
                     imdb_id,
                     seasons_json,
-                    status,
+                    initial_status,
                     now,
                     now,
+                    initial_notified_at,
                 ),
             )
+            if cursor.lastrowid is None:
+                raise RuntimeError("SQLite did not return an inserted request ID")
             return int(cursor.lastrowid)
 
-    def pending_movie_notifications(self, limit: int = 100) -> list[dict[str, Any]]:
+    def pending_movie_notifications(
+        self, limit: int | None = 100
+    ) -> list[dict[str, Any]]:
+        limit_clause = "LIMIT ?" if limit is not None else ""
+        parameters: tuple[int, ...] = (limit,) if limit is not None else ()
         with self._connect(row_factory=True) as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT * FROM media_requests
                 WHERE media_type = 'movie'
                   AND radarr_movie_id IS NOT NULL
                   AND requested_by_chat_id IS NOT NULL
                   AND notified_available_at IS NULL
                 ORDER BY created_at ASC
-                LIMIT ?
+                {limit_clause}
                 """,
-                (limit,),
+                parameters,
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -386,6 +670,26 @@ class RequestStore:
                 ORDER BY created_at ASC
                 """,
                 (sonarr_series_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def pending_series_notifications(
+        self, limit: int | None = 100
+    ) -> list[dict[str, Any]]:
+        limit_clause = "LIMIT ?" if limit is not None else ""
+        parameters: tuple[int, ...] = (limit,) if limit is not None else ()
+        with self._connect(row_factory=True) as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM media_requests
+                WHERE media_type = 'series'
+                  AND sonarr_series_id IS NOT NULL
+                  AND requested_by_chat_id IS NOT NULL
+                  AND notified_available_at IS NULL
+                ORDER BY created_at ASC
+                {limit_clause}
+                """,
+                parameters,
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -503,24 +807,14 @@ class MediaRequestService:
         try:
             existing = self._find_existing_movie(tmdb_id)
             if existing is not None:
-                existing_title = existing.get("title") or requested_title
-                result = {
-                    "status": "already_exists",
-                    "title": existing_title,
-                    "tmdbId": tmdb_id,
-                    "radarrMovieId": _positive_int_or_none(existing.get("id")),
-                    "message": f"{existing_title or 'Movie'} is already in Radarr.",
-                }
-                self._record_movie_request(
-                    result,
-                    movie=existing,
+                return self._existing_movie_result(
+                    existing,
                     tmdb_id=tmdb_id,
-                    title=existing_title,
+                    requested_title=requested_title,
                     requested_by_user_id=requested_by_user_id,
                     requested_by_chat_id=requested_by_chat_id,
                     requested_by_username=requested_by_username,
                 )
-                return result
 
             movie = self._lookup_movie_by_tmdb(tmdb_id)
             if movie is None:
@@ -544,7 +838,26 @@ class MediaRequestService:
                 }
             )
 
-            response = self._post_radarr("/api/v3/movie", json=payload)
+            try:
+                response = self._post_radarr("/api/v3/movie", json=payload)
+            except ArrApiError as add_error:
+                # Another requester may have added the same title between the
+                # initial lookup and this POST. Re-fetch before reporting failure
+                # so this requester still receives an availability subscription.
+                try:
+                    existing = self._find_existing_movie(tmdb_id)
+                except ArrApiError:
+                    raise add_error
+                if existing is None:
+                    raise add_error
+                return self._existing_movie_result(
+                    existing,
+                    tmdb_id=tmdb_id,
+                    requested_title=requested_title,
+                    requested_by_user_id=requested_by_user_id,
+                    requested_by_chat_id=requested_by_chat_id,
+                    requested_by_username=requested_by_username,
+                )
             added_title = response.get("title") or movie.get("title") or requested_title
             result = {
                 "status": "added",
@@ -574,6 +887,56 @@ class MediaRequestService:
                 "message": str(exc),
             }
 
+    def _existing_movie_result(
+        self,
+        movie: Mapping[str, Any],
+        *,
+        tmdb_id: int,
+        requested_title: str | None,
+        requested_by_user_id: int | None,
+        requested_by_chat_id: int | None,
+        requested_by_username: str | None,
+    ) -> dict[str, Any]:
+        existing_title = movie.get("title") or requested_title
+        updated_movie = dict(movie)
+        movie_id = _positive_int_or_none(movie.get("id"))
+        monitoring_updated = False
+        search_submitted = False
+        if movie_id is not None and not _movie_has_file(movie):
+            updated_movie["monitored"] = True
+            updated_movie["qualityProfileId"] = self.config.radarr_quality_profile_id
+            put_result = self._put_radarr(
+                f"/api/v3/movie/{movie_id}", json=updated_movie
+            )
+            if put_result:
+                updated_movie.update(put_result)
+            self._post_radarr(
+                "/api/v3/command",
+                json={"name": "MoviesSearch", "movieIds": [movie_id]},
+            )
+            monitoring_updated = True
+            search_submitted = True
+        result = {
+            "status": "already_exists",
+            "title": existing_title,
+            "tmdbId": tmdb_id,
+            "radarrMovieId": movie_id,
+            "profileUsed": self.config.radarr_quality_profile_name,
+            "monitoringUpdated": monitoring_updated,
+            "searchSubmitted": search_submitted,
+            "message": f"{existing_title or 'Movie'} is already in Radarr.",
+        }
+        self._record_movie_request(
+            result,
+            movie=updated_movie,
+            tmdb_id=tmdb_id,
+            title=existing_title,
+            requested_by_user_id=requested_by_user_id,
+            requested_by_chat_id=requested_by_chat_id,
+            requested_by_username=requested_by_username,
+        )
+        return self._with_post_request_status(result, _clean_text(existing_title))
+
     def request_series(
         self,
         tvdbId: int,
@@ -591,6 +954,11 @@ class MediaRequestService:
             if anime
             else self.config.sonarr_normal_quality_profile_name
         )
+        profile_id = (
+            self.config.sonarr_anime_quality_profile_id
+            if anime
+            else self.config.sonarr_normal_quality_profile_id
+        )
         try:
             requested_seasons = _require_requested_seasons(seasons)
         except ValueError as exc:
@@ -605,59 +973,17 @@ class MediaRequestService:
         try:
             existing = self._find_existing_show(tvdb_id)
             if existing is not None:
-                season_update = _with_season_monitoring(
-                    existing, requested_seasons, preserve_existing=True
-                )
-                if "error" in season_update:
-                    return {
-                        "status": "error",
-                        "title": existing.get("title") or requested_title,
-                        "tvdbId": tvdb_id,
-                        "profileUsed": profile_name,
-                        "monitoredSeasons": requested_seasons,
-                        "message": season_update["error"],
-                    }
-
-                updated = dict(existing)
-                updated["monitored"] = True
-                updated["seasons"] = season_update["seasons"]
-                series_id = _positive_int_or_none(existing.get("id"))
-                if series_id is not None:
-                    updated = self._put_sonarr(f"/api/v3/series/{series_id}", json=updated)
-                    for season_number in requested_seasons:
-                        self._post_sonarr(
-                            "/api/v3/command",
-                            json={
-                                "name": "SeasonSearch",
-                                "seriesId": series_id,
-                                "seasonNumber": season_number,
-                            },
-                        )
-
-                availability = _series_availability(updated, requested_seasons)
-                result = {
-                    "status": "already_exists",
-                    "title": updated.get("title") or existing.get("title") or requested_title,
-                    "tvdbId": tvdb_id,
-                    "sonarrSeriesId": series_id,
-                    "profileUsed": profile_name,
-                    "monitoredSeasons": requested_seasons,
-                    "monitoringUpdated": series_id is not None,
-                    "searchSubmitted": series_id is not None,
-                    "available": availability["availableEpisodes"] > 0,
-                    "availability": availability,
-                }
-                self._record_series_request(
-                    result,
-                    series=updated,
+                return self._existing_series_result(
+                    existing,
                     tvdb_id=tvdb_id,
-                    title=updated.get("title") or existing.get("title") or requested_title,
-                    seasons=requested_seasons,
+                    requested_title=requested_title,
+                    requested_seasons=requested_seasons,
+                    profile_id=profile_id,
+                    profile_name=profile_name,
                     requested_by_user_id=requested_by_user_id,
                     requested_by_chat_id=requested_by_chat_id,
                     requested_by_username=requested_by_username,
                 )
-                return self._with_post_request_status(result, updated.get("title") or existing.get("title") or requested_title)
 
             return self._add_series(
                 tvdbId=tvdb_id,
@@ -677,6 +1003,77 @@ class MediaRequestService:
                 "monitoredSeasons": requested_seasons,
                 "message": str(exc),
             }
+
+    def _existing_series_result(
+        self,
+        series: Mapping[str, Any],
+        *,
+        tvdb_id: int,
+        requested_title: str | None,
+        requested_seasons: list[int],
+        profile_id: int,
+        profile_name: str,
+        requested_by_user_id: int | None,
+        requested_by_chat_id: int | None,
+        requested_by_username: str | None,
+    ) -> dict[str, Any]:
+        season_update = _with_season_monitoring(
+            series, requested_seasons, preserve_existing=True
+        )
+        if "error" in season_update:
+            return {
+                "status": "error",
+                "title": series.get("title") or requested_title,
+                "tvdbId": tvdb_id,
+                "profileUsed": profile_name,
+                "monitoredSeasons": requested_seasons,
+                "message": season_update["error"],
+            }
+
+        updated = dict(series)
+        updated["monitored"] = True
+        updated["seasons"] = season_update["seasons"]
+        updated["qualityProfileId"] = profile_id
+        series_id = _positive_int_or_none(series.get("id"))
+        if series_id is not None:
+            put_result = self._put_sonarr(f"/api/v3/series/{series_id}", json=updated)
+            if put_result:
+                updated.update(put_result)
+            for season_number in requested_seasons:
+                self._post_sonarr(
+                    "/api/v3/command",
+                    json={
+                        "name": "SeasonSearch",
+                        "seriesId": series_id,
+                        "seasonNumber": season_number,
+                    },
+                )
+
+        title = updated.get("title") or series.get("title") or requested_title
+        availability = _series_availability(updated, requested_seasons)
+        result = {
+            "status": "already_exists",
+            "title": title,
+            "tvdbId": tvdb_id,
+            "sonarrSeriesId": series_id,
+            "profileUsed": profile_name,
+            "monitoredSeasons": requested_seasons,
+            "monitoringUpdated": series_id is not None,
+            "searchSubmitted": series_id is not None,
+            "available": availability["availableEpisodes"] > 0,
+            "availability": availability,
+        }
+        self._record_series_request(
+            result,
+            series=updated,
+            tvdb_id=tvdb_id,
+            title=title,
+            seasons=requested_seasons,
+            requested_by_user_id=requested_by_user_id,
+            requested_by_chat_id=requested_by_chat_id,
+            requested_by_username=requested_by_username,
+        )
+        return self._with_post_request_status(result, _clean_text(title))
 
     def _add_series(
         self,
@@ -738,8 +1135,32 @@ class MediaRequestService:
                 }
             )
 
-            response = self._post_sonarr("/api/v3/series", json=payload)
-            added_title = response.get("title") or series.get("title") or requested_title
+            try:
+                response = self._post_sonarr("/api/v3/series", json=payload)
+            except ArrApiError as add_error:
+                # A concurrent request may have added the series after the
+                # initial lookup. Re-fetch it, apply this request's season intent,
+                # and retain this requester's notification subscription.
+                try:
+                    existing = self._find_existing_show(tvdb_id)
+                except ArrApiError:
+                    raise add_error
+                if existing is None:
+                    raise add_error
+                return self._existing_series_result(
+                    existing,
+                    tvdb_id=tvdb_id,
+                    requested_title=requested_title,
+                    requested_seasons=requested_seasons,
+                    profile_id=profile_id,
+                    profile_name=profile_name,
+                    requested_by_user_id=requested_by_user_id,
+                    requested_by_chat_id=requested_by_chat_id,
+                    requested_by_username=requested_by_username,
+                )
+            added_title = (
+                response.get("title") or series.get("title") or requested_title
+            )
             result = {
                 "status": "added",
                 "title": added_title,
@@ -781,60 +1202,97 @@ class MediaRequestService:
     def notify_movie_available(self, radarr_movie_id: int) -> dict[str, Any]:
         """Notify requesters for one Radarr movie when a webhook says it is available."""
         if self.request_store is None:
-            return {"ok": False, "notified": 0, "checked": 0, "message": "Request store is not configured."}
+            return {
+                "ok": False,
+                "notified": 0,
+                "checked": 0,
+                "message": "Request store is not configured.",
+            }
 
         movie_id = _positive_int_or_none(radarr_movie_id)
         if movie_id is None:
-            return {"ok": False, "notified": 0, "checked": 0, "message": "radarr_movie_id must be a positive integer."}
+            return {
+                "ok": False,
+                "notified": 0,
+                "checked": 0,
+                "message": "radarr_movie_id must be a positive integer.",
+            }
 
         rows = self.request_store.pending_movie_notifications_for_radarr_id(movie_id)
         if not rows:
-            return {"ok": True, "checked": 0, "notified": 0, "notifications": [], "skipped": []}
+            return {
+                "ok": True,
+                "checked": 0,
+                "notified": 0,
+                "notifications": [],
+                "skipped": [],
+            }
 
         try:
             movie = self._get_radarr(f"/api/v3/movie/{movie_id}")
-        except ArrApiError as exc:
+        except ArrApiError:
+            return {
+                "ok": False,
+                "checked": len(rows),
+                "notified": 0,
+                "notifications": [],
+                "skipped": [
+                    {"radarrMovieId": movie_id, "reason": "Radarr lookup failed"}
+                ],
+            }
+
+        if not isinstance(movie, dict) or not _movie_has_file(movie):
             return {
                 "ok": True,
                 "checked": len(rows),
                 "notified": 0,
                 "notifications": [],
-                "skipped": [{"radarrMovieId": movie_id, "reason": str(exc)}],
+                "skipped": [],
             }
-
-        if not isinstance(movie, dict) or not _movie_has_file(movie):
-            return {"ok": True, "checked": len(rows), "notified": 0, "notifications": [], "skipped": []}
 
         notified: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
+        delivery_failed = False
         for row in rows:
             request_id = _positive_int_or_none(row.get("id"))
             chat_id = _telegram_chat_id_or_none(row.get("requested_by_chat_id"))
             if request_id is None or chat_id is None:
-                skipped.append({"id": request_id, "reason": "missing request or chat ID"})
+                skipped.append(
+                    {"id": request_id, "reason": "missing request or chat ID"}
+                )
                 continue
-            title = _clean_text(movie.get("title")) or _clean_text(row.get("title")) or "Your movie"
-            year = _positive_int_or_none(movie.get("year")) or _positive_int_or_none(row.get("year"))
+            title = (
+                _clean_text(movie.get("title"))
+                or _clean_text(row.get("title"))
+                or "Your movie"
+            )
+            year = _positive_int_or_none(movie.get("year")) or _positive_int_or_none(
+                row.get("year")
+            )
             title_with_year = f"{title} ({year})" if year else title
             message = f"✅ {title_with_year} is now available on Plex."
             if not self.request_store.claim_notification(request_id):
-                skipped.append({"id": request_id, "reason": "notification already claimed"})
+                skipped.append(
+                    {"id": request_id, "reason": "notification already claimed"}
+                )
                 continue
             try:
                 sent = self.telegram_sender(chat_id, message)
             except Exception:
                 self.request_store.release_notification_claim(request_id)
                 skipped.append({"id": request_id, "reason": "Telegram send failed"})
+                delivery_failed = True
                 continue
             if not sent:
                 self.request_store.release_notification_claim(request_id)
                 skipped.append({"id": request_id, "reason": "Telegram send failed"})
+                delivery_failed = True
                 continue
             self.request_store.mark_notified(request_id)
-            notified.append({"id": request_id, "title": title_with_year, "chatId": chat_id})
+            notified.append({"id": request_id, "title": title_with_year})
 
         return {
-            "ok": True,
+            "ok": not delivery_failed,
             "checked": len(rows),
             "notified": len(notified),
             "notifications": notified,
@@ -844,45 +1302,74 @@ class MediaRequestService:
     def notify_series_available(self, sonarr_series_id: int) -> dict[str, Any]:
         """Notify requesters for one Sonarr series when requested seasons are available."""
         if self.request_store is None:
-            return {"ok": False, "notified": 0, "checked": 0, "message": "Request store is not configured."}
+            return {
+                "ok": False,
+                "notified": 0,
+                "checked": 0,
+                "message": "Request store is not configured.",
+            }
 
         series_id = _positive_int_or_none(sonarr_series_id)
         if series_id is None:
-            return {"ok": False, "notified": 0, "checked": 0, "message": "sonarr_series_id must be a positive integer."}
+            return {
+                "ok": False,
+                "notified": 0,
+                "checked": 0,
+                "message": "sonarr_series_id must be a positive integer.",
+            }
 
         rows = self.request_store.pending_series_notifications_for_sonarr_id(series_id)
         if not rows:
-            return {"ok": True, "checked": 0, "notified": 0, "notifications": [], "skipped": []}
+            return {
+                "ok": True,
+                "checked": 0,
+                "notified": 0,
+                "notifications": [],
+                "skipped": [],
+            }
 
         try:
             series = self._get_sonarr(f"/api/v3/series/{series_id}")
-        except ArrApiError as exc:
+        except ArrApiError:
+            return {
+                "ok": False,
+                "checked": len(rows),
+                "notified": 0,
+                "notifications": [],
+                "skipped": [
+                    {"sonarrSeriesId": series_id, "reason": "Sonarr lookup failed"}
+                ],
+            }
+
+        if not isinstance(series, dict):
             return {
                 "ok": True,
                 "checked": len(rows),
                 "notified": 0,
                 "notifications": [],
-                "skipped": [{"sonarrSeriesId": series_id, "reason": str(exc)}],
+                "skipped": [],
             }
-
-        if not isinstance(series, dict):
-            return {"ok": True, "checked": len(rows), "notified": 0, "notifications": [], "skipped": []}
 
         notified: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
+        delivery_failed = False
         for row in rows:
             request_id = _positive_int_or_none(row.get("id"))
             chat_id = _telegram_chat_id_or_none(row.get("requested_by_chat_id"))
             seasons = _decode_season_numbers(row.get("season_numbers"))
             if request_id is None or chat_id is None:
-                skipped.append({"id": request_id, "reason": "missing request or chat ID"})
+                skipped.append(
+                    {"id": request_id, "reason": "missing request or chat ID"}
+                )
                 continue
             if not seasons:
-                skipped.append({"id": request_id, "reason": "missing requested seasons"})
+                skipped.append(
+                    {"id": request_id, "reason": "missing requested seasons"}
+                )
                 continue
 
             availability = _series_availability(series, seasons)
-            if availability["totalEpisodes"] <= 0 or availability["missingEpisodes"] > 0:
+            if not _requested_seasons_complete(availability, seasons):
                 skipped.append(
                     {
                         "id": request_id,
@@ -892,28 +1379,40 @@ class MediaRequestService:
                 )
                 continue
 
-            title = _clean_text(series.get("title")) or _clean_text(row.get("title")) or "Your series"
-            year = _positive_int_or_none(series.get("year")) or _positive_int_or_none(row.get("year"))
+            title = (
+                _clean_text(series.get("title"))
+                or _clean_text(row.get("title"))
+                or "Your series"
+            )
+            year = _positive_int_or_none(series.get("year")) or _positive_int_or_none(
+                row.get("year")
+            )
             title_with_year = f"{title} ({year})" if year else title
             message = f"✅ {title_with_year} {_format_season_list(seasons)} is now available on Plex."
             if not self.request_store.claim_notification(request_id):
-                skipped.append({"id": request_id, "reason": "notification already claimed"})
+                skipped.append(
+                    {"id": request_id, "reason": "notification already claimed"}
+                )
                 continue
             try:
                 sent = self.telegram_sender(chat_id, message)
             except Exception:
                 self.request_store.release_notification_claim(request_id)
                 skipped.append({"id": request_id, "reason": "Telegram send failed"})
+                delivery_failed = True
                 continue
             if not sent:
                 self.request_store.release_notification_claim(request_id)
                 skipped.append({"id": request_id, "reason": "Telegram send failed"})
+                delivery_failed = True
                 continue
             self.request_store.mark_notified(request_id)
-            notified.append({"id": request_id, "title": title_with_year, "seasons": seasons, "chatId": chat_id})
+            notified.append(
+                {"id": request_id, "title": title_with_year, "seasons": seasons}
+            )
 
         return {
-            "ok": True,
+            "ok": not delivery_failed,
             "checked": len(rows),
             "notified": len(notified),
             "notifications": notified,
@@ -921,25 +1420,56 @@ class MediaRequestService:
         }
 
     def notify_available_requests(self, limit: int = 100) -> dict[str, Any]:
-        """Manual backfill helper; webhook flow should call notify_movie_available."""
+        """Retry pending movie and series notifications from durable state."""
+        normalized_limit = _normalize_limit(
+            limit, max_value=MAX_NOTIFICATION_BATCH_SIZE
+        )
+        return self._notify_available_requests(limit=normalized_limit)
+
+    def retry_all_available_requests(self) -> dict[str, Any]:
+        """Scan every pending row for the bridge's durable background retry."""
+        return self._notify_available_requests(limit=None)
+
+    def _notify_available_requests(self, *, limit: int | None) -> dict[str, Any]:
         if self.request_store is None:
-            return {"ok": False, "notified": 0, "checked": 0, "message": "Request store is not configured."}
+            return {
+                "ok": False,
+                "notified": 0,
+                "checked": 0,
+                "message": "Request store is not configured.",
+            }
 
         checked = 0
         total_notified: list[dict[str, Any]] = []
         total_skipped: list[dict[str, Any]] = []
-        for row in self.request_store.pending_movie_notifications(limit=limit):
-            movie_id = _positive_int_or_none(row.get("radarr_movie_id"))
-            if movie_id is None:
-                total_skipped.append({"id": _positive_int_or_none(row.get("id")), "reason": "missing movie ID"})
-                continue
+        ok = True
+        movie_ids = {
+            movie_id
+            for row in self.request_store.pending_movie_notifications(limit=limit)
+            for movie_id in [_positive_int_or_none(row.get("radarr_movie_id"))]
+            if movie_id is not None
+        }
+        series_ids = {
+            series_id
+            for row in self.request_store.pending_series_notifications(limit=limit)
+            for series_id in [_positive_int_or_none(row.get("sonarr_series_id"))]
+            if series_id is not None
+        }
+        for movie_id in sorted(movie_ids):
             result = self.notify_movie_available(movie_id)
+            ok = bool(result.get("ok")) and ok
+            checked += int(result.get("checked") or 0)
+            total_notified.extend(result.get("notifications") or [])
+            total_skipped.extend(result.get("skipped") or [])
+        for series_id in sorted(series_ids):
+            result = self.notify_series_available(series_id)
+            ok = bool(result.get("ok")) and ok
             checked += int(result.get("checked") or 0)
             total_notified.extend(result.get("notifications") or [])
             total_skipped.extend(result.get("skipped") or [])
 
         return {
-            "ok": True,
+            "ok": ok,
             "checked": checked,
             "notified": len(total_notified),
             "notifications": total_notified,
@@ -972,6 +1502,7 @@ class MediaRequestService:
                 imdb_id=_clean_text(movie.get("imdbId")),
                 status="requested",
                 reactivate_notified=not _movie_has_file(movie),
+                already_available=_movie_has_file(movie),
             )
         except Exception as exc:
             result["requestRecord"] = {"recorded": False, "error": str(exc)}
@@ -1006,6 +1537,9 @@ class MediaRequestService:
                 imdb_id=_clean_text(series.get("imdbId")),
                 season_numbers=seasons,
                 status="requested",
+                already_available=_requested_seasons_complete(
+                    _series_availability(series, seasons), seasons
+                ),
             )
         except Exception as exc:
             result["requestRecord"] = {"recorded": False, "error": str(exc)}
@@ -1034,7 +1568,7 @@ class MediaRequestService:
             # Unit-test fakes may not provide enough follow-up responses; avoid
             # leaving a partial status request in their request log. Real HTTP
             # sessions do not expose this attribute.
-            if request_count is not None:
+            if request_count is not None and isinstance(requests_log, list):
                 del requests_log[request_count:]
             return result
         return result
@@ -1101,9 +1635,9 @@ class MediaRequestService:
             and _media_id(movie) not in queued_movie_ids
         )
         items.extend(
-            _shape_waiting_request_item(show, "series")
+            _shape_series_request_item(show)
             for show in series
-            if _is_missing_monitored_media(show, "series")
+            if show.get("monitored") is True
             and _media_id(show) not in queued_series_ids
         )
 
@@ -1139,7 +1673,9 @@ class MediaRequestService:
                 for item in sonarr_queue:
                     if not _is_import_blocked(item):
                         continue
-                    if query_text and not _matches_queue_query(item, query_text, "series"):
+                    if query_text and not _matches_queue_query(
+                        item, query_text, "series"
+                    ):
                         continue
                     items.append(self._repair_sonarr_import_block(item))
 
@@ -1150,7 +1686,9 @@ class MediaRequestService:
                 for item in radarr_queue:
                     if not _is_import_blocked(item):
                         continue
-                    if query_text and not _matches_queue_query(item, query_text, "movie"):
+                    if query_text and not _matches_queue_query(
+                        item, query_text, "movie"
+                    ):
                         continue
                     items.append(self._repair_radarr_import_block(item))
         except ArrApiError as exc:
@@ -1232,11 +1770,23 @@ class MediaRequestService:
 
         base = _repair_result_base(item, "series", title)
         if not download_id:
-            return {**base, "status": "skipped", "reason": "Blocked queue item has no downloadId."}
+            return {
+                **base,
+                "status": "skipped",
+                "reason": "Blocked queue item has no downloadId.",
+            }
         if series_id is None:
-            return {**base, "status": "skipped", "reason": "Blocked queue item has no series ID."}
+            return {
+                **base,
+                "status": "skipped",
+                "reason": "Blocked queue item has no series ID.",
+            }
         if episode_id is None:
-            return {**base, "status": "skipped", "reason": "Blocked queue item has no episode ID."}
+            return {
+                **base,
+                "status": "skipped",
+                "reason": "Blocked queue item has no episode ID.",
+            }
 
         candidates = _ensure_list(
             self._get_sonarr(
@@ -1257,8 +1807,11 @@ class MediaRequestService:
             return {**base, "status": "skipped", "reason": reason}
 
         candidate_episodes = _ensure_list(candidate.get("episodes"))
-        episode_ids = [_positive_int_or_none(ep.get("id")) for ep in candidate_episodes]
-        episode_ids = [value for value in episode_ids if value is not None]
+        episode_ids: list[int] = []
+        for episode in candidate_episodes:
+            candidate_episode_id = _positive_int_or_none(episode.get("id"))
+            if candidate_episode_id is not None:
+                episode_ids.append(candidate_episode_id)
         file_payload = {
             "path": candidate.get("path"),
             "folderName": candidate.get("folderName"),
@@ -1303,9 +1856,17 @@ class MediaRequestService:
         movie_id = _queue_media_id(item, "movie")
         base = _repair_result_base(item, "movie", title)
         if not download_id:
-            return {**base, "status": "skipped", "reason": "Blocked queue item has no downloadId."}
+            return {
+                **base,
+                "status": "skipped",
+                "reason": "Blocked queue item has no downloadId.",
+            }
         if movie_id is None:
-            return {**base, "status": "skipped", "reason": "Blocked queue item has no movie ID."}
+            return {
+                **base,
+                "status": "skipped",
+                "reason": "Blocked queue item has no movie ID.",
+            }
 
         candidates = _ensure_list(
             self._get_radarr(
@@ -1360,7 +1921,9 @@ class MediaRequestService:
             "message": f"Imported blocked download for {title}.",
         }
 
-    def _verify_sonarr_episodes_have_files(self, series_id: int, episode_ids: list[int]) -> bool:
+    def _verify_sonarr_episodes_have_files(
+        self, series_id: int, episode_ids: list[int]
+    ) -> bool:
         if not episode_ids:
             return False
         episodes = _ensure_list(
@@ -1420,9 +1983,7 @@ class MediaRequestService:
                 "message": str(exc),
             }
 
-    def _get_radarr(
-        self, path: str, params: Mapping[str, Any] | None = None
-    ) -> Any:
+    def _get_radarr(self, path: str, params: Mapping[str, Any] | None = None) -> Any:
         return self._request(
             "GET",
             self.config.radarr_url,
@@ -1441,9 +2002,17 @@ class MediaRequestService:
         )
         return response if isinstance(response, dict) else {}
 
-    def _get_sonarr(
-        self, path: str, params: Mapping[str, Any] | None = None
-    ) -> Any:
+    def _put_radarr(self, path: str, json: Mapping[str, Any]) -> dict[str, Any]:
+        response = self._request(
+            "PUT",
+            self.config.radarr_url,
+            self.config.radarr_api_key,
+            path,
+            json=json,
+        )
+        return response if isinstance(response, dict) else {}
+
+    def _get_sonarr(self, path: str, params: Mapping[str, Any] | None = None) -> Any:
         return self._request(
             "GET",
             self.config.sonarr_url,
@@ -1482,6 +2051,7 @@ class MediaRequestService:
         json: Mapping[str, Any] | None = None,
     ) -> Any:
         url = f"{base_url}{path}"
+        response: requests.Response | None = None
         try:
             response = self.session.request(
                 method,
@@ -1493,7 +2063,12 @@ class MediaRequestService:
             )
             response.raise_for_status()
         except requests.RequestException as exc:
-            raise ArrApiError(f"{method} {path} failed: {exc}") from exc
+            error_response = getattr(exc, "response", None) or response
+            status_code = getattr(error_response, "status_code", None)
+            raise ArrApiError(
+                f"{method} {path} failed: {exc}",
+                status_code=status_code if isinstance(status_code, int) else None,
+            ) from exc
 
         if response.status_code == 204 or not response.content:
             return {}
@@ -1706,7 +2281,7 @@ def _shape_library_movie(item: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _shape_library_series(item: Mapping[str, Any]) -> dict[str, Any]:
-    result = {
+    result: dict[str, Any] = {
         "title": _clean_text(item.get("title")),
         "year": _positive_int_or_none(item.get("year")),
         "media_type": "series",
@@ -1805,9 +2380,13 @@ def _series_availability(
         summary
         for season in _ensure_list(item.get("seasons"))
         for summary in [_season_availability(season)]
-        if summary is not None
-        and (requested is None or summary["season"] in requested)
+        if summary is not None and (requested is None or summary["season"] in requested)
     ]
+    missing_seasons = (
+        sorted(requested - {summary["season"] for summary in season_summaries})
+        if requested is not None
+        else []
+    )
 
     has_season_counts = any(
         summary["availableEpisodes"] > 0 or summary["totalEpisodes"] > 0
@@ -1817,19 +2396,25 @@ def _series_availability(
         available = sum(summary["availableEpisodes"] for summary in season_summaries)
         total = sum(summary["totalEpisodes"] for summary in season_summaries)
         missing = sum(summary["missingEpisodes"] for summary in season_summaries)
-        return {
+        result = {
             "availableEpisodes": available,
             "missingEpisodes": missing,
             "totalEpisodes": total,
             "seasons": season_summaries,
         }
+        if missing_seasons:
+            result["missingSeasons"] = missing_seasons
+        return result
     if requested is not None:
-        return {
+        result = {
             "availableEpisodes": 0,
             "missingEpisodes": 0,
             "totalEpisodes": 0,
             "seasons": [],
         }
+        if missing_seasons:
+            result["missingSeasons"] = missing_seasons
+        return result
 
     statistics = item.get("statistics")
     if not isinstance(statistics, dict):
@@ -1867,6 +2452,22 @@ def _empty_series_availability(
         "totalEpisodes": 0,
         "seasons": season_summaries,
     }
+
+
+def _requested_seasons_complete(
+    availability: Mapping[str, Any], requested_seasons: list[int]
+) -> bool:
+    summaries = {
+        summary["season"]: summary
+        for summary in _ensure_list(availability.get("seasons"))
+        if _non_negative_int_or_none(summary.get("season")) is not None
+    }
+    return all(
+        season in summaries
+        and _positive_int_or_none(summaries[season].get("totalEpisodes")) is not None
+        and _non_negative_int_or_none(summaries[season].get("missingEpisodes")) == 0
+        for season in requested_seasons
+    )
 
 
 def _season_availability(season: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -1969,7 +2570,9 @@ def _library_query_matches(item: Mapping[str, Any], query: str) -> bool:
         for value in (
             _clean_text(item.get("title")),
             _clean_text(item.get("overview")),
-            " ".join(item.get("genres", [])) if isinstance(item.get("genres"), list) else "",
+            " ".join(item.get("genres", []))
+            if isinstance(item.get("genres"), list)
+            else "",
         )
         if value
     )
@@ -2046,7 +2649,9 @@ def _with_season_monitoring(
         if isinstance(season.get("seasonNumber"), int)
         and not isinstance(season.get("seasonNumber"), bool)
     )
-    missing = [season for season in requested_seasons if season not in available_seasons]
+    missing = [
+        season for season in requested_seasons if season not in available_seasons
+    ]
     if missing:
         return {
             "error": (
@@ -2171,6 +2776,55 @@ def _shape_waiting_request_item(
     return result
 
 
+def _shape_series_request_item(item: Mapping[str, Any]) -> dict[str, Any]:
+    monitored_seasons = [
+        season_number
+        for season in _ensure_list(item.get("seasons"))
+        if season.get("monitored") is True
+        for season_number in [_non_negative_int_or_none(season.get("seasonNumber"))]
+        if season_number is not None
+    ]
+    availability = _series_availability(item, monitored_seasons or None)
+    available = int(availability["availableEpisodes"])
+    total = int(availability["totalEpisodes"])
+    missing = int(availability["missingEpisodes"])
+    complete = (
+        _requested_seasons_complete(availability, monitored_seasons)
+        if monitored_seasons
+        else total > 0 and missing == 0 and not availability.get("missingSeasons")
+    )
+    if complete:
+        title = _media_title(item) or "Series"
+        result: dict[str, Any] = {
+            "media_type": "series",
+            "status": "available",
+            "available": True,
+            "eta": None,
+            "message": f"{title} is already in the library.",
+            "availability": availability,
+        }
+        _copy_if_not_none(result, "title", _media_title(item))
+        return result
+    if available > 0:
+        result = {
+            "media_type": "series",
+            "status": "partially_available",
+            "available": False,
+            "eta": None,
+            "message": (
+                "Some episodes are available, but monitored seasons are not complete."
+            ),
+            "availability": availability,
+        }
+        _copy_if_not_none(result, "title", _media_title(item))
+        return result
+
+    result = _shape_waiting_request_item(item, "series")
+    result["available"] = False
+    result["availability"] = availability
+    return result
+
+
 def _shape_available_movie_request(item: Mapping[str, Any]) -> dict[str, Any]:
     title = _media_title(item) or "Movie"
     result: dict[str, Any] = {
@@ -2228,8 +2882,12 @@ def _repair_result_base(
     result: dict[str, Any] = {"media_type": media_type, "title": title}
     episode = item.get("episode")
     if media_type == "series" and isinstance(episode, dict):
-        _copy_if_not_none(result, "seasonNumber", _positive_int_or_none(episode.get("seasonNumber")))
-        _copy_if_not_none(result, "episodeNumber", _positive_int_or_none(episode.get("episodeNumber")))
+        _copy_if_not_none(
+            result, "seasonNumber", _positive_int_or_none(episode.get("seasonNumber"))
+        )
+        _copy_if_not_none(
+            result, "episodeNumber", _positive_int_or_none(episode.get("episodeNumber"))
+        )
     return result
 
 
@@ -2415,7 +3073,11 @@ def _find_available_movie_match(
         if not _movie_has_file(movie):
             continue
         movie_year = _positive_int_or_none(movie.get("year"))
-        if query_year is not None and movie_year is not None and query_year != movie_year:
+        if (
+            query_year is not None
+            and movie_year is not None
+            and query_year != movie_year
+        ):
             continue
         if query_key in _movie_match_keys(movie):
             return movie
@@ -2662,10 +3324,12 @@ def _decode_season_numbers(value: Any) -> list[int]:
     if not isinstance(decoded, list):
         return []
     seasons = sorted(
-        season
-        for item in decoded
-        for season in [_positive_int_or_none(item)]
-        if season is not None
+        {
+            season
+            for item in decoded
+            for season in [_non_negative_int_or_none(item)]
+            if season is not None
+        }
     )
     return seasons
 

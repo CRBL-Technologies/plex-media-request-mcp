@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Event, Thread
 from typing import Any, cast
 from urllib.parse import urlparse
 
@@ -11,9 +12,11 @@ from media_request_server import MediaRequestService, RequestStore, load_config
 ENV_HOST = "PLEX_MEDIA_REQUEST_WEBHOOK_HOST"
 ENV_PORT = "PLEX_MEDIA_REQUEST_WEBHOOK_PORT"
 ENV_MAX_BODY_BYTES = "PLEX_MEDIA_REQUEST_WEBHOOK_MAX_BODY_BYTES"
+ENV_RETRY_INTERVAL_SECONDS = "PLEX_MEDIA_REQUEST_NOTIFICATION_RETRY_INTERVAL_SECONDS"
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 18081
 DEFAULT_MAX_BODY_BYTES = 64 * 1024
+DEFAULT_RETRY_INTERVAL_SECONDS = 0
 
 
 def _load_max_body_bytes(value: str | None) -> int:
@@ -25,6 +28,22 @@ def _load_max_body_bytes(value: str | None) -> int:
         raise RuntimeError(f"{ENV_MAX_BODY_BYTES} must be a positive integer") from exc
     if parsed <= 0:
         raise RuntimeError(f"{ENV_MAX_BODY_BYTES} must be a positive integer")
+    return parsed
+
+
+def _load_retry_interval_seconds(value: str | None) -> int:
+    if value is None or not value.strip():
+        return DEFAULT_RETRY_INTERVAL_SECONDS
+    try:
+        parsed = int(value.strip())
+    except ValueError as exc:
+        raise RuntimeError(
+            f"{ENV_RETRY_INTERVAL_SECONDS} must be a non-negative integer"
+        ) from exc
+    if parsed < 0:
+        raise RuntimeError(
+            f"{ENV_RETRY_INTERVAL_SECONDS} must be a non-negative integer"
+        )
     return parsed
 
 
@@ -86,7 +105,9 @@ def should_handle_sonarr_event(payload: dict[str, Any]) -> bool:
     return event_type in {"download", "episodefileupgrade"}
 
 
-def _json_response(handler: BaseHTTPRequestHandler, status: int, body: dict[str, Any]) -> None:
+def _json_response(
+    handler: BaseHTTPRequestHandler, status: int, body: dict[str, Any]
+) -> None:
     data = json.dumps(body, sort_keys=True).encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json")
@@ -95,13 +116,38 @@ def _json_response(handler: BaseHTTPRequestHandler, status: int, body: dict[str,
     handler.wfile.write(data)
 
 
+def _notification_response(
+    handler: BaseHTTPRequestHandler,
+    *,
+    service: str,
+    identifier_name: str,
+    identifier: int,
+    result: dict[str, Any],
+) -> None:
+    """Return only retry-relevant aggregate data to the webhook caller."""
+    ok = result.get("ok") is True
+    body: dict[str, Any] = {
+        "ok": ok,
+        "handled": True,
+        "service": service,
+        identifier_name: identifier,
+        "checked": int(result.get("checked") or 0),
+        "notified": int(result.get("notified") or 0),
+    }
+    if not ok:
+        body["error"] = "notification delivery failed; retry later"
+    _json_response(handler, 200 if ok else 503, body)
+
+
 class ArrWebhookHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - stdlib signature
         print(f"{self.address_string()} - {format % args}", flush=True)
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib hook
         if urlparse(self.path).path == "/health":
-            _json_response(self, 200, {"ok": True, "service": "plex-media-request-webhook-bridge"})
+            _json_response(
+                self, 200, {"ok": True, "service": "plex-media-request-webhook-bridge"}
+            )
             return
         _json_response(self, 404, {"ok": False, "error": "not found"})
 
@@ -142,7 +188,9 @@ class ArrWebhookHandler(BaseHTTPRequestHandler):
             _json_response(self, 400, {"ok": False, "error": "invalid JSON body"})
             return None
         if not isinstance(payload, dict):
-            _json_response(self, 400, {"ok": False, "error": "payload must be a JSON object"})
+            _json_response(
+                self, 400, {"ok": False, "error": "payload must be a JSON object"}
+            )
             return None
         return payload
 
@@ -151,7 +199,16 @@ class ArrWebhookHandler(BaseHTTPRequestHandler):
         if payload is None:
             return
         if not should_handle_radarr_event(payload):
-            _json_response(self, 202, {"ok": True, "handled": False, "reason": "ignored eventType", "eventType": payload.get("eventType")})
+            _json_response(
+                self,
+                202,
+                {
+                    "ok": True,
+                    "handled": False,
+                    "reason": "ignored eventType",
+                    "eventType": payload.get("eventType"),
+                },
+            )
             return
         movie_id = extract_radarr_movie_id(payload)
         if movie_id is None:
@@ -159,14 +216,29 @@ class ArrWebhookHandler(BaseHTTPRequestHandler):
             return
         service = cast(ArrWebhookServer, self.server).service
         result = service.notify_movie_available(movie_id)
-        _json_response(self, 200, {"ok": True, "handled": True, "service": "radarr", "radarrMovieId": movie_id, "result": result})
+        _notification_response(
+            self,
+            service="radarr",
+            identifier_name="radarrMovieId",
+            identifier=movie_id,
+            result=result,
+        )
 
     def _handle_sonarr(self) -> None:
         payload = self._read_payload()
         if payload is None:
             return
         if not should_handle_sonarr_event(payload):
-            _json_response(self, 202, {"ok": True, "handled": False, "reason": "ignored eventType", "eventType": payload.get("eventType")})
+            _json_response(
+                self,
+                202,
+                {
+                    "ok": True,
+                    "handled": False,
+                    "reason": "ignored eventType",
+                    "eventType": payload.get("eventType"),
+                },
+            )
             return
         series_id = extract_sonarr_series_id(payload)
         if series_id is None:
@@ -174,7 +246,13 @@ class ArrWebhookHandler(BaseHTTPRequestHandler):
             return
         service = cast(ArrWebhookServer, self.server).service
         result = service.notify_series_available(series_id)
-        _json_response(self, 200, {"ok": True, "handled": True, "service": "sonarr", "sonarrSeriesId": series_id, "result": result})
+        _notification_response(
+            self,
+            service="sonarr",
+            identifier_name="sonarrSeriesId",
+            identifier=series_id,
+            result=result,
+        )
 
 
 class ArrWebhookServer(ThreadingHTTPServer):
@@ -194,18 +272,61 @@ def build_service() -> MediaRequestService:
     return MediaRequestService(load_config(), request_store=RequestStore.from_env())
 
 
+def retry_pending_notifications(
+    service: MediaRequestService,
+    stop_event: Event,
+    interval_seconds: float,
+) -> None:
+    """Periodically retry durable pending rows without logging request details."""
+    if interval_seconds <= 0:
+        return
+    while not stop_event.wait(interval_seconds):
+        try:
+            result = service.retry_all_available_requests()
+        except Exception:
+            print("Pending notification retry failed", flush=True)
+        else:
+            if result.get("ok") is not True:
+                print(
+                    "Pending notification retry incomplete "
+                    f"(checked={int(result.get('checked') or 0)}, "
+                    f"notified={int(result.get('notified') or 0)})",
+                    flush=True,
+                )
+
+
 def main() -> None:
     host = os.getenv(ENV_HOST, DEFAULT_HOST).strip() or DEFAULT_HOST
     port = int(os.getenv(ENV_PORT, str(DEFAULT_PORT)))
     max_body_bytes = _load_max_body_bytes(os.getenv(ENV_MAX_BODY_BYTES))
+    retry_interval_seconds = _load_retry_interval_seconds(
+        os.getenv(ENV_RETRY_INTERVAL_SECONDS)
+    )
+    service = build_service()
     server = ArrWebhookServer(
         (host, port),
         ArrWebhookHandler,
-        build_service(),
+        service,
         max_body_bytes=max_body_bytes,
     )
+    stop_event = Event()
+    retry_thread: Thread | None = None
+    if retry_interval_seconds > 0:
+        retry_thread = Thread(
+            target=retry_pending_notifications,
+            args=(service, stop_event, retry_interval_seconds),
+            name="notification-retry",
+            daemon=True,
+        )
+        retry_thread.start()
     print(f"Arr webhook bridge listening on {host}:{port}", flush=True)
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        stop_event.set()
+        server.server_close()
+        if retry_thread is not None:
+            retry_thread.join(timeout=1)
 
 
 if __name__ == "__main__":

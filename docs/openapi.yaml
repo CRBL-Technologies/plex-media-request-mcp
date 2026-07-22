@@ -193,10 +193,11 @@ paths:
       operationId: request_status
       summary: Check active and waiting requests.
       description: >
-        Checks Radarr and Sonarr queues plus monitored missing media. Active
-        downloads include ETA only when the queue item is actively downloading.
-        Waiting items return eta: null. A matching available movie may return a
-        direct available status object instead of a request list.
+        Checks Radarr and Sonarr queues plus monitored media. Active downloads
+        include ETA only when the queue item is actively downloading. Series
+        items distinguish partial and complete availability. Waiting items
+        return eta: null. A matching available movie may return a direct
+        available status object instead of a request list.
       requestBody:
         required: false
         content:
@@ -517,7 +518,9 @@ components:
           minimum: 1
         requested_by_chat_id:
           type: [integer, "null"]
-          minimum: 1
+          description: Signed Telegram chat ID; group chats use negative values. Zero is invalid.
+          not:
+            const: 0
         requested_by_username:
           type: [string, "null"]
 
@@ -562,7 +565,9 @@ components:
           minimum: 1
         requested_by_chat_id:
           type: [integer, "null"]
-          minimum: 1
+          description: Signed Telegram chat ID; group chats use negative values. Zero is invalid.
+          not:
+            const: 0
         requested_by_username:
           type: [string, "null"]
 
@@ -601,8 +606,8 @@ components:
         limit:
           type: integer
           minimum: 1
-          maximum: 10
-          default: 10
+          maximum: 250
+          default: 250
 
     RequestStatusResponse:
       type: object
@@ -630,7 +635,11 @@ components:
           type: string
         status:
           type: string
-          examples: [downloading, importPending, waiting_for_release, waiting_for_suitable_release]
+          examples: [downloading, importPending, partially_available, available, waiting_for_release, waiting_for_suitable_release]
+        available:
+          type: boolean
+        availability:
+          $ref: "#/components/schemas/SeriesAvailability"
         eta:
           type: [string, "null"]
         progress_percent:
@@ -818,6 +827,11 @@ components:
         totalEpisodes:
           type: integer
           minimum: 0
+        missingSeasons:
+          type: array
+          items:
+            type: integer
+            minimum: 0
         seasons:
           type: array
           items:

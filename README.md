@@ -251,8 +251,22 @@ schemas, examples, and the sanitized fields returned by the current tools.
 
 ## Development
 
-Run tests with:
+Install the locked development dependencies and run the verification suite with:
 
 ```bash
-python3 -m unittest -v
+python3 -m pip install --require-hashes -r requirements-dev.txt
+python3 -W error::ResourceWarning -m unittest -q
+ruff check .
+ruff format --check .
+mypy --check-untyped-defs media_request_server.py radarr_webhook_bridge.py scripts/check_public_repo.py
+openapi-spec-validator docs/openapi.yaml
+pip-audit -r requirements.txt
+```
+
+`requirements.txt` and `requirements-dev.txt` are generated lock files. Update
+their inputs in `requirements.in` or `requirements-dev.in`, then regenerate both:
+
+```bash
+uv pip compile --python-version 3.12 --generate-hashes requirements.in -o requirements.txt
+uv pip compile --python-version 3.12 --generate-hashes requirements-dev.in -o requirements-dev.txt
 ```

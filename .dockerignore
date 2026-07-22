@@ -8,4 +8,10 @@ __pycache__
 .env
 .env.*
 !.env.example
+*.env
+*.sqlite*
+*.db*
+*.log
+state/
+data/
 .DS_Store

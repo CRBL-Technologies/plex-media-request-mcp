@@ -8,7 +8,7 @@ import re
 import sqlite3
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
 from urllib.parse import urlparse
 
@@ -61,6 +61,7 @@ DEFAULT_TIMEOUT_SECONDS = 15
 MAX_SEARCH_RESULTS = 10
 MAX_STATUS_RESULTS = QUEUE_PAGE_SIZE
 DB_BUSY_TIMEOUT_MS = 5000
+NOTIFICATION_CLAIM_TIMEOUT_SECONDS = 600
 
 
 class ArrApiError(RuntimeError):
@@ -166,6 +167,15 @@ class RequestStore:
         ON media_requests(requested_by_chat_id, requested_by_user_id);
     """
 
+    UNIQUE_INDEX_SCHEMA = """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_media_requests_movie_chat_pending
+        ON media_requests(requested_by_chat_id, tmdb_id)
+        WHERE media_type = 'movie'
+          AND requested_by_chat_id IS NOT NULL
+          AND tmdb_id IS NOT NULL
+          AND notified_available_at IS NULL;
+    """
+
     def __init__(self, db_path: str | os.PathLike[str]) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -183,6 +193,35 @@ class RequestStore:
     def _initialize(self) -> None:
         with self._connect() as connection:
             connection.executescript(self.SCHEMA)
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._deduplicate_pending_movie_requests(connection)
+                connection.execute(self.UNIQUE_INDEX_SCHEMA)
+            except Exception:
+                connection.rollback()
+                raise
+            connection.commit()
+
+    @staticmethod
+    def _deduplicate_pending_movie_requests(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            DELETE FROM media_requests
+            WHERE media_type = 'movie'
+              AND requested_by_chat_id IS NOT NULL
+              AND tmdb_id IS NOT NULL
+              AND notified_available_at IS NULL
+              AND id NOT IN (
+                  SELECT MAX(id)
+                  FROM media_requests
+                  WHERE media_type = 'movie'
+                    AND requested_by_chat_id IS NOT NULL
+                    AND tmdb_id IS NOT NULL
+                    AND notified_available_at IS NULL
+                  GROUP BY requested_by_chat_id, tmdb_id
+              )
+            """
+        )
 
     def _connect(self, *, row_factory: bool = False) -> sqlite3.Connection:
         connection = sqlite3.connect(
@@ -212,10 +251,65 @@ class RequestStore:
         imdb_id: str | None = None,
         season_numbers: list[int] | None = None,
         status: str = "requested",
+        reactivate_notified: bool = False,
     ) -> int:
         now = datetime.now(timezone.utc).isoformat()
         seasons_json = json.dumps(season_numbers) if season_numbers is not None else None
+        deduplicate_movie = (
+            media_type == "movie"
+            and requested_by_chat_id is not None
+            and tmdb_id is not None
+        )
         with self._connect() as connection:
+            if deduplicate_movie:
+                # Serialize writers so two simultaneous requests cannot both miss
+                # the lookup and insert duplicate notification subscriptions.
+                connection.execute("BEGIN IMMEDIATE")
+                existing = connection.execute(
+                    """
+                    SELECT id
+                    FROM media_requests
+                    WHERE media_type = 'movie'
+                      AND requested_by_chat_id = ?
+                      AND tmdb_id = ?
+                    ORDER BY CASE WHEN notified_available_at IS NULL THEN 0 ELSE 1 END, id
+                    LIMIT 1
+                    """,
+                    (requested_by_chat_id, tmdb_id),
+                ).fetchone()
+                if existing is not None:
+                    request_id = int(existing[0])
+                    connection.execute(
+                        """
+                        UPDATE media_requests
+                        SET title = COALESCE(?, title),
+                            year = COALESCE(?, year),
+                            requested_by_user_id = COALESCE(?, requested_by_user_id),
+                            requested_by_username = COALESCE(?, requested_by_username),
+                            radarr_movie_id = COALESCE(?, radarr_movie_id),
+                            imdb_id = COALESCE(?, imdb_id),
+                            status = CASE WHEN ? THEN 'requested' ELSE status END,
+                            notified_available_at = CASE
+                                WHEN ? THEN NULL ELSE notified_available_at
+                            END,
+                            updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            title,
+                            year,
+                            requested_by_user_id,
+                            requested_by_username,
+                            radarr_movie_id,
+                            imdb_id,
+                            reactivate_notified,
+                            reactivate_notified,
+                            now,
+                            request_id,
+                        ),
+                    )
+                    return request_id
+
             cursor = connection.execute(
                 """
                 INSERT INTO media_requests (
@@ -294,6 +388,39 @@ class RequestStore:
                 (sonarr_series_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def claim_notification(self, request_id: int) -> bool:
+        now_value = datetime.now(timezone.utc)
+        now = now_value.isoformat()
+        stale_before = (
+            now_value - timedelta(seconds=NOTIFICATION_CLAIM_TIMEOUT_SECONDS)
+        ).isoformat()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE media_requests
+                SET status = 'notifying', updated_at = ?
+                WHERE id = ?
+                  AND notified_available_at IS NULL
+                  AND (status != 'notifying' OR updated_at <= ?)
+                """,
+                (now, request_id, stale_before),
+            )
+            return cursor.rowcount == 1
+
+    def release_notification_claim(self, request_id: int) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE media_requests
+                SET status = 'requested', updated_at = ?
+                WHERE id = ?
+                  AND notified_available_at IS NULL
+                  AND status = 'notifying'
+                """,
+                (now, request_id),
+            )
 
     def mark_notified(self, request_id: int) -> None:
         now = datetime.now(timezone.utc).isoformat()
@@ -682,7 +809,7 @@ class MediaRequestService:
         skipped: list[dict[str, Any]] = []
         for row in rows:
             request_id = _positive_int_or_none(row.get("id"))
-            chat_id = _positive_int_or_none(row.get("requested_by_chat_id"))
+            chat_id = _telegram_chat_id_or_none(row.get("requested_by_chat_id"))
             if request_id is None or chat_id is None:
                 skipped.append({"id": request_id, "reason": "missing request or chat ID"})
                 continue
@@ -690,7 +817,17 @@ class MediaRequestService:
             year = _positive_int_or_none(movie.get("year")) or _positive_int_or_none(row.get("year"))
             title_with_year = f"{title} ({year})" if year else title
             message = f"✅ {title_with_year} is now available on Plex."
-            if not self.telegram_sender(chat_id, message):
+            if not self.request_store.claim_notification(request_id):
+                skipped.append({"id": request_id, "reason": "notification already claimed"})
+                continue
+            try:
+                sent = self.telegram_sender(chat_id, message)
+            except Exception:
+                self.request_store.release_notification_claim(request_id)
+                skipped.append({"id": request_id, "reason": "Telegram send failed"})
+                continue
+            if not sent:
+                self.request_store.release_notification_claim(request_id)
                 skipped.append({"id": request_id, "reason": "Telegram send failed"})
                 continue
             self.request_store.mark_notified(request_id)
@@ -735,7 +872,7 @@ class MediaRequestService:
         skipped: list[dict[str, Any]] = []
         for row in rows:
             request_id = _positive_int_or_none(row.get("id"))
-            chat_id = _positive_int_or_none(row.get("requested_by_chat_id"))
+            chat_id = _telegram_chat_id_or_none(row.get("requested_by_chat_id"))
             seasons = _decode_season_numbers(row.get("season_numbers"))
             if request_id is None or chat_id is None:
                 skipped.append({"id": request_id, "reason": "missing request or chat ID"})
@@ -759,7 +896,17 @@ class MediaRequestService:
             year = _positive_int_or_none(series.get("year")) or _positive_int_or_none(row.get("year"))
             title_with_year = f"{title} ({year})" if year else title
             message = f"✅ {title_with_year} {_format_season_list(seasons)} is now available on Plex."
-            if not self.telegram_sender(chat_id, message):
+            if not self.request_store.claim_notification(request_id):
+                skipped.append({"id": request_id, "reason": "notification already claimed"})
+                continue
+            try:
+                sent = self.telegram_sender(chat_id, message)
+            except Exception:
+                self.request_store.release_notification_claim(request_id)
+                skipped.append({"id": request_id, "reason": "Telegram send failed"})
+                continue
+            if not sent:
+                self.request_store.release_notification_claim(request_id)
                 skipped.append({"id": request_id, "reason": "Telegram send failed"})
                 continue
             self.request_store.mark_notified(request_id)
@@ -818,12 +965,13 @@ class MediaRequestService:
                 title=_clean_text(title) or _clean_text(movie.get("title")),
                 year=_positive_int_or_none(movie.get("year")),
                 requested_by_user_id=_positive_int_or_none(requested_by_user_id),
-                requested_by_chat_id=_positive_int_or_none(requested_by_chat_id),
+                requested_by_chat_id=_telegram_chat_id_or_none(requested_by_chat_id),
                 requested_by_username=_optional_text(requested_by_username),
                 radarr_movie_id=_positive_int_or_none(movie.get("id")),
                 tmdb_id=tmdb_id,
                 imdb_id=_clean_text(movie.get("imdbId")),
                 status="requested",
+                reactivate_notified=not _movie_has_file(movie),
             )
         except Exception as exc:
             result["requestRecord"] = {"recorded": False, "error": str(exc)}
@@ -850,7 +998,7 @@ class MediaRequestService:
                 title=_clean_text(title) or _clean_text(series.get("title")),
                 year=_positive_int_or_none(series.get("year")),
                 requested_by_user_id=_positive_int_or_none(requested_by_user_id),
-                requested_by_chat_id=_positive_int_or_none(requested_by_chat_id),
+                requested_by_chat_id=_telegram_chat_id_or_none(requested_by_chat_id),
                 requested_by_username=_optional_text(requested_by_username),
                 sonarr_series_id=_positive_int_or_none(series.get("id")),
                 tmdb_id=_positive_int_or_none(series.get("tmdbId")),
@@ -2231,6 +2379,14 @@ def _positive_int_or_none(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, int) and value > 0:
+        return value
+    return None
+
+
+def _telegram_chat_id_or_none(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value != 0:
         return value
     return None
 

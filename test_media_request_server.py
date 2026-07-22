@@ -8,11 +8,26 @@ import sys
 import tempfile
 import types
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from unittest.mock import patch
 from typing import Any
 
 import media_request_server as server
 import radarr_webhook_bridge as webhook_bridge
+
+SYNTHETIC_TELEGRAM_ID_1 = 900000001
+SYNTHETIC_TELEGRAM_ID_2 = 900000002
+SYNTHETIC_TELEGRAM_ID_3 = 900000003
+SYNTHETIC_TELEGRAM_ID_4 = 900000004
+SYNTHETIC_TELEGRAM_ID_5 = 900000005
+SYNTHETIC_REQUESTER_1 = "synthetic-requester-1"
+SYNTHETIC_REQUESTER_2 = "synthetic-requester-2"
+SYNTHETIC_REQUESTER_3 = "synthetic-requester-3"
+SYNTHETIC_REQUESTER_4 = "synthetic-requester-4"
+SYNTHETIC_TIMESTAMP_1 = "2026-01-01T00:01:00+00:00"
+SYNTHETIC_TIMESTAMP_2 = "2026-01-01T00:02:00+00:00"
+SYNTHETIC_TIMESTAMP_3 = "2026-01-01T00:03:00+00:00"
 
 
 class FakeResponse:
@@ -281,7 +296,7 @@ class SearchMediaTests(unittest.TestCase):
         service = server.MediaRequestService(config(), session=session)
 
         result = service.search_media(
-            "my brilliant friend", media_type="series", season=1
+            'my brilliant SYNTHETIC_REQUESTER_4', media_type="series", season=1
         )
 
         item = result["items"][0]
@@ -337,7 +352,7 @@ class SearchMediaTests(unittest.TestCase):
         service = server.MediaRequestService(config(), session=session)
 
         result = service.search_media(
-            "my brilliant friend", media_type="series", season=4
+            'my brilliant SYNTHETIC_REQUESTER_4', media_type="series", season=4
         )
 
         item = result["items"][0]
@@ -604,7 +619,7 @@ class RequestStatusTests(unittest.TestCase):
                         "title": "Past Movie",
                         "monitored": True,
                         "hasFile": False,
-                        "physicalRelease": "2000-01-01T00:00:00Z",
+                        "physicalRelease": SYNTHETIC_TIMESTAMP_1,
                     }
                 ],
                 [],
@@ -714,14 +729,14 @@ class RequestStatusTests(unittest.TestCase):
                         "title": "Dune",
                         "monitored": True,
                         "hasFile": False,
-                        "physicalRelease": "2000-01-01T00:00:00Z",
+                        "physicalRelease": SYNTHETIC_TIMESTAMP_1,
                     },
                     {
                         "id": 43,
                         "title": "Alien",
                         "monitored": True,
                         "hasFile": False,
-                        "physicalRelease": "2000-01-01T00:00:00Z",
+                        "physicalRelease": SYNTHETIC_TIMESTAMP_1,
                     },
                 ],
                 [],
@@ -1624,9 +1639,9 @@ class RequestStoreTests(unittest.TestCase):
 
             result = service.request_movie(
                 348,
-                requested_by_user_id=100000001,
-                requested_by_chat_id=100000001,
-                requested_by_username="example-requester",
+                requested_by_user_id=SYNTHETIC_TELEGRAM_ID_1,
+                requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_1,
+                requested_by_username=SYNTHETIC_REQUESTER_3,
             )
 
             self.assertEqual(result["status"], "added")
@@ -1647,15 +1662,212 @@ class RequestStoreTests(unittest.TestCase):
                     "movie",
                     "Alien",
                     1979,
-                    100000001,
-                    100000001,
-                    "example-requester",
+                    SYNTHETIC_TELEGRAM_ID_1,
+                    SYNTHETIC_TELEGRAM_ID_1,
+                    SYNTHETIC_REQUESTER_3,
                     44,
                     348,
                     "tt0078748",
                     None,
                     None,
                 ),
+            )
+
+    def test_add_request_reuses_same_chat_movie_record(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = server.RequestStore(os.path.join(directory, "requests.sqlite3"))
+
+            first_id = store.add_request(
+                media_type="movie",
+                title="The Wizard of the Kremlin",
+                year=2026,
+                requested_by_user_id=SYNTHETIC_TELEGRAM_ID_4,
+                requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_4,
+                requested_by_username=SYNTHETIC_REQUESTER_2,
+                radarr_movie_id=854,
+                tmdb_id=1291659,
+            )
+            repeated_id = store.add_request(
+                media_type="movie",
+                title="The Wizard of the Kremlin",
+                year=2026,
+                requested_by_user_id=SYNTHETIC_TELEGRAM_ID_4,
+                requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_4,
+                requested_by_username=SYNTHETIC_REQUESTER_2,
+                radarr_movie_id=854,
+                tmdb_id=1291659,
+            )
+
+            other_chat_id = store.add_request(
+                media_type="movie",
+                title="The Wizard of the Kremlin",
+                year=2026,
+                requested_by_user_id=SYNTHETIC_TELEGRAM_ID_3,
+                requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_3,
+                requested_by_username=SYNTHETIC_REQUESTER_1,
+                radarr_movie_id=854,
+                tmdb_id=1291659,
+            )
+
+            self.assertEqual(repeated_id, first_id)
+            self.assertNotEqual(other_chat_id, first_id)
+            with sqlite3.connect(store.db_path) as connection:
+                rows = connection.execute(
+                    """
+                    SELECT id, requested_by_chat_id, tmdb_id
+                    FROM media_requests
+                    ORDER BY id
+                    """
+                ).fetchall()
+            self.assertEqual(
+                rows,
+                [
+                    (first_id, SYNTHETIC_TELEGRAM_ID_4, 1291659),
+                    (other_chat_id, SYNTHETIC_TELEGRAM_ID_3, 1291659),
+                ],
+            )
+
+    def test_request_movie_deduplicates_and_notifies_negative_group_chat(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = server.RequestStore(os.path.join(directory, "requests.sqlite3"))
+            missing_movie = {
+                "id": 854,
+                "tmdbId": 1291659,
+                "title": "The Wizard of the Kremlin",
+                "year": 2026,
+                "hasFile": False,
+            }
+            service = server.MediaRequestService(
+                config(),
+                session=FakeSession([[missing_movie], [missing_movie]]),
+                request_store=store,
+            )
+            group_chat_id = -SYNTHETIC_TELEGRAM_ID_5
+
+            first = service.request_movie(
+                1291659,
+                requested_by_user_id=SYNTHETIC_TELEGRAM_ID_4,
+                requested_by_chat_id=group_chat_id,
+                requested_by_username=SYNTHETIC_REQUESTER_2,
+            )
+            repeated = service.request_movie(
+                1291659,
+                requested_by_user_id=SYNTHETIC_TELEGRAM_ID_4,
+                requested_by_chat_id=group_chat_id,
+                requested_by_username=SYNTHETIC_REQUESTER_2,
+            )
+
+            self.assertEqual(first["requestRecord"]["id"], repeated["requestRecord"]["id"])
+            with sqlite3.connect(store.db_path) as connection:
+                rows = connection.execute(
+                    "SELECT requested_by_chat_id FROM media_requests"
+                ).fetchall()
+            self.assertEqual(rows, [(group_chat_id,)])
+
+            sent: list[tuple[int, str]] = []
+            service.session = FakeSession(
+                [{**missing_movie, "hasFile": True}]
+            )
+            service.telegram_sender = (
+                lambda chat_id, text: sent.append((chat_id, text)) is None
+            )
+            result = service.notify_movie_available(854)
+
+            self.assertEqual(result["notified"], 1)
+            self.assertEqual(sent[0][0], group_chat_id)
+
+    def test_request_movie_reactivates_notified_row_when_file_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = server.RequestStore(os.path.join(directory, "requests.sqlite3"))
+            request_id = store.add_request(
+                media_type="movie",
+                title="Alien",
+                year=1979,
+                requested_by_user_id=SYNTHETIC_TELEGRAM_ID_3,
+                requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_3,
+                requested_by_username=SYNTHETIC_REQUESTER_1,
+                radarr_movie_id=44,
+                tmdb_id=348,
+            )
+            store.mark_notified(request_id)
+            missing_movie = {
+                "id": 44,
+                "tmdbId": 348,
+                "title": "Alien",
+                "year": 1979,
+                "hasFile": False,
+            }
+            service = server.MediaRequestService(
+                config(),
+                session=FakeSession([[missing_movie]]),
+                request_store=store,
+            )
+
+            result = service.request_movie(
+                348,
+                requested_by_user_id=SYNTHETIC_TELEGRAM_ID_3,
+                requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_3,
+                requested_by_username=SYNTHETIC_REQUESTER_1,
+            )
+
+            self.assertEqual(result["requestRecord"]["id"], request_id)
+            with sqlite3.connect(store.db_path) as connection:
+                row = connection.execute(
+                    "SELECT status, notified_available_at FROM media_requests WHERE id = ?",
+                    (request_id,),
+                ).fetchone()
+            self.assertEqual(row, ("requested", None))
+
+    def test_initialize_removes_pending_movie_duplicates_before_unique_index(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = os.path.join(directory, "requests.sqlite3")
+            store = server.RequestStore(db_path)
+            with store._connect() as connection:
+                connection.execute(
+                    "DROP INDEX uq_media_requests_movie_chat_pending"
+                )
+                for created_at, radarr_movie_id in (
+                    (SYNTHETIC_TIMESTAMP_2, 111),
+                    (SYNTHETIC_TIMESTAMP_3, 854),
+                ):
+                    connection.execute(
+                        """
+                        INSERT INTO media_requests (
+                            media_type, title, requested_by_chat_id, tmdb_id,
+                            radarr_movie_id, status, created_at, updated_at
+                        ) VALUES ('movie', 'The Wizard of the Kremlin', ?, ?, ?,
+                                  'requested', ?, ?)
+                        """,
+                        (
+                            SYNTHETIC_TELEGRAM_ID_4,
+                            1291659,
+                            radarr_movie_id,
+                            created_at,
+                            created_at,
+                        ),
+                    )
+
+            server.RequestStore(db_path)
+
+            with sqlite3.connect(db_path) as connection:
+                rows = connection.execute(
+                    """
+                    SELECT id, radarr_movie_id FROM media_requests
+                    WHERE requested_by_chat_id = ? AND tmdb_id = ?
+                    ORDER BY id
+                    """,
+                    (SYNTHETIC_TELEGRAM_ID_4, 1291659),
+                ).fetchall()
+                indexes = connection.execute(
+                    "PRAGMA index_list('media_requests')"
+                ).fetchall()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0][1], 854)
+            self.assertTrue(
+                any(
+                    row[1] == "uq_media_requests_movie_chat_pending" and row[2] == 1
+                    for row in indexes
+                )
             )
 
     def test_request_series_records_sqlite_row_with_seasons(self) -> None:
@@ -1700,9 +1912,9 @@ class RequestStoreTests(unittest.TestCase):
             result = service.request_series(
                 82066,
                 seasons=[1, 2],
-                requested_by_user_id=100000002,
-                requested_by_chat_id=100000002,
-                requested_by_username="friend",
+                requested_by_user_id=SYNTHETIC_TELEGRAM_ID_2,
+                requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_2,
+                requested_by_username=SYNTHETIC_REQUESTER_4,
             )
 
             self.assertEqual(result["status"], "added")
@@ -1723,9 +1935,9 @@ class RequestStoreTests(unittest.TestCase):
                     "series",
                     "Fringe",
                     2008,
-                    100000002,
-                    100000002,
-                    "friend",
+                    SYNTHETIC_TELEGRAM_ID_2,
+                    SYNTHETIC_TELEGRAM_ID_2,
+                    SYNTHETIC_REQUESTER_4,
                     77,
                     1705,
                     82066,
@@ -1765,9 +1977,9 @@ class RequestStoreTests(unittest.TestCase):
                 media_type="movie",
                 title="Alien",
                 year=1979,
-                requested_by_user_id=100000001,
-                requested_by_chat_id=100000001,
-                requested_by_username="example-requester",
+                requested_by_user_id=SYNTHETIC_TELEGRAM_ID_1,
+                requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_1,
+                requested_by_username=SYNTHETIC_REQUESTER_3,
                 radarr_movie_id=44,
                 tmdb_id=348,
                 imdb_id="tt0078748",
@@ -1786,7 +1998,7 @@ class RequestStoreTests(unittest.TestCase):
 
             self.assertEqual(result["notified"], 1)
             self.assertEqual(result["notifications"][0]["id"], request_id)
-            self.assertEqual(sent, [(100000001, "✅ Alien (1979) is now available on Plex.")])
+            self.assertEqual(sent, [(SYNTHETIC_TELEGRAM_ID_1, "✅ Alien (1979) is now available on Plex.")])
             with sqlite3.connect(store.db_path) as connection:
                 row = connection.execute(
                     "SELECT status, notified_available_at FROM media_requests WHERE id = ?",
@@ -1799,6 +2011,52 @@ class RequestStoreTests(unittest.TestCase):
             self.assertEqual(result["checked"], 0)
             self.assertEqual(result["notified"], 0)
 
+    def test_notify_movie_available_claims_row_before_concurrent_send(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = server.RequestStore(os.path.join(directory, "requests.sqlite3"))
+            store.add_request(
+                media_type="movie",
+                title="Alien",
+                year=1979,
+                requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_3,
+                radarr_movie_id=44,
+                tmdb_id=348,
+            )
+            first_send_started = Event()
+            release_first_send = Event()
+            sent: list[tuple[int, str]] = []
+
+            def send(chat_id: int, text: str) -> bool:
+                is_first = not first_send_started.is_set()
+                sent.append((chat_id, text))
+                if is_first:
+                    first_send_started.set()
+                    self.assertTrue(release_first_send.wait(timeout=2))
+                return True
+
+            service = server.MediaRequestService(
+                config(), request_store=store, telegram_sender=send
+            )
+            service._get_radarr = lambda path: {
+                "id": 44,
+                "title": "Alien",
+                "year": 1979,
+                "hasFile": True,
+            }
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                first = pool.submit(service.notify_movie_available, 44)
+                self.assertTrue(first_send_started.wait(timeout=2))
+                second = pool.submit(service.notify_movie_available, 44)
+                second_result = second.result(timeout=2)
+                release_first_send.set()
+                first_result = first.result(timeout=2)
+
+            self.assertEqual(len(sent), 1)
+            self.assertEqual(
+                first_result["notified"] + second_result["notified"], 1
+            )
+
     def test_notify_available_requests_waits_until_movie_has_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = server.RequestStore(os.path.join(directory, "requests.sqlite3"))
@@ -1806,7 +2064,7 @@ class RequestStoreTests(unittest.TestCase):
                 media_type="movie",
                 title="Alien",
                 year=1979,
-                requested_by_chat_id=100000001,
+                requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_1,
                 radarr_movie_id=44,
                 tmdb_id=348,
             )
@@ -1838,7 +2096,7 @@ class RequestStoreTests(unittest.TestCase):
                 media_type="movie",
                 title="Alien",
                 year=1979,
-                requested_by_chat_id=100000001,
+                requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_1,
                 radarr_movie_id=44,
                 tmdb_id=348,
             )
@@ -1846,7 +2104,7 @@ class RequestStoreTests(unittest.TestCase):
                 media_type="movie",
                 title="Blade Runner",
                 year=1982,
-                requested_by_chat_id=100000002,
+                requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_2,
                 radarr_movie_id=55,
                 tmdb_id=78,
             )
@@ -1865,7 +2123,7 @@ class RequestStoreTests(unittest.TestCase):
             self.assertEqual(result["checked"], 1)
             self.assertEqual(result["notified"], 1)
             self.assertEqual(result["notifications"][0]["id"], alien_id)
-            self.assertEqual(sent, [(100000001, "✅ Alien (1979) is now available on Plex.")])
+            self.assertEqual(sent, [(SYNTHETIC_TELEGRAM_ID_1, "✅ Alien (1979) is now available on Plex.")])
             with sqlite3.connect(store.db_path) as connection:
                 rows = connection.execute(
                     "SELECT title, notified_available_at FROM media_requests ORDER BY id"
@@ -1881,7 +2139,7 @@ class RequestStoreTests(unittest.TestCase):
                 media_type="series",
                 title="Fringe",
                 year=2008,
-                requested_by_chat_id=100000001,
+                requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_1,
                 sonarr_series_id=77,
                 tvdb_id=82066,
                 season_numbers=[1],
@@ -1911,7 +2169,7 @@ class RequestStoreTests(unittest.TestCase):
             self.assertEqual(result["checked"], 1)
             self.assertEqual(result["notified"], 1)
             self.assertEqual(result["notifications"][0]["id"], request_id)
-            self.assertEqual(sent, [(100000001, "✅ Fringe (2008) season 1 is now available on Plex.")])
+            self.assertEqual(sent, [(SYNTHETIC_TELEGRAM_ID_1, "✅ Fringe (2008) season 1 is now available on Plex.")])
             with sqlite3.connect(store.db_path) as connection:
                 row = connection.execute(
                     "SELECT status, notified_available_at FROM media_requests WHERE id = ?",
@@ -1927,7 +2185,7 @@ class RequestStoreTests(unittest.TestCase):
                 media_type="series",
                 title="Fringe",
                 year=2008,
-                requested_by_chat_id=100000001,
+                requested_by_chat_id=SYNTHETIC_TELEGRAM_ID_1,
                 sonarr_series_id=77,
                 tvdb_id=82066,
                 season_numbers=[1],

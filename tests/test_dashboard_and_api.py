@@ -436,6 +436,23 @@ def test_plex_webhook_requires_capability_and_deduplicates(config: Config) -> No
         assert second.json() == {"accepted": False}
 
 
+def test_plex_webhook_accepts_existing_capability_path(config: Config) -> None:
+    app = create_app(config)
+    payload = {
+        "event": "library.new",
+        "Metadata": {
+            "type": "movie",
+            "ratingKey": "43",
+            "title": "Another Movie",
+            "Guid": [{"id": "tmdb://124"}],
+        },
+    }
+    token = "plex-hook-secret-with-at-least-32-bytes"
+    with TestClient(app) as client:
+        response = client.post(f"/private/plex/{token}", json=payload)
+        assert response.json() == {"accepted": True}
+
+
 def test_rejects_oversized_request_before_parsing(config: Config) -> None:
     app = create_app(config)
     with TestClient(app) as client:

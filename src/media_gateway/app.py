@@ -251,7 +251,11 @@ async def call_tool(request: Request) -> Response:
 
 
 async def plex_webhook(request: Request) -> Response:
-    supplied = request.query_params.get("token", "")
+    query_token = request.query_params.get("token", "")
+    path_token = request.path_params.get("token", "")
+    if query_token and path_token and not hmac.compare_digest(query_token, path_token):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    supplied = path_token or query_token
     if not hmac.compare_digest(supplied, _runtime(request).plex_token):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
@@ -375,6 +379,9 @@ def create_app(config: Config | None = None) -> Starlette:
             Route("/api/tools", list_tools, methods=["POST"]),
             Route("/api/tools/call", call_tool, methods=["POST"]),
             Route("/plex", plex_webhook, methods=["POST"]),
+            # Preserve the already-configured Plex webhook URL during the
+            # cutover from the discarded companion implementation.
+            Route("/private/plex/{token:path}", plex_webhook, methods=["POST"]),
         ],
         lifespan=lifespan,
     )
@@ -386,9 +393,8 @@ def create_app(config: Config | None = None) -> Starlette:
 def main() -> None:
     load_config_file()
     config = Config.from_env()
-    # The Plex webhook uses a query credential because Plex cannot attach a
-    # custom Authorization header. Disable access logs so that credential is
-    # never copied into container logs.
+    # Plex cannot attach a custom Authorization header, so the webhook uses a
+    # URL credential. Disable access logs so it is never copied into logs.
     uvicorn.run(
         create_app(config),
         host=config.host,

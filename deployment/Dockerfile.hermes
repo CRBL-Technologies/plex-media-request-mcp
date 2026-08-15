@@ -21,12 +21,19 @@ RUN /opt/hermes/.venv/bin/python -c 'import re,sys; sys.exit(0 if re.fullmatch(r
 # module is copied into a separate import root so the extension can consume
 # the canonical ``media_companion.tool_policy`` package without mounting the
 # companion image or its data directory.
-ENV PYTHONPATH=/app/src:/opt/hermes
+# s6-overlay 3.2.3.0 (the pinned base) otherwise logs a stage-2 cont-init
+# failure and continues starting nonessential services.  Value 2 makes the
+# stage-2 failure fatal, so the startup contract can never be advisory.
+ENV S6_BEHAVIOUR_IF_STAGE2_FAILS=2 \
+    PYTHONPATH=/app/src:/opt/hermes
 WORKDIR /opt/hermes
 
 COPY hermes_media_extension /opt/hermes/hermes_media_extension
 COPY src/media_companion /app/src/media_companion
-COPY deployment/hermes/plugins/platforms/media-policy /opt/hermes/plugins/platforms/media-policy
+# The native image already contains ``platforms/telegram``.  Hermes scans
+# platform plugin directories lexically and deferred registration is
+# last-writer-wins, so the CRBL shim must be installed after that directory.
+COPY deployment/hermes/plugins/platforms/media-policy /opt/hermes/plugins/platforms/zzzz-media-policy
 
 # cont-init.d runs before the native gateway and fails closed if deferred
 # plugin discovery, source identity, ownership, callback bindings, config,
@@ -44,8 +51,8 @@ COPY --chmod=0755 deployment/hermes/policy-helper-healthcheck.sh \
 
 RUN /opt/hermes/.venv/bin/python -m py_compile \
         /opt/hermes/hermes_media_extension/*.py \
-        /opt/hermes/plugins/platforms/media-policy/__init__.py \
-    && test -f /opt/hermes/plugins/platforms/media-policy/plugin.yaml \
+        /opt/hermes/plugins/platforms/zzzz-media-policy/__init__.py \
+    && test -f /opt/hermes/plugins/platforms/zzzz-media-policy/plugin.yaml \
     && test -f /etc/s6-overlay/s6-rc.d/policy-helper/run \
     && test -f /etc/s6-overlay/s6-rc.d/policy-helper/finish \
     && test -f /etc/s6-overlay/s6-rc.d/user/contents.d/policy-helper

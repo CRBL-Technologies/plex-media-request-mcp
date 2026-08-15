@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -466,7 +467,7 @@ assert assembled(admin_tools) == set(SHARED_TOOLS + ADMIN_TOOLS)
     reason="pinned Hermes source is supplied by the deployment integration job",
 )
 def test_pinned_extracted_hermes_loads_media_policy_on_telegram_lookup() -> None:
-    """The real deferred loader must key this shim as ``telegram``."""
+    """The CRBL loader must win the real Hermes deferred Telegram collision."""
 
     assert EXTRACTED_HERMES_SOURCE is not None
     repository = str(Path(__file__).resolve().parents[1])
@@ -474,14 +475,35 @@ def test_pinned_extracted_hermes_loads_media_policy_on_telegram_lookup() -> None
     environment["PYTHONPATH"] = os.pathsep.join(
         (str(EXTRACTED_HERMES_SOURCE), str(Path(repository) / "src"), repository)
     )
-    environment["HERMES_BUNDLED_PLUGINS"] = str(
-        Path(repository) / "deployment" / "hermes" / "plugins"
-    )
     with tempfile.TemporaryDirectory() as hermes_home:
         environment["HERMES_HOME"] = hermes_home
+        # Recreate the relevant part of the pinned image's plugin tree.  The
+        # native ``telegram`` directory is intentionally present so this test
+        # catches the deferred-loader ordering bug instead of testing the CRBL
+        # shim in isolation.  The image installs the CRBL directory with a
+        # lexically-last basename while keeping its manifest name
+        # ``telegram-platform``.
+        bundled_plugins = Path(hermes_home) / "bundled-plugins"
+        (bundled_plugins / "platforms").mkdir(parents=True)
+        shutil.copytree(
+            Path(EXTRACTED_HERMES_SOURCE) / "plugins" / "platforms" / "telegram",
+            bundled_plugins / "platforms" / "telegram",
+        )
+        shutil.copytree(
+            Path(repository)
+            / "deployment"
+            / "hermes"
+            / "plugins"
+            / "platforms"
+            / "media-policy",
+            bundled_plugins / "platforms" / "zzzz-media-policy",
+        )
+        environment["HERMES_BUNDLED_PLUGINS"] = str(bundled_plugins)
         script = """
 from gateway.platform_registry import platform_registry
+from hermes_cli import tools_config
 from hermes_cli.plugins import PluginManager
+from tools.registry import registry
 
 manager = PluginManager()
 manager.discover_and_load()
@@ -491,6 +513,12 @@ assert entry is not None
 assert entry.plugin_name == "media-policy"
 assert entry.source == "plugin"
 assert entry.adapter_factory.__module__ == "hermes_media_extension.plugin"
+assert getattr(tools_config._get_platform_tools, "__media_policy_visibility__", False)
+assert set(registry.get_tool_names_for_toolset("media-policy-shared")) == {
+    "search_media", "request_movie", "request_series", "request_status",
+    "download_status", "browse_library", "media_status",
+}
+assert len(registry.get_tool_names_for_toolset("media-policy-admin")) == 103
 """
         completed = subprocess.run(
             [sys.executable, "-c", script],

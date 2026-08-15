@@ -75,9 +75,12 @@ MAX_CREDENTIAL_BYTES: Final[int] = 16 * 1024
 MAX_CONTRACT_TOOLS: Final[int] = 102
 MAX_CONTRACT_PAGES: Final[int] = 8
 _JSONRPC_VERSION: Final[str] = "2.0"
-# v2.3.0 uses the stateless Streamable HTTP transport from MCP SDK 2.x.  The
-# mirrored headers and request metadata are part of that pinned HTTP contract.
-MCP_PROTOCOL_VERSION: Final[str] = "2026-07-28"
+# v2.3.0 exposes the SDK's 2025-era stateless compatibility path.  The newer
+# 2026-07-28 envelope is a different handshake (``server/discover``) and is
+# rejected when this client uses the legacy ``initialize`` exchange.  Keep the
+# latest negotiated legacy revision explicit so the frozen tool contract is
+# checked against the exact transport supported by the pinned image.
+MCP_PROTOCOL_VERSION: Final[str] = "2025-11-25"
 UPSTREAM_MCP_PROTOCOL_VERSION: Final[str] = MCP_PROTOCOL_VERSION
 
 
@@ -1250,13 +1253,6 @@ class UpstreamMCPClient:
         params: JsonObject = {
             "name": name,
             "arguments": safe_arguments,
-            "_meta": {
-                "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
-                "io.modelcontextprotocol/clientInfo": {
-                    "name": "crbl-media-companion",
-                    "version": UPSTREAM_VERSION,
-                },
-            },
         }
         payload: JsonObject = {
             "jsonrpc": _JSONRPC_VERSION,

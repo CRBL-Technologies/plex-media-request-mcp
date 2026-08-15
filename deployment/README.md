@@ -51,23 +51,34 @@ The expected host-side files are:
 | --- | --- | --- |
 | `/volume2/docker/hermes-media/data/.env` | Hermes | Native Telegram token/allowlist/admin policy |
 | `/volume2/docker/hermes-media/secrets/upstream.env` | Upstream and companion | Configured provider origins and MCP bearer |
-| `/volume2/docker/hermes-media/secrets/companion.env` | Companion | Companion settings and loopback webhook capability |
+| `/volume2/docker/hermes-media/secrets/companion.env` | Companion | Loopback webhook capability only, mode 0600 |
 | `/volume2/docker/hermes-media/secrets/actor-signing.key` | Hermes and companion | Actor assertion key, mode 0600 |
-| `/volume2/docker/hermes-media/secrets/dashboard-auth.env` | Dashboard | Password hash/session/origin settings |
+| `/volume2/docker/hermes-media/secrets/dashboard-auth.env` | Dashboard | Raw password hash only, mode 0600 |
 | `/volume2/docker/hermes-media/secrets/dashboard-api.key` | Dashboard and companion | Separate dashboard API key, mode 0600 |
 
-The companion's credential mounts (`upstream.env`, `companion.env`, and keys) are read-only
-and it reads only bounded values from them at typed adapter boundaries.
-`MEDIA_COMPANION_PROVIDER_ENV_FILE` points at the one mounted `upstream.env`
-so the companion can select only approved provider URLs; that file is never a
-Compose `env_file`, and keyed credentials continue to use the corresponding
-`*_FILE` references. The
+Portainer must not parse host-side Compose `env_file` paths. The upstream service
+therefore mounts `upstream.env` read-only and uses Deno 2.6's
+`--env-file=/run/media-secrets/upstream.env` with the pinned image's original
+`deno run ... packages/media-server-mcp/src/index.ts` entrypoint and
+`--http --host 0.0.0.0 --port 3000` command. The companion mounts the same
+`upstream.env` and selects only approved provider URLs through
+`MEDIA_COMPANION_PROVIDER_ENV_FILE`; credentials continue to use the
+corresponding `*_FILE` references. The companion's non-secret database,
+library, quality-profile, root-folder, and tag selectors are explicit Compose
+environment values. `companion.env` is mounted read-only only so the companion
+can read the loopback webhook capability; it is not a Compose `env_file`.
+The dashboard similarly receives its non-secret allowed origins in Compose
+environment and reads the raw hash from the mounted `dashboard-auth.env`.
+The
 pinned Hermes image retains its native s6 dispatcher as PID 1; Compose
 therefore does not add a `user` or `init` wrapper and supplies
 `HERMES_UID=1000` and `HERMES_GID=1000` for the image's own worker remap.
 Hermes receives its one scoped data-directory bind at `/opt/data` read-write because
 the native policy helper must atomically edit `TELEGRAM_ALLOWED_USERS` and
 retain its sessions/logs; the actor key remains a separate read-only mount.
+The Hermes service intentionally does not use a read-only root or drop all
+capabilities: its native s6 runtime requires those facilities. Its bounded
+`/run` tmpfs is explicitly executable for native s6 helper state.
 The dashboard never mounts Hermes files, SQLite, provider credentials, or the
 Docker socket. State is the only writable companion bind and must be owned by
 UID/GID 1000 with a 0700 directory and 0600 SQLite/WAL/SHM files. Secret
@@ -123,9 +134,13 @@ Build `hermes-media` from [`Dockerfile.hermes`](Dockerfile.hermes) with
 `repository@sha256:<digest>`. The Dockerfile validates that reference during
 the build, copies the extension and canonical `media_companion` policy package
 into `/opt/hermes` and `/app/src`, installs the plugin at
-`/opt/hermes/plugins/platforms/media-policy`, and adds the helper under
+`/opt/hermes/plugins/platforms/zzzz-media-policy`, and adds the helper under
 `/etc/s6-overlay/s6-rc.d/policy-helper` plus the fail-closed cont-init check.
 It deliberately leaves the base
 `/opt/hermes/docker/entrypoint-dispatch.sh` as `ENTRYPOINT` and supplies
 `gateway run` as the native CMD; Compose must not add `user`, `init`, or a
-replacement entrypoint. Publish that resulting digest as `HERMES_MEDIA_IMAGE`.
+replacement entrypoint. The image sets
+`S6_BEHAVIOUR_IF_STAGE2_FAILS=2`; with the pinned s6-overlay 3.2.3.0 base,
+that makes a non-zero legacy cont-init contract exit terminate stage 2 instead
+of allowing the gateway to start. Publish that resulting digest as
+`HERMES_MEDIA_IMAGE`.

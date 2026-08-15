@@ -81,7 +81,12 @@ def _tool_schema_paths() -> tuple[Path, ...]:
     """Return only the immutable image/check-out locations for the schema asset."""
 
     return (
-        Path("/opt/hermes/plugins/platforms/media-policy") / _TOOL_SCHEMA_ASSET,
+        # The image install directory is deliberately lexically after Hermes'
+        # bundled ``telegram`` platform directory.  Hermes v2026.8.3 defers
+        # platform imports and its deferred registry is last-writer-wins; the
+        # suffix keeps this override as the final Telegram loader without
+        # modifying the pinned Hermes installation.
+        Path("/opt/hermes/plugins/platforms/zzzz-media-policy") / _TOOL_SCHEMA_ASSET,
         Path(__file__).resolve().parents[1]
         / "deployment/hermes/plugins/platforms/media-policy"
         / _TOOL_SCHEMA_ASSET,

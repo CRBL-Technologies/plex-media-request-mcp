@@ -402,6 +402,16 @@ class CompanionConfig:
     actor_signing_key_file: SecretFileRef | None = None
     dashboard_api_key_file: SecretFileRef | None = None
     plex_webhook_capability_file: SecretFileRef | None = None
+    radarr_quality_profile_id: int | None = None
+    radarr_quality_profile_name: str | None = None
+    radarr_root_folder_path: str | None = None
+    radarr_tag_ids: tuple[int, ...] = ()
+    sonarr_normal_quality_profile_id: int | None = None
+    sonarr_normal_quality_profile_name: str | None = None
+    sonarr_anime_quality_profile_id: int | None = None
+    sonarr_anime_quality_profile_name: str | None = None
+    sonarr_root_folder_path: str | None = None
+    sonarr_tag_ids: tuple[int, ...] = ()
     timeouts: TimeoutConfig = field(default_factory=TimeoutConfig)
     plex_server_uuid: str | None = None
     plex_machine_identifier: str | None = None
@@ -587,6 +597,47 @@ def _optional_float(
         raise InvalidTimeoutConfigurationError(
             f"{field_name} must be a positive number"
         ) from exc
+
+
+def _optional_positive_int(
+    values: Mapping[str, str], field_name: str, *names: str
+) -> int | None:
+    value = _lookup(values, *names)
+    if value is None:
+        return None
+    if not value.isdigit() or int(value) <= 0:
+        raise ConfigurationError(f"{field_name} must be a positive integer")
+    return int(value)
+
+
+def _optional_text(
+    values: Mapping[str, str], field_name: str, *names: str
+) -> str | None:
+    value = _lookup(values, *names)
+    if value is None:
+        return None
+    if len(value.encode("utf-8")) > 1024 or any(
+        ord(character) < 0x20 for character in value
+    ):
+        raise ConfigurationError(f"{field_name} is invalid")
+    return value
+
+
+def _optional_positive_ints(
+    values: Mapping[str, str], field_name: str, *names: str
+) -> tuple[int, ...]:
+    value = _lookup(values, *names)
+    if value is None:
+        return ()
+    result: list[int] = []
+    for token in value.split(","):
+        normalized = token.strip()
+        if not normalized.isdigit() or int(normalized) <= 0:
+            raise ConfigurationError(f"{field_name} must contain positive integers")
+        parsed = int(normalized)
+        if parsed not in result:
+            result.append(parsed)
+    return tuple(result)
 
 
 def _optional_path(
@@ -846,6 +897,66 @@ def load_config(env: Mapping[str, str] | None = None) -> CompanionConfig:
             "MEDIA_COMPANION_PLEX_WEBHOOK_CAPABILITY_FILE",
             "COMPANION_PLEX_WEBHOOK_CAPABILITY_FILE",
             "PLEX_WEBHOOK_CAPABILITY_FILE",
+        ),
+        radarr_quality_profile_id=_optional_positive_int(
+            values,
+            "radarr_quality_profile_id",
+            "MEDIA_COMPANION_RADARR_QUALITY_PROFILE_ID",
+            "PLEX_MEDIA_REQUEST_RADARR_QUALITY_PROFILE_ID",
+        ),
+        radarr_quality_profile_name=_optional_text(
+            values,
+            "radarr_quality_profile_name",
+            "MEDIA_COMPANION_RADARR_QUALITY_PROFILE_NAME",
+            "PLEX_MEDIA_REQUEST_RADARR_QUALITY_PROFILE_NAME",
+        ),
+        radarr_root_folder_path=_optional_text(
+            values,
+            "radarr_root_folder_path",
+            "MEDIA_COMPANION_RADARR_ROOT_FOLDER_PATH",
+            "PLEX_MEDIA_REQUEST_RADARR_ROOT_FOLDER_PATH",
+        ),
+        radarr_tag_ids=_optional_positive_ints(
+            values,
+            "radarr_tag_ids",
+            "MEDIA_COMPANION_RADARR_TAG_IDS",
+            "PLEX_MEDIA_REQUEST_RADARR_TAG_IDS",
+        ),
+        sonarr_normal_quality_profile_id=_optional_positive_int(
+            values,
+            "sonarr_normal_quality_profile_id",
+            "MEDIA_COMPANION_SONARR_NORMAL_QUALITY_PROFILE_ID",
+            "PLEX_MEDIA_REQUEST_SONARR_NORMAL_QUALITY_PROFILE_ID",
+        ),
+        sonarr_normal_quality_profile_name=_optional_text(
+            values,
+            "sonarr_normal_quality_profile_name",
+            "MEDIA_COMPANION_SONARR_NORMAL_QUALITY_PROFILE_NAME",
+            "PLEX_MEDIA_REQUEST_SONARR_NORMAL_QUALITY_PROFILE_NAME",
+        ),
+        sonarr_anime_quality_profile_id=_optional_positive_int(
+            values,
+            "sonarr_anime_quality_profile_id",
+            "MEDIA_COMPANION_SONARR_ANIME_QUALITY_PROFILE_ID",
+            "PLEX_MEDIA_REQUEST_SONARR_ANIME_QUALITY_PROFILE_ID",
+        ),
+        sonarr_anime_quality_profile_name=_optional_text(
+            values,
+            "sonarr_anime_quality_profile_name",
+            "MEDIA_COMPANION_SONARR_ANIME_QUALITY_PROFILE_NAME",
+            "PLEX_MEDIA_REQUEST_SONARR_ANIME_QUALITY_PROFILE_NAME",
+        ),
+        sonarr_root_folder_path=_optional_text(
+            values,
+            "sonarr_root_folder_path",
+            "MEDIA_COMPANION_SONARR_ROOT_FOLDER_PATH",
+            "PLEX_MEDIA_REQUEST_SONARR_ROOT_FOLDER_PATH",
+        ),
+        sonarr_tag_ids=_optional_positive_ints(
+            values,
+            "sonarr_tag_ids",
+            "MEDIA_COMPANION_SONARR_TAG_IDS",
+            "PLEX_MEDIA_REQUEST_SONARR_TAG_IDS",
         ),
         timeouts=timeouts,
         plex_server_uuid=_lookup(

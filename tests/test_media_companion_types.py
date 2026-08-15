@@ -103,6 +103,31 @@ class ConfigValidationTests(unittest.TestCase):
                 }
             )
 
+    def test_arr_request_defaults_are_loaded_from_legacy_or_companion_names(
+        self,
+    ) -> None:
+        config = load_config(
+            {
+                "MEDIA_COMPANION_UPSTREAM_URL": "http://media-server-mcp:3000",
+                "MEDIA_COMPANION_UPSTREAM_TOKEN_FILE": "/run/secrets/upstream.env",
+                "PLEX_MEDIA_REQUEST_RADARR_QUALITY_PROFILE_ID": "7",
+                "PLEX_MEDIA_REQUEST_RADARR_ROOT_FOLDER_PATH": "/data/media/movies",
+                "PLEX_MEDIA_REQUEST_RADARR_TAG_IDS": "2,3,2",
+                "MEDIA_COMPANION_SONARR_NORMAL_QUALITY_PROFILE_ID": "8",
+                "PLEX_MEDIA_REQUEST_SONARR_ANIME_QUALITY_PROFILE_ID": "9",
+                "PLEX_MEDIA_REQUEST_SONARR_ROOT_FOLDER_PATH": "/data/media/tv",
+                "PLEX_MEDIA_REQUEST_SONARR_TAG_IDS": "4,5",
+            }
+        )
+
+        self.assertEqual(config.radarr_quality_profile_id, 7)
+        self.assertEqual(config.radarr_root_folder_path, "/data/media/movies")
+        self.assertEqual(config.radarr_tag_ids, (2, 3))
+        self.assertEqual(config.sonarr_normal_quality_profile_id, 8)
+        self.assertEqual(config.sonarr_anime_quality_profile_id, 9)
+        self.assertEqual(config.sonarr_root_folder_path, "/data/media/tv")
+        self.assertEqual(config.sonarr_tag_ids, (4, 5))
+
 
 class NormalizedModelTests(unittest.TestCase):
     def test_series_request_deduplicates_and_sorts_explicit_seasons(self) -> None:

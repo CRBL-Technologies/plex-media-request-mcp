@@ -11,6 +11,13 @@ on:
 permissions:
   contents: read
 
+env:
+  # The Hermes base is public and pinned by digest so pull requests can
+  # validate and build the derived image without relying on repository vars.
+  # This is the reviewed v2026.8.3 base; release may select the same digest
+  # explicitly through its immutable input.
+  HERMES_CI_BASE_IMAGE: nousresearch/hermes-agent@sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e
+
 jobs:
   test:
     name: Test
@@ -30,7 +37,7 @@ jobs:
         run: python -m pip install --require-hashes -r requirements-dev.txt
 
       - name: Run unit tests
-        run: python -W error::ResourceWarning -m unittest -q
+        run: python -W error::ResourceWarning -m pytest -q
 
       - name: Check repository hygiene
         run: python scripts/check_public_repo.py
@@ -41,16 +48,91 @@ jobs:
           ruff format --check .
 
       - name: Check types
-        run: mypy --check-untyped-defs media_request_server.py radarr_webhook_bridge.py scripts/check_public_repo.py
+        run: >-
+          mypy --check-untyped-defs
+          media_request_server.py
+          radarr_webhook_bridge.py
+          scripts/check_public_repo.py
+          src
+          hermes_media_extension
 
       - name: Validate OpenAPI document
         run: openapi-spec-validator docs/openapi.yaml
 
+      - name: Validate deployment assets and release contracts
+        run: |
+          python -m pytest -q tests/test_deployment_assets.py tests/test_release_contracts.py
+          python -m py_compile scripts/validate_deployment.py
+          python scripts/validate_deployment.py --help >/dev/null
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Check deployment Dockerfiles with Buildx
+        env:
+          PYTHON_BASE_IMAGE: python:3.12-slim-bookworm@sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3136726336b2a4c657aa30b
+        run: |
+          set -euo pipefail
+          docker buildx build --check --file deployment/Dockerfile.companion \
+            --build-arg PYTHON_BASE_IMAGE="$PYTHON_BASE_IMAGE" .
+          docker buildx build --check --file deployment/Dockerfile.dashboard \
+            --build-arg PYTHON_BASE_IMAGE="$PYTHON_BASE_IMAGE" .
+          docker buildx build --check --file deployment/Dockerfile.hermes \
+            --build-arg HERMES_BASE_IMAGE="$HERMES_CI_BASE_IMAGE" .
+
+      - name: Build legacy MCP image with Buildx
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile
+          pull: true
+          load: true
+          tags: plex-media-request-mcp:ci
+
+      - name: Build legacy webhook image with Buildx
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile.webhook
+          pull: true
+          load: true
+          tags: plex-media-request-webhook:ci
+
+      - name: Build companion image with Buildx
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ./deployment/Dockerfile.companion
+          pull: true
+          load: true
+          build-args: |
+            PYTHON_BASE_IMAGE=python:3.12-slim-bookworm@sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3136726336b2a4c657aa30b
+            SOURCE_COMMIT=${{ github.sha }}
+          tags: plex-media-request-companion:ci
+
+      - name: Build dashboard image with Buildx
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ./deployment/Dockerfile.dashboard
+          pull: true
+          load: true
+          build-args: |
+            PYTHON_BASE_IMAGE=python:3.12-slim-bookworm@sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3136726336b2a4c657aa30b
+            SOURCE_COMMIT=${{ github.sha }}
+          tags: plex-media-request-dashboard:ci
+
+      - name: Build Hermes derived image with Buildx
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ./deployment/Dockerfile.hermes
+          pull: true
+          load: true
+          build-args: |
+            HERMES_BASE_IMAGE=${{ env.HERMES_CI_BASE_IMAGE }}
+            SOURCE_COMMIT=${{ github.sha }}
+          tags: plex-media-request-hermes:ci
+
       - name: Audit production dependencies
         run: pip-audit -r requirements.txt
-
-      - name: Build MCP image
-        run: docker build --pull -t plex-media-request-mcp:ci -f Dockerfile .
-
-      - name: Build webhook image
-        run: docker build --pull -t plex-media-request-webhook:ci -f Dockerfile.webhook .

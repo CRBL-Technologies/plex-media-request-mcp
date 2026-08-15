@@ -3,5 +3,6 @@
 mypy
 openapi-spec-validator
 pip-audit
+pytest
 ruff
 types-requests

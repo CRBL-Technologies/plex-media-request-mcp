@@ -1,0 +1,3548 @@
+{
+  "companion_tools": [
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Search movies and series with factual availability.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "default": 5,
+            "maximum": 10,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "media_type": {
+            "default": "any",
+            "enum": [
+              "movie",
+              "series",
+              "any"
+            ],
+            "type": "string"
+          },
+          "query": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "season": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "search_media",
+      "title": "Search movies and series"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false
+      },
+      "description": "Request a movie from an actor/update-bound search candidate.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "candidate_handle": {
+            "maxLength": 128,
+            "minLength": 20,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 512,
+            "type": "string"
+          }
+        },
+        "required": [
+          "candidate_handle"
+        ],
+        "type": "object"
+      },
+      "name": "request_movie",
+      "title": "Request a movie"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false
+      },
+      "description": "Request explicit TV seasons from an actor/update-bound search candidate.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "anime": {
+            "default": false,
+            "type": "boolean"
+          },
+          "candidate_handle": {
+            "maxLength": 128,
+            "minLength": 20,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "seasons": {
+            "items": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "candidate_handle",
+          "seasons"
+        ],
+        "type": "object"
+      },
+      "name": "request_series",
+      "title": "Request a series"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Check active and waiting media requests.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "default": 250,
+            "maximum": 250,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "query": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "name": "request_status",
+      "title": "Request status"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Check active Radarr and Sonarr downloads.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "download_status",
+      "title": "Download status"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Browse available library items.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "genre": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "language": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "default": 10,
+            "maximum": 10,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "media_type": {
+            "default": "any",
+            "enum": [
+              "movie",
+              "series",
+              "any"
+            ],
+            "type": "string"
+          },
+          "query": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runtime_max": {
+            "description": "Movie runtime filter in minutes.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "year_max": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "year_min": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "name": "browse_library",
+      "title": "Browse library"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Check Radarr and Sonarr connectivity.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "media_status",
+      "title": "Media service status"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false
+      },
+      "description": "Repair completed queue items blocked from automatic import.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "media_type": {
+            "default": "any",
+            "enum": [
+              "movie",
+              "series",
+              "any"
+            ],
+            "type": "string"
+          },
+          "query": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "name": "repair_blocked_imports",
+      "title": "Repair blocked imports"
+    }
+  ],
+  "schema_version": 1,
+  "upstream_source_revision": "8b469d2b321b27dd1e4f5b89a7236b3ea43c3c72",
+  "upstream_tool_digest": "sha256:31451102af4d424ce516d5515db5839028f17e9363651e0d1a2d64518633f2b1",
+  "upstream_tools": [
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Search for movies in The Movie Database via Radarr",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "limit": {
+            "description": "Maximum number of results to return",
+            "type": "number"
+          },
+          "skip": {
+            "description": "Number of results to skip (for pagination)",
+            "type": "number"
+          },
+          "term": {
+            "description": "Movie title to search for",
+            "type": "string"
+          }
+        },
+        "required": [
+          "term"
+        ],
+        "type": "object"
+      },
+      "name": "radarr_search_movie",
+      "title": "Search for movies in The Movie Database via Radarr"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false
+      },
+      "description": "Add a movie to Radarr",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "minimumAvailability": {
+            "description": "Minimum availability for monitoring",
+            "enum": [
+              "tba",
+              "announced",
+              "inCinemas",
+              "released",
+              "preDB"
+            ],
+            "type": "string"
+          },
+          "monitored": {
+            "default": true,
+            "description": "Whether to monitor the movie",
+            "type": "boolean"
+          },
+          "qualityProfileId": {
+            "description": "Quality profile ID to use",
+            "type": "number"
+          },
+          "rootFolderPath": {
+            "description": "Root folder path where movie should be stored",
+            "type": "string"
+          },
+          "searchForMovie": {
+            "default": true,
+            "description": "Whether to search for the movie immediately after adding",
+            "type": "boolean"
+          },
+          "tags": {
+            "description": "Tag IDs to apply to the movie",
+            "items": {
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "title": {
+            "description": "Movie title",
+            "type": "string"
+          },
+          "tmdbId": {
+            "description": "The Movie Database ID",
+            "type": "number"
+          },
+          "year": {
+            "description": "Movie release year",
+            "type": "number"
+          }
+        },
+        "required": [
+          "tmdbId",
+          "title",
+          "year",
+          "qualityProfileId",
+          "rootFolderPath",
+          "minimumAvailability"
+        ],
+        "type": "object"
+      },
+      "name": "radarr_add_movie",
+      "title": "Add a movie to Radarr"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "openWorldHint": false
+      },
+      "description": "Delete a movie from Radarr",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "addImportExclusion": {
+            "default": false,
+            "description": "Whether to add import exclusion",
+            "type": "boolean"
+          },
+          "deleteFiles": {
+            "default": false,
+            "description": "Whether to delete movie files",
+            "type": "boolean"
+          },
+          "id": {
+            "description": "Movie ID in Radarr",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "radarr_delete_movie",
+      "title": "Delete a movie from Radarr"
+    },
+    {
+      "annotations": {
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "description": "Refresh metadata for a specific movie",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "id": {
+            "description": "Movie ID in Radarr",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "radarr_refresh_movie",
+      "title": "Refresh metadata for a specific movie"
+    },
+    {
+      "annotations": {
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "description": "Search for releases of a specific movie",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "id": {
+            "description": "Movie ID in Radarr",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "radarr_search_movie_releases",
+      "title": "Search for releases of a specific movie"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get all movies in the Radarr library",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "filters": {
+            "description": "Filter options for movies",
+            "properties": {
+              "genres": {
+                "description": "Filter by genres (matches any)",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "hasFile": {
+                "description": "Filter by file availability",
+                "type": "boolean"
+              },
+              "imdbId": {
+                "description": "Filter by IMDB ID",
+                "type": "string"
+              },
+              "minimumAvailability": {
+                "description": "Filter by minimum availability status",
+                "type": "string"
+              },
+              "monitored": {
+                "description": "Filter by monitored status",
+                "type": "boolean"
+              },
+              "qualityProfileId": {
+                "description": "Filter by quality profile ID",
+                "type": "number"
+              },
+              "tags": {
+                "description": "Filter by tag IDs (matches any)",
+                "items": {
+                  "type": "number"
+                },
+                "type": "array"
+              },
+              "title": {
+                "description": "Filter by title (partial match, case-insensitive)",
+                "type": "string"
+              },
+              "tmdbId": {
+                "description": "Filter by TMDB ID",
+                "type": "number"
+              },
+              "yearFrom": {
+                "description": "Filter by minimum year",
+                "type": "number"
+              },
+              "yearTo": {
+                "description": "Filter by maximum year",
+                "type": "number"
+              }
+            },
+            "type": "object"
+          },
+          "limit": {
+            "description": "Maximum number of results to return",
+            "type": "number"
+          },
+          "skip": {
+            "description": "Number of results to skip (for pagination)",
+            "type": "number"
+          },
+          "sort": {
+            "description": "Sort options for movies",
+            "properties": {
+              "direction": {
+                "description": "Sort direction",
+                "enum": [
+                  "asc",
+                  "desc"
+                ],
+                "type": "string"
+              },
+              "field": {
+                "description": "Field to sort by",
+                "enum": [
+                  "title",
+                  "year",
+                  "added",
+                  "sizeOnDisk",
+                  "qualityProfileId",
+                  "runtime"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "field",
+              "direction"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "name": "radarr_get_movies",
+      "title": "Get all movies in the Radarr library"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get details of a specific movie by Radarr ID or TMDB ID",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "id": {
+            "description": "Movie ID in Radarr",
+            "type": "number"
+          },
+          "tmdbId": {
+            "description": "The Movie Database (TMDB) ID",
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "name": "radarr_get_movie",
+      "title": "Get details of a specific movie by Radarr ID or TMDB ID"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get Radarr configuration including quality profiles, and root folders",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {},
+        "type": "object"
+      },
+      "name": "radarr_get_configuration",
+      "title": "Get Radarr configuration including quality profiles, and root folders"
+    },
+    {
+      "annotations": {
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "description": "Update a movie's settings (quality profile, monitoring, etc.)",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "id": {
+            "description": "Movie ID to update",
+            "type": "number"
+          },
+          "minimumAvailability": {
+            "description": "Minimum availability for monitoring",
+            "enum": [
+              "tba",
+              "announced",
+              "inCinemas",
+              "released",
+              "preDB"
+            ],
+            "type": "string"
+          },
+          "monitored": {
+            "description": "Whether to monitor the movie",
+            "type": "boolean"
+          },
+          "qualityProfileId": {
+            "description": "Quality profile ID",
+            "type": "number"
+          },
+          "tags": {
+            "description": "Tag IDs",
+            "items": {
+              "type": "number"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "radarr_update_movie",
+      "title": "Update a movie's settings (quality profile, monitoring, etc.)"
+    },
+    {
+      "annotations": {
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "description": "Refresh metadata for all movies in the library",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {},
+        "type": "object"
+      },
+      "name": "radarr_refresh_all_movies",
+      "title": "Refresh metadata for all movies in the library"
+    },
+    {
+      "annotations": {
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "description": "Rescan all movie folders for new/missing files",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {},
+        "type": "object"
+      },
+      "name": "radarr_disk_scan",
+      "title": "Rescan all movie folders for new/missing files"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get movies that are monitored but not yet downloaded. Use this to find movies that should have been downloaded but are still missing.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "page": {
+            "default": 1,
+            "description": "Page number",
+            "type": "number"
+          },
+          "pageSize": {
+            "default": 20,
+            "description": "Number of results per page",
+            "type": "number"
+          },
+          "sortDirection": {
+            "default": "ascending",
+            "description": "Sort direction",
+            "enum": [
+              "ascending",
+              "descending"
+            ],
+            "type": "string"
+          },
+          "sortKey": {
+            "default": "title",
+            "description": "Field to sort by",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "radarr_get_wanted_missing",
+      "title": "Get movies that are monitored but not yet downloaded"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get movies that have been downloaded but don't meet the quality cutoff. Use this to find movies that could be upgraded to better quality.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "page": {
+            "default": 1,
+            "description": "Page number",
+            "type": "number"
+          },
+          "pageSize": {
+            "default": 20,
+            "description": "Number of results per page",
+            "type": "number"
+          },
+          "sortDirection": {
+            "default": "ascending",
+            "description": "Sort direction",
+            "enum": [
+              "ascending",
+              "descending"
+            ],
+            "type": "string"
+          },
+          "sortKey": {
+            "default": "title",
+            "description": "Field to sort by",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "radarr_get_wanted_cutoff",
+      "title": "Get movies that have been downloaded but don't meet quality cutoff"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get the download history showing grabbed, downloaded, failed, and deleted events. Use eventType to filter (e.g. 'grabbed', 'downloadFolderImported', 'downloadFailed', 'movieFileDeleted').",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "eventType": {
+            "description": "Filter by event type (grabbed, downloadFolderImported, downloadFailed, movieFileDeleted)",
+            "enum": [
+              "grabbed",
+              "downloadFolderImported",
+              "downloadFailed",
+              "movieFileDeleted"
+            ],
+            "type": "string"
+          },
+          "includeMovie": {
+            "default": false,
+            "description": "Whether to include movie data in results",
+            "type": "boolean"
+          },
+          "page": {
+            "default": 1,
+            "description": "Page number",
+            "type": "number"
+          },
+          "pageSize": {
+            "default": 20,
+            "description": "Number of results per page",
+            "type": "number"
+          },
+          "sortDirection": {
+            "default": "descending",
+            "description": "Sort direction",
+            "enum": [
+              "ascending",
+              "descending"
+            ],
+            "type": "string"
+          },
+          "sortKey": {
+            "default": "date",
+            "description": "Field to sort by",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "radarr_get_history",
+      "title": "Get download history for movies"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get the download history for a specific movie, showing all events like grabs, imports, and failures.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "eventType": {
+            "description": "Filter by event type",
+            "type": "string"
+          },
+          "includeMovie": {
+            "default": false,
+            "description": "Whether to include movie data",
+            "type": "boolean"
+          },
+          "movieId": {
+            "description": "Movie ID in Radarr",
+            "type": "number"
+          }
+        },
+        "required": [
+          "movieId"
+        ],
+        "type": "object"
+      },
+      "name": "radarr_get_movie_history",
+      "title": "Get download history for a specific movie"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get movies with upcoming physical, digital, or theatrical releases within a date range.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "end": {
+            "description": "End date (ISO format, optional)",
+            "type": "string"
+          },
+          "start": {
+            "description": "Start date (ISO format, optional)",
+            "type": "string"
+          },
+          "unmonitored": {
+            "default": false,
+            "description": "Include unmonitored movies",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "name": "radarr_get_calendar",
+      "title": "Get upcoming movie releases"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Search indexers for available releases of a specific movie. Returns a list of releases with quality, size, seeders, and approval status. Use radarr_grab_release to download a specific release.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "movieId": {
+            "description": "Movie ID in Radarr",
+            "type": "number"
+          }
+        },
+        "required": [
+          "movieId"
+        ],
+        "type": "object"
+      },
+      "name": "radarr_get_releases",
+      "title": "Browse available releases for a movie"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false
+      },
+      "description": "Grab (download) a specific release found via radarr_get_releases. Requires the guid and indexerId from the release.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "guid": {
+            "description": "Release GUID from radarr_get_releases",
+            "type": "string"
+          },
+          "indexerId": {
+            "description": "Indexer ID from radarr_get_releases",
+            "type": "number"
+          }
+        },
+        "required": [
+          "guid",
+          "indexerId"
+        ],
+        "type": "object"
+      },
+      "name": "radarr_grab_release",
+      "title": "Download a specific release for a movie"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "openWorldHint": false
+      },
+      "description": "Remove a stuck or failed item from the download queue. Optionally blocklist the release or skip re-download.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "blocklist": {
+            "default": false,
+            "description": "Add release to blocklist",
+            "type": "boolean"
+          },
+          "id": {
+            "description": "Queue item ID",
+            "type": "number"
+          },
+          "removeFromClient": {
+            "default": true,
+            "description": "Remove from download client",
+            "type": "boolean"
+          },
+          "skipRedownload": {
+            "default": false,
+            "description": "Skip automatic re-download",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "radarr_delete_queue_item",
+      "title": "Remove an item from the download queue"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false
+      },
+      "description": "Force download a specific item in the queue.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "id": {
+            "description": "Queue item ID",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "radarr_grab_queue_item",
+      "title": "Force download a queue item"
+    },
+    {
+      "annotations": {
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "description": "Trigger a backlog search for all monitored movies that are missing. This searches indexers for every missing movie at once.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {},
+        "type": "object"
+      },
+      "name": "radarr_search_all_missing",
+      "title": "Search for all missing movies"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false
+      },
+      "description": "Mark a download as failed, which triggers Radarr to search for and grab a replacement release.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "historyId": {
+            "description": "History record ID from radarr_get_history",
+            "type": "number"
+          }
+        },
+        "required": [
+          "historyId"
+        ],
+        "type": "object"
+      },
+      "name": "radarr_mark_failed",
+      "title": "Mark a download history item as failed"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Search for TV series",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "limit": {
+            "description": "Maximum number of results to return",
+            "type": "number"
+          },
+          "skip": {
+            "description": "Number of results to skip (for pagination)",
+            "type": "number"
+          },
+          "term": {
+            "description": "TV series title to search for",
+            "type": "string"
+          }
+        },
+        "required": [
+          "term"
+        ],
+        "type": "object"
+      },
+      "name": "sonarr_search_series",
+      "title": "Search for TV series"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false
+      },
+      "description": "Add a TV series to Sonarr",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "languageProfileId": {
+            "description": "Language profile ID to use",
+            "type": "number"
+          },
+          "monitored": {
+            "default": true,
+            "description": "Whether to monitor the series",
+            "type": "boolean"
+          },
+          "qualityProfileId": {
+            "description": "Quality profile ID to use",
+            "type": "number"
+          },
+          "rootFolderPath": {
+            "description": "Root folder path where series should be stored",
+            "type": "string"
+          },
+          "searchForMissingEpisodes": {
+            "default": false,
+            "description": "Whether to search for missing episodes after adding",
+            "type": "boolean"
+          },
+          "seasonFolder": {
+            "default": true,
+            "description": "Whether to use season folders",
+            "type": "boolean"
+          },
+          "seasons": {
+            "description": "Seasons to monitor",
+            "items": {
+              "properties": {
+                "monitored": {
+                  "type": "boolean"
+                },
+                "seasonNumber": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "seasonNumber",
+                "monitored"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "seriesType": {
+            "default": "standard",
+            "description": "Type of series",
+            "enum": [
+              "standard",
+              "daily",
+              "anime"
+            ],
+            "type": "string"
+          },
+          "tags": {
+            "description": "Tag IDs to apply to the series",
+            "items": {
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "title": {
+            "description": "Series title",
+            "type": "string"
+          },
+          "tvdbId": {
+            "description": "The TVDB ID",
+            "type": "number"
+          }
+        },
+        "required": [
+          "tvdbId",
+          "title",
+          "qualityProfileId",
+          "rootFolderPath"
+        ],
+        "type": "object"
+      },
+      "name": "sonarr_add_series",
+      "title": "Add a TV series to Sonarr"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "openWorldHint": false
+      },
+      "description": "Delete a TV series from Sonarr",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "addImportExclusion": {
+            "default": false,
+            "description": "Whether to add import exclusion",
+            "type": "boolean"
+          },
+          "deleteFiles": {
+            "default": false,
+            "description": "Whether to delete series files",
+            "type": "boolean"
+          },
+          "id": {
+            "description": "Series ID in Sonarr",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "sonarr_delete_series",
+      "title": "Delete a TV series from Sonarr"
+    },
+    {
+      "annotations": {
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "description": "Update episode monitoring status",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "episodeIds": {
+            "description": "Episode IDs to monitor/unmonitor",
+            "items": {
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "monitored": {
+            "description": "Whether to monitor or unmonitor the episodes",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "episodeIds",
+          "monitored"
+        ],
+        "type": "object"
+      },
+      "name": "sonarr_update_episode_monitoring",
+      "title": "Update episode monitoring status"
+    },
+    {
+      "annotations": {
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "description": "Refresh metadata for a specific series",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "id": {
+            "description": "Series ID in Sonarr",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "sonarr_refresh_series",
+      "title": "Refresh metadata for a specific series"
+    },
+    {
+      "annotations": {
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "description": "Search for episodes of a specific series",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "id": {
+            "description": "Series ID in Sonarr",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "sonarr_search_series_episodes",
+      "title": "Search for episodes of a specific series"
+    },
+    {
+      "annotations": {
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "description": "Search for episodes of a specific season",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "seasonNumber": {
+            "description": "Season number to search",
+            "type": "number"
+          },
+          "seriesId": {
+            "description": "Series ID in Sonarr",
+            "type": "number"
+          }
+        },
+        "required": [
+          "seriesId",
+          "seasonNumber"
+        ],
+        "type": "object"
+      },
+      "name": "sonarr_search_season",
+      "title": "Search for episodes of a specific season"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get all TV series in the Sonarr library",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "filters": {
+            "description": "Filter options for series",
+            "properties": {
+              "genres": {
+                "description": "Filter by genres (matches any)",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "imdbId": {
+                "description": "Filter by IMDB ID",
+                "type": "string"
+              },
+              "monitored": {
+                "description": "Filter by monitored status",
+                "type": "boolean"
+              },
+              "network": {
+                "description": "Filter by network (partial match)",
+                "type": "string"
+              },
+              "qualityProfileId": {
+                "description": "Filter by quality profile ID",
+                "type": "number"
+              },
+              "seriesType": {
+                "description": "Filter by series type",
+                "type": "string"
+              },
+              "status": {
+                "description": "Filter by series status",
+                "type": "string"
+              },
+              "tags": {
+                "description": "Filter by tag IDs (matches any)",
+                "items": {
+                  "type": "number"
+                },
+                "type": "array"
+              },
+              "title": {
+                "description": "Filter by title (partial match, case-insensitive)",
+                "type": "string"
+              },
+              "tmdbId": {
+                "description": "Filter by TMDB ID",
+                "type": "number"
+              },
+              "yearFrom": {
+                "description": "Filter by minimum year",
+                "type": "number"
+              },
+              "yearTo": {
+                "description": "Filter by maximum year",
+                "type": "number"
+              }
+            },
+            "type": "object"
+          },
+          "limit": {
+            "description": "Maximum number of results to return",
+            "type": "number"
+          },
+          "skip": {
+            "description": "Number of results to skip (for pagination)",
+            "type": "number"
+          },
+          "sort": {
+            "description": "Sort options for series",
+            "properties": {
+              "direction": {
+                "description": "Sort direction",
+                "enum": [
+                  "asc",
+                  "desc"
+                ],
+                "type": "string"
+              },
+              "field": {
+                "description": "Field to sort by",
+                "enum": [
+                  "title",
+                  "year",
+                  "added",
+                  "sizeOnDisk",
+                  "qualityProfileId",
+                  "runtime",
+                  "episodeCount"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "field",
+              "direction"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "name": "sonarr_get_series",
+      "title": "Get all TV series in the Sonarr library"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get details of a specific TV series by Sonarr ID or TVDB ID",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "id": {
+            "description": "Series ID in Sonarr",
+            "type": "number"
+          },
+          "tvdbId": {
+            "description": "The TV Database (TVDB) ID",
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "name": "sonarr_get_series_by_id",
+      "title": "Get details of a specific TV series by Sonarr ID or TVDB ID"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get episodes for a specific series",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "limit": {
+            "description": "Maximum number of results to return",
+            "type": "number"
+          },
+          "seasonNumber": {
+            "description": "Specific season number (optional)",
+            "type": "number"
+          },
+          "seriesId": {
+            "description": "Series ID to get episodes for",
+            "type": "number"
+          },
+          "skip": {
+            "description": "Number of results to skip (for pagination)",
+            "type": "number"
+          }
+        },
+        "required": [
+          "seriesId"
+        ],
+        "type": "object"
+      },
+      "name": "sonarr_get_episodes",
+      "title": "Get episodes for a specific series"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get upcoming episodes calendar",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "end": {
+            "description": "End date (ISO format, optional)",
+            "type": "string"
+          },
+          "includeEpisodeFile": {
+            "default": false,
+            "description": "Whether to include episode file information",
+            "type": "boolean"
+          },
+          "includeSeries": {
+            "default": false,
+            "description": "Whether to include series information",
+            "type": "boolean"
+          },
+          "limit": {
+            "description": "Maximum number of results to return",
+            "type": "number"
+          },
+          "skip": {
+            "description": "Number of results to skip (for pagination)",
+            "type": "number"
+          },
+          "start": {
+            "description": "Start date (ISO format, optional)",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "sonarr_get_calendar",
+      "title": "Get upcoming episodes calendar"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get the download queue",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "limit": {
+            "description": "Maximum number of results to return",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer"
+          },
+          "skip": {
+            "description": "Number of results to skip (for pagination)",
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "sonarr_get_queue",
+      "title": "Get the download queue"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get Sonarr configuration including quality profiles and root folders",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {},
+        "type": "object"
+      },
+      "name": "sonarr_get_configuration",
+      "title": "Get Sonarr configuration including quality profiles and root folders"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get Sonarr system status",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {},
+        "type": "object"
+      },
+      "name": "sonarr_get_system_status",
+      "title": "Get Sonarr system status"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get Sonarr health check results",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {},
+        "type": "object"
+      },
+      "name": "sonarr_get_health",
+      "title": "Get Sonarr health check results"
+    },
+    {
+      "annotations": {
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "description": "Update a series' settings in Sonarr",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "id": {
+            "description": "Series ID in Sonarr",
+            "type": "number"
+          },
+          "series": {
+            "additionalProperties": {},
+            "description": "Series object with updated fields",
+            "properties": {},
+            "type": "object"
+          }
+        },
+        "required": [
+          "id",
+          "series"
+        ],
+        "type": "object"
+      },
+      "name": "sonarr_update_series",
+      "title": "Update a series' settings in Sonarr"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get details of a specific episode by ID",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "id": {
+            "description": "Episode ID in Sonarr",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "sonarr_get_episode",
+      "title": "Get details of a specific episode by ID"
+    },
+    {
+      "annotations": {
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "description": "Refresh metadata for all series in the library",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {},
+        "type": "object"
+      },
+      "name": "sonarr_refresh_all_series",
+      "title": "Refresh metadata for all series in the library"
+    },
+    {
+      "annotations": {
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "description": "Search for specific episodes by IDs",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "episodeIds": {
+            "description": "Array of episode IDs to search for",
+            "items": {
+              "type": "number"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "episodeIds"
+        ],
+        "type": "object"
+      },
+      "name": "sonarr_search_episodes",
+      "title": "Search for specific episodes by IDs"
+    },
+    {
+      "annotations": {
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "description": "Rescan all series folders for new/missing files",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {},
+        "type": "object"
+      },
+      "name": "sonarr_disk_scan",
+      "title": "Rescan all series folders for new/missing files"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get episodes that are monitored but not yet downloaded. Use this to find episodes that should have been downloaded but are still missing.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "includeSeries": {
+            "default": false,
+            "description": "Whether to include series data in results",
+            "type": "boolean"
+          },
+          "page": {
+            "default": 1,
+            "description": "Page number",
+            "type": "number"
+          },
+          "pageSize": {
+            "default": 20,
+            "description": "Number of results per page",
+            "type": "number"
+          },
+          "sortDirection": {
+            "default": "descending",
+            "description": "Sort direction",
+            "enum": [
+              "ascending",
+              "descending"
+            ],
+            "type": "string"
+          },
+          "sortKey": {
+            "default": "airDateUtc",
+            "description": "Field to sort by",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "sonarr_get_wanted_missing",
+      "title": "Get episodes that are monitored but not yet downloaded"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get episodes that have been downloaded but don't meet the quality cutoff. Use this to find episodes that could be upgraded to better quality.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "includeSeries": {
+            "default": false,
+            "description": "Whether to include series data in results",
+            "type": "boolean"
+          },
+          "page": {
+            "default": 1,
+            "description": "Page number",
+            "type": "number"
+          },
+          "pageSize": {
+            "default": 20,
+            "description": "Number of results per page",
+            "type": "number"
+          },
+          "sortDirection": {
+            "default": "descending",
+            "description": "Sort direction",
+            "enum": [
+              "ascending",
+              "descending"
+            ],
+            "type": "string"
+          },
+          "sortKey": {
+            "default": "airDateUtc",
+            "description": "Field to sort by",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "sonarr_get_wanted_cutoff",
+      "title": "Get episodes that have been downloaded but don't meet quality cutoff"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get the download history showing grabbed, downloaded, failed, and deleted events. Use eventType to filter (e.g. 'grabbed', 'downloadFolderImported', 'downloadFailed', 'episodeFileDeleted').",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "eventType": {
+            "description": "Filter by event type (grabbed, downloadFolderImported, downloadFailed, episodeFileDeleted)",
+            "enum": [
+              "grabbed",
+              "downloadFolderImported",
+              "downloadFailed",
+              "episodeFileDeleted"
+            ],
+            "type": "string"
+          },
+          "includeEpisode": {
+            "default": false,
+            "description": "Whether to include episode data",
+            "type": "boolean"
+          },
+          "includeSeries": {
+            "default": false,
+            "description": "Whether to include series data",
+            "type": "boolean"
+          },
+          "page": {
+            "default": 1,
+            "description": "Page number",
+            "type": "number"
+          },
+          "pageSize": {
+            "default": 20,
+            "description": "Number of results per page",
+            "type": "number"
+          },
+          "sortDirection": {
+            "default": "descending",
+            "description": "Sort direction",
+            "enum": [
+              "ascending",
+              "descending"
+            ],
+            "type": "string"
+          },
+          "sortKey": {
+            "default": "date",
+            "description": "Field to sort by",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "sonarr_get_history",
+      "title": "Get download history for episodes"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get the download history for a specific series, optionally filtered by season.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "eventType": {
+            "description": "Filter by event type",
+            "type": "string"
+          },
+          "includeEpisode": {
+            "default": false,
+            "description": "Whether to include episode data",
+            "type": "boolean"
+          },
+          "includeSeries": {
+            "default": false,
+            "description": "Whether to include series data",
+            "type": "boolean"
+          },
+          "seasonNumber": {
+            "description": "Filter by season number",
+            "type": "number"
+          },
+          "seriesId": {
+            "description": "Series ID in Sonarr",
+            "type": "number"
+          }
+        },
+        "required": [
+          "seriesId"
+        ],
+        "type": "object"
+      },
+      "name": "sonarr_get_series_history",
+      "title": "Get download history for a specific series"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Search indexers for available releases of a specific episode. Returns a list of releases with quality, size, seeders, and approval status. Use sonarr_grab_release to download a specific release.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "episodeId": {
+            "description": "Episode ID in Sonarr",
+            "type": "number"
+          }
+        },
+        "required": [
+          "episodeId"
+        ],
+        "type": "object"
+      },
+      "name": "sonarr_get_releases",
+      "title": "Browse available releases for an episode"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false
+      },
+      "description": "Grab (download) a specific release found via sonarr_get_releases. Requires the guid and indexerId from the release.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "guid": {
+            "description": "Release GUID from sonarr_get_releases",
+            "type": "string"
+          },
+          "indexerId": {
+            "description": "Indexer ID from sonarr_get_releases",
+            "type": "number"
+          }
+        },
+        "required": [
+          "guid",
+          "indexerId"
+        ],
+        "type": "object"
+      },
+      "name": "sonarr_grab_release",
+      "title": "Download a specific release for an episode"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "openWorldHint": false
+      },
+      "description": "Remove a stuck or failed item from the download queue. Optionally blocklist the release or skip re-download.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "blocklist": {
+            "default": false,
+            "description": "Add release to blocklist",
+            "type": "boolean"
+          },
+          "id": {
+            "description": "Queue item ID",
+            "type": "number"
+          },
+          "removeFromClient": {
+            "default": true,
+            "description": "Remove from download client",
+            "type": "boolean"
+          },
+          "skipRedownload": {
+            "default": false,
+            "description": "Skip automatic re-download",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "sonarr_delete_queue_item",
+      "title": "Remove an item from the download queue"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false
+      },
+      "description": "Force download a specific item in the queue.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "id": {
+            "description": "Queue item ID",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "sonarr_grab_queue_item",
+      "title": "Force download a queue item"
+    },
+    {
+      "annotations": {
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "description": "Trigger a backlog search for all monitored episodes that are missing. This searches indexers for every missing episode at once.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {},
+        "type": "object"
+      },
+      "name": "sonarr_search_all_missing",
+      "title": "Search for all missing episodes"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false
+      },
+      "description": "Mark a download as failed, which triggers Sonarr to search for and grab a replacement release.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "historyId": {
+            "description": "History record ID from sonarr_get_history",
+            "type": "number"
+          }
+        },
+        "required": [
+          "historyId"
+        ],
+        "type": "object"
+      },
+      "name": "sonarr_mark_failed",
+      "title": "Mark a download history item as failed"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Find TMDB content by external ID (TVDB ID, etc.) from other databases.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "externalId": {
+            "description": "External ID (e.g., 'tt1234567' for movie/TV IDs)",
+            "type": "string"
+          },
+          "externalSource": {
+            "default": "imdb_id",
+            "description": "External source (default: 'imdb_id')",
+            "type": "string"
+          }
+        },
+        "required": [
+          "externalId"
+        ],
+        "type": "object"
+      },
+      "name": "tmdb_find_by_external_id",
+      "title": "Find TMDB content by external ID (TVDB ID, etc.) from other databases."
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Search for movies on TMDB by title",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "language": {
+            "default": "en-US",
+            "description": "Language code (e.g., 'en-US')",
+            "type": "string"
+          },
+          "page": {
+            "description": "Page number (1-1000)",
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          },
+          "query": {
+            "description": "Movie title to search for",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "tmdb_search_movies",
+      "title": "Search for movies on TMDB by title"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Search for TV shows on TMDB by title",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "language": {
+            "default": "en-US",
+            "description": "Language code (e.g., 'en-US')",
+            "type": "string"
+          },
+          "page": {
+            "description": "Page number (1-1000)",
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          },
+          "query": {
+            "description": "TV show title to search for",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "tmdb_search_tv",
+      "title": "Search for TV shows on TMDB by title"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Search for movies, TV shows, and people on TMDB in a single request",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "language": {
+            "default": "en-US",
+            "description": "Language code (e.g., 'en-US')",
+            "type": "string"
+          },
+          "page": {
+            "description": "Page number (1-1000)",
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          },
+          "query": {
+            "description": "Search query for movies, TV shows, or people",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "tmdb_search_multi",
+      "title": "Search for movies, TV shows, and people on TMDB in a single request"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get popular movies from TMDB",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "language": {
+            "default": "en-US",
+            "description": "Language code (e.g., 'en-US')",
+            "type": "string"
+          },
+          "page": {
+            "description": "Page number (1-1000)",
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "name": "tmdb_get_popular_movies",
+      "title": "Get popular movies from TMDB"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Discover movies based on various criteria",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "certification": {
+            "description": "Certification (e.g., 'R', 'PG-13')",
+            "type": "string"
+          },
+          "certification_country": {
+            "description": "Certification country (ISO 3166-1)",
+            "type": "string"
+          },
+          "include_adult": {
+            "default": false,
+            "description": "Include adult movies",
+            "type": "boolean"
+          },
+          "include_video": {
+            "default": false,
+            "description": "Include movies with videos",
+            "type": "boolean"
+          },
+          "page": {
+            "description": "Page number (1-1000)",
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          },
+          "primary_release_year": {
+            "description": "Filter by primary release year",
+            "type": "number"
+          },
+          "region": {
+            "description": "Region for release dates (ISO 3166-1)",
+            "type": "string"
+          },
+          "release_date_gte": {
+            "description": "Minimum release date (YYYY-MM-DD)",
+            "type": "string"
+          },
+          "release_date_lte": {
+            "description": "Maximum release date (YYYY-MM-DD)",
+            "type": "string"
+          },
+          "sort_by": {
+            "description": "Sort results by field (e.g., 'popularity.desc')",
+            "type": "string"
+          },
+          "vote_average_gte": {
+            "description": "Minimum vote average (0-10)",
+            "maximum": 10,
+            "minimum": 0,
+            "type": "number"
+          },
+          "vote_average_lte": {
+            "description": "Maximum vote average (0-10)",
+            "maximum": 10,
+            "minimum": 0,
+            "type": "number"
+          },
+          "vote_count_gte": {
+            "description": "Minimum vote count",
+            "minimum": 0,
+            "type": "number"
+          },
+          "with_genres": {
+            "description": "Comma-separated genre IDs to include",
+            "type": "string"
+          },
+          "with_original_language": {
+            "description": "Filter by original language (ISO 639-1)",
+            "type": "string"
+          },
+          "with_runtime_gte": {
+            "description": "Minimum runtime in minutes",
+            "minimum": 0,
+            "type": "number"
+          },
+          "with_runtime_lte": {
+            "description": "Maximum runtime in minutes",
+            "minimum": 0,
+            "type": "number"
+          },
+          "without_genres": {
+            "description": "Comma-separated genre IDs to exclude",
+            "type": "string"
+          },
+          "year": {
+            "description": "Filter by release year",
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "name": "tmdb_discover_movies",
+      "title": "Discover movies based on various criteria"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Discover TV shows based on various criteria",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "first_air_date_gte": {
+            "description": "Minimum first air date (YYYY-MM-DD)",
+            "type": "string"
+          },
+          "first_air_date_lte": {
+            "description": "Maximum first air date (YYYY-MM-DD)",
+            "type": "string"
+          },
+          "first_air_date_year": {
+            "description": "Filter by first air date year",
+            "type": "number"
+          },
+          "include_adult": {
+            "default": false,
+            "description": "Include adult TV shows",
+            "type": "boolean"
+          },
+          "page": {
+            "description": "Page number (1-1000)",
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          },
+          "screened_theatrically": {
+            "default": false,
+            "description": "Filter by theatrical screening",
+            "type": "boolean"
+          },
+          "sort_by": {
+            "description": "Sort results by field (e.g., 'popularity.desc')",
+            "type": "string"
+          },
+          "timezone": {
+            "description": "Timezone for air dates",
+            "type": "string"
+          },
+          "vote_average_gte": {
+            "description": "Minimum vote average (0-10)",
+            "maximum": 10,
+            "minimum": 0,
+            "type": "number"
+          },
+          "vote_average_lte": {
+            "description": "Maximum vote average (0-10)",
+            "maximum": 10,
+            "minimum": 0,
+            "type": "number"
+          },
+          "vote_count_gte": {
+            "description": "Minimum vote count",
+            "minimum": 0,
+            "type": "number"
+          },
+          "with_genres": {
+            "description": "Comma-separated genre IDs to include",
+            "type": "string"
+          },
+          "with_networks": {
+            "description": "Comma-separated network IDs",
+            "type": "string"
+          },
+          "with_original_language": {
+            "description": "Filter by original language (ISO 639-1)",
+            "type": "string"
+          },
+          "with_runtime_gte": {
+            "description": "Minimum runtime in minutes",
+            "minimum": 0,
+            "type": "number"
+          },
+          "with_runtime_lte": {
+            "description": "Maximum runtime in minutes",
+            "minimum": 0,
+            "type": "number"
+          },
+          "without_genres": {
+            "description": "Comma-separated genre IDs to exclude",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "tmdb_discover_tv",
+      "title": "Discover TV shows based on various criteria"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get list of available genres for movies or TV shows",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "language": {
+            "default": "en-US",
+            "description": "Language code (e.g., 'en-US')",
+            "type": "string"
+          },
+          "mediaType": {
+            "description": "Media type for genres",
+            "enum": [
+              "movie",
+              "tv"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "mediaType"
+        ],
+        "type": "object"
+      },
+      "name": "tmdb_get_genres",
+      "title": "Get list of available genres for movies or TV shows"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get trending movies, TV shows, or people by time window (day/week)",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "language": {
+            "default": "en-US",
+            "description": "Language code (e.g., 'en-US')",
+            "type": "string"
+          },
+          "mediaType": {
+            "description": "Type of content to get trending for",
+            "enum": [
+              "all",
+              "movie",
+              "tv",
+              "person"
+            ],
+            "type": "string"
+          },
+          "page": {
+            "description": "Page number (1-1000)",
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          },
+          "timeWindow": {
+            "description": "Time window for trending content",
+            "enum": [
+              "day",
+              "week"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "mediaType",
+          "timeWindow"
+        ],
+        "type": "object"
+      },
+      "name": "tmdb_get_trending",
+      "title": "Get trending movies, TV shows, or people by time window (day/week)"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get movies currently playing in theaters",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "language": {
+            "default": "en-US",
+            "description": "Language code (e.g., 'en-US')",
+            "type": "string"
+          },
+          "page": {
+            "description": "Page number (1-1000)",
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          },
+          "region": {
+            "description": "Region for release dates (ISO 3166-1)",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "tmdb_get_now_playing_movies",
+      "title": "Get movies currently playing in theaters"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get top-rated movies",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "language": {
+            "default": "en-US",
+            "description": "Language code (e.g., 'en-US')",
+            "type": "string"
+          },
+          "page": {
+            "description": "Page number (1-1000)",
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          },
+          "region": {
+            "description": "Region for release dates (ISO 3166-1)",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "tmdb_get_top_rated_movies",
+      "title": "Get top-rated movies"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get upcoming movie releases",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "language": {
+            "default": "en-US",
+            "description": "Language code (e.g., 'en-US')",
+            "type": "string"
+          },
+          "page": {
+            "description": "Page number (1-1000)",
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          },
+          "region": {
+            "description": "Region for release dates (ISO 3166-1)",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "tmdb_get_upcoming_movies",
+      "title": "Get upcoming movie releases"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get popular TV shows",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "language": {
+            "default": "en-US",
+            "description": "Language code (e.g., 'en-US')",
+            "type": "string"
+          },
+          "page": {
+            "description": "Page number (1-1000)",
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "name": "tmdb_get_popular_tv",
+      "title": "Get popular TV shows"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get top-rated TV shows",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "language": {
+            "default": "en-US",
+            "description": "Language code (e.g., 'en-US')",
+            "type": "string"
+          },
+          "page": {
+            "description": "Page number (1-1000)",
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "name": "tmdb_get_top_rated_tv",
+      "title": "Get top-rated TV shows"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get TV shows currently on the air",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "language": {
+            "default": "en-US",
+            "description": "Language code (e.g., 'en-US')",
+            "type": "string"
+          },
+          "page": {
+            "description": "Page number (1-1000)",
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "name": "tmdb_get_on_the_air_tv",
+      "title": "Get TV shows currently on the air"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get TV shows airing today",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "language": {
+            "default": "en-US",
+            "description": "Language code (e.g., 'en-US')",
+            "type": "string"
+          },
+          "page": {
+            "description": "Page number (1-1000)",
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          },
+          "timezone": {
+            "description": "Timezone for air dates",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "tmdb_get_airing_today_tv",
+      "title": "Get TV shows airing today"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get detailed information about a specific movie",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "appendToResponse": {
+            "description": "Comma-separated list of additional details to append (e.g., 'credits,videos')",
+            "type": "string"
+          },
+          "language": {
+            "default": "en-US",
+            "description": "Language code (e.g., 'en-US')",
+            "type": "string"
+          },
+          "movieId": {
+            "description": "The TMDB movie ID",
+            "type": "number"
+          }
+        },
+        "required": [
+          "movieId"
+        ],
+        "type": "object"
+      },
+      "name": "tmdb_get_movie_details",
+      "title": "Get detailed information about a specific movie"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get detailed information about a specific TV show",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "appendToResponse": {
+            "description": "Comma-separated list of additional details to append (e.g., 'credits,videos')",
+            "type": "string"
+          },
+          "language": {
+            "default": "en-US",
+            "description": "Language code (e.g., 'en-US')",
+            "type": "string"
+          },
+          "tvId": {
+            "description": "The TMDB TV show ID",
+            "type": "number"
+          }
+        },
+        "required": [
+          "tvId"
+        ],
+        "type": "object"
+      },
+      "name": "tmdb_get_tv_details",
+      "title": "Get detailed information about a specific TV show"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get movie recommendations based on a specific movie",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "language": {
+            "default": "en-US",
+            "description": "Language code (e.g., 'en-US')",
+            "type": "string"
+          },
+          "movieId": {
+            "description": "The TMDB movie ID",
+            "type": "number"
+          },
+          "page": {
+            "description": "Page number (1-1000)",
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          }
+        },
+        "required": [
+          "movieId"
+        ],
+        "type": "object"
+      },
+      "name": "tmdb_get_movie_recommendations",
+      "title": "Get movie recommendations based on a specific movie"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get TV show recommendations based on a specific show",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "language": {
+            "default": "en-US",
+            "description": "Language code (e.g., 'en-US')",
+            "type": "string"
+          },
+          "page": {
+            "description": "Page number (1-1000)",
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          },
+          "tvId": {
+            "description": "The TMDB TV show ID",
+            "type": "number"
+          }
+        },
+        "required": [
+          "tvId"
+        ],
+        "type": "object"
+      },
+      "name": "tmdb_get_tv_recommendations",
+      "title": "Get TV show recommendations based on a specific show"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get movies similar to a specific movie",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "language": {
+            "default": "en-US",
+            "description": "Language code (e.g., 'en-US')",
+            "type": "string"
+          },
+          "movieId": {
+            "description": "The TMDB movie ID",
+            "type": "number"
+          },
+          "page": {
+            "description": "Page number (1-1000)",
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          }
+        },
+        "required": [
+          "movieId"
+        ],
+        "type": "object"
+      },
+      "name": "tmdb_get_similar_movies",
+      "title": "Get movies similar to a specific movie"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get TV shows similar to a specific show",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "language": {
+            "default": "en-US",
+            "description": "Language code (e.g., 'en-US')",
+            "type": "string"
+          },
+          "page": {
+            "description": "Page number (1-1000)",
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          },
+          "tvId": {
+            "description": "The TMDB TV show ID",
+            "type": "number"
+          }
+        },
+        "required": [
+          "tvId"
+        ],
+        "type": "object"
+      },
+      "name": "tmdb_get_similar_tv",
+      "title": "Get TV shows similar to a specific show"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Search for people (actors, directors, etc.)",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "include_adult": {
+            "default": false,
+            "description": "Include adult content",
+            "type": "boolean"
+          },
+          "language": {
+            "default": "en-US",
+            "description": "Language code (e.g., 'en-US')",
+            "type": "string"
+          },
+          "page": {
+            "description": "Page number (1-1000)",
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          },
+          "query": {
+            "description": "Search query for person name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "tmdb_search_people",
+      "title": "Search for people (actors, directors, etc.)"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get popular people in the entertainment industry",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "language": {
+            "default": "en-US",
+            "description": "Language code (e.g., 'en-US')",
+            "type": "string"
+          },
+          "page": {
+            "description": "Page number (1-1000)",
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "name": "tmdb_get_popular_people",
+      "title": "Get popular people in the entertainment industry"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get detailed information about a specific person",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "appendToResponse": {
+            "description": "Comma-separated list of additional details to append (e.g., 'movie_credits,tv_credits')",
+            "type": "string"
+          },
+          "language": {
+            "default": "en-US",
+            "description": "Language code (e.g., 'en-US')",
+            "type": "string"
+          },
+          "personId": {
+            "description": "The TMDB person ID",
+            "type": "number"
+          }
+        },
+        "required": [
+          "personId"
+        ],
+        "type": "object"
+      },
+      "name": "tmdb_get_person_details",
+      "title": "Get detailed information about a specific person"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get movie credits for a person",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "language": {
+            "default": "en-US",
+            "description": "Language code (e.g., 'en-US')",
+            "type": "string"
+          },
+          "personId": {
+            "description": "The TMDB person ID",
+            "type": "number"
+          }
+        },
+        "required": [
+          "personId"
+        ],
+        "type": "object"
+      },
+      "name": "tmdb_get_person_movie_credits",
+      "title": "Get movie credits for a person"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get TV credits for a person",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "language": {
+            "default": "en-US",
+            "description": "Language code (e.g., 'en-US')",
+            "type": "string"
+          },
+          "personId": {
+            "description": "The TMDB person ID",
+            "type": "number"
+          }
+        },
+        "required": [
+          "personId"
+        ],
+        "type": "object"
+      },
+      "name": "tmdb_get_person_tv_credits",
+      "title": "Get TV credits for a person"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Search for movie collections",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "language": {
+            "default": "en-US",
+            "description": "Language code (e.g., 'en-US')",
+            "type": "string"
+          },
+          "page": {
+            "description": "Page number (1-1000)",
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          },
+          "query": {
+            "description": "Search query for collection name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "tmdb_search_collections",
+      "title": "Search for movie collections"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get details about a specific movie collection",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "collectionId": {
+            "description": "The TMDB collection ID",
+            "type": "number"
+          },
+          "language": {
+            "default": "en-US",
+            "description": "Language code (e.g., 'en-US')",
+            "type": "string"
+          }
+        },
+        "required": [
+          "collectionId"
+        ],
+        "type": "object"
+      },
+      "name": "tmdb_get_collection_details",
+      "title": "Get details about a specific movie collection"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Search for keywords",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "page": {
+            "description": "Page number (1-1000)",
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          },
+          "query": {
+            "description": "Search query for keyword",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "tmdb_search_keywords",
+      "title": "Search for keywords"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get movies associated with a specific keyword",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "include_adult": {
+            "default": false,
+            "description": "Include adult movies",
+            "type": "boolean"
+          },
+          "keywordId": {
+            "description": "The TMDB keyword ID",
+            "type": "number"
+          },
+          "language": {
+            "default": "en-US",
+            "description": "Language code (e.g., 'en-US')",
+            "type": "string"
+          },
+          "page": {
+            "description": "Page number (1-1000)",
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "number"
+          }
+        },
+        "required": [
+          "keywordId"
+        ],
+        "type": "object"
+      },
+      "name": "tmdb_get_movies_by_keyword",
+      "title": "Get movies associated with a specific keyword"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get certification lists for movies or TV shows",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "mediaType": {
+            "description": "Media type for certifications",
+            "enum": [
+              "movie",
+              "tv"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "mediaType"
+        ],
+        "type": "object"
+      },
+      "name": "tmdb_get_certifications",
+      "title": "Get certification lists for movies or TV shows"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get watch providers for a movie or TV show",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "mediaId": {
+            "description": "The TMDB ID of the movie or TV show",
+            "type": "number"
+          },
+          "mediaType": {
+            "description": "Media type",
+            "enum": [
+              "movie",
+              "tv"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "mediaType",
+          "mediaId"
+        ],
+        "type": "object"
+      },
+      "name": "tmdb_get_watch_providers",
+      "title": "Get watch providers for a movie or TV show"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get TMDB API configuration including image base URLs",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {},
+        "type": "object"
+      },
+      "name": "tmdb_get_configuration",
+      "title": "Get TMDB API configuration including image base URLs"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get list of countries used in TMDB",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "language": {
+            "default": "en-US",
+            "description": "Language code (e.g., 'en-US')",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "tmdb_get_countries",
+      "title": "Get list of countries used in TMDB"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get list of languages used in TMDB",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {},
+        "type": "object"
+      },
+      "name": "tmdb_get_languages",
+      "title": "Get list of languages used in TMDB"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get cast and crew for a movie",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "movieId": {
+            "description": "The TMDB movie ID",
+            "type": "number"
+          }
+        },
+        "required": [
+          "movieId"
+        ],
+        "type": "object"
+      },
+      "name": "tmdb_get_movie_credits",
+      "title": "Get cast and crew for a movie"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get cast and crew for a TV show",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "tvId": {
+            "description": "The TMDB TV show ID",
+            "type": "number"
+          }
+        },
+        "required": [
+          "tvId"
+        ],
+        "type": "object"
+      },
+      "name": "tmdb_get_tv_credits",
+      "title": "Get cast and crew for a TV show"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get Plex server capabilities, version, and system information",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {},
+        "type": "object"
+      },
+      "name": "plex_get_capabilities",
+      "title": "Get Plex server capabilities and information"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "List all media libraries available on the Plex server",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {},
+        "type": "object"
+      },
+      "name": "plex_get_libraries",
+      "title": "Get Plex media libraries"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Search across all Plex libraries for movies, TV shows, and other content",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "limit": {
+            "default": 100,
+            "description": "Maximum number of results to return (default: 100)",
+            "type": "number"
+          },
+          "query": {
+            "description": "Search query term",
+            "type": "string"
+          },
+          "searchTypes": {
+            "description": "Filter by content types. If not provided, searches all types",
+            "items": {
+              "enum": [
+                "movies",
+                "tv",
+                "otherVideos",
+                "people"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "plex_search",
+      "title": "Search Plex media library"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get detailed metadata for a specific movie, TV show, or other media item",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "ratingKey": {
+            "description": "The rating key (unique identifier) of the media item",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ratingKey"
+        ],
+        "type": "object"
+      },
+      "name": "plex_get_metadata",
+      "title": "Get detailed metadata for a Plex item"
+    },
+    {
+      "annotations": {
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "description": "Trigger a refresh of a specific Plex library to scan for new content",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "key": {
+            "description": "The library key (section ID) to refresh",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key"
+        ],
+        "type": "object"
+      },
+      "name": "plex_refresh_library",
+      "title": "Refresh a Plex library"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Browse and filter items in a Plex library section. Supports filtering by studio, genre, year, and more.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "genre": {
+            "description": "Filter by genre (e.g., 'Action')",
+            "type": "string"
+          },
+          "key": {
+            "description": "The library section key/ID",
+            "type": "string"
+          },
+          "size": {
+            "default": 200,
+            "description": "Number of items per page (default: 200). Use start for pagination.",
+            "type": "number"
+          },
+          "sort": {
+            "description": "Sort field (e.g., 'titleSort', 'year', 'addedAt')",
+            "type": "string"
+          },
+          "start": {
+            "description": "Pagination offset (0-based)",
+            "type": "number"
+          },
+          "studio": {
+            "description": "Filter by studio name (e.g., 'Studio Ghibli')",
+            "type": "string"
+          },
+          "type": {
+            "description": "Media type filter (1=movie, 2=show, 3=season, 4=episode)",
+            "type": "number"
+          },
+          "year": {
+            "description": "Filter by release year",
+            "type": "number"
+          }
+        },
+        "required": [
+          "key"
+        ],
+        "type": "object"
+      },
+      "name": "plex_get_library_items",
+      "title": "Browse items in a Plex library"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "List all collections in a Plex library section",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "key": {
+            "description": "The library section key/ID",
+            "type": "string"
+          },
+          "size": {
+            "default": 100,
+            "description": "Number of collections per page (default: 100). Use start for pagination.",
+            "type": "number"
+          },
+          "start": {
+            "description": "Pagination offset (0-based)",
+            "type": "number"
+          }
+        },
+        "required": [
+          "key"
+        ],
+        "type": "object"
+      },
+      "name": "plex_get_collections",
+      "title": "List Plex collections"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get all items in a specific Plex collection",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "collectionId": {
+            "description": "The collection rating key/ID",
+            "type": "string"
+          }
+        },
+        "required": [
+          "collectionId"
+        ],
+        "type": "object"
+      },
+      "name": "plex_get_collection_items",
+      "title": "Get items in a Plex collection"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false
+      },
+      "description": "Create a new collection in a Plex library with initial items",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "ratingKeys": {
+            "description": "Rating keys of items to add to the collection",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "sectionKey": {
+            "description": "The library section key/ID",
+            "type": "string"
+          },
+          "title": {
+            "description": "The collection title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sectionKey",
+          "title",
+          "ratingKeys"
+        ],
+        "type": "object"
+      },
+      "name": "plex_create_collection",
+      "title": "Create a Plex collection"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false
+      },
+      "description": "Add one or more items to an existing Plex collection",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "collectionId": {
+            "description": "The collection rating key/ID",
+            "type": "string"
+          },
+          "ratingKeys": {
+            "description": "Rating keys of items to add to the collection",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "collectionId",
+          "ratingKeys"
+        ],
+        "type": "object"
+      },
+      "name": "plex_add_to_collection",
+      "title": "Add items to a Plex collection"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "openWorldHint": false
+      },
+      "description": "Remove one or more items from a Plex collection",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "collectionId": {
+            "description": "The collection rating key/ID",
+            "type": "string"
+          },
+          "ratingKeys": {
+            "description": "Rating keys of items to remove",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "collectionId",
+          "ratingKeys"
+        ],
+        "type": "object"
+      },
+      "name": "plex_remove_from_collection",
+      "title": "Remove items from a Plex collection"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "openWorldHint": false
+      },
+      "description": "Delete an entire collection from a Plex library",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "collectionId": {
+            "description": "The collection rating key/ID to delete",
+            "type": "string"
+          }
+        },
+        "required": [
+          "collectionId"
+        ],
+        "type": "object"
+      },
+      "name": "plex_delete_collection",
+      "title": "Delete a Plex collection"
+    }
+  ]
+}

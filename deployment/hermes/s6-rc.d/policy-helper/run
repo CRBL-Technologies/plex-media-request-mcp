@@ -1,0 +1,15 @@
+#!/command/with-contenv sh
+set -eu
+
+export HOME=/opt/data
+cd /opt/data
+
+helper_python=/opt/hermes/.venv/bin/python
+
+if [ "$(id -u)" = 0 ]; then
+    exec s6-setuidgid hermes "$helper_python" \
+        -m hermes_media_extension.policy_helper_api \
+        --serve --host 0.0.0.0 --port 8787
+fi
+exec "$helper_python" -m hermes_media_extension.policy_helper_api \
+    --serve --host 0.0.0.0 --port 8787

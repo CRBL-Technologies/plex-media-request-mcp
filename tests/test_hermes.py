@@ -119,6 +119,7 @@ async def test_adapter_verifies_actor_before_trusting_gateway(
     monkeypatch.setattr(plugin, "_client", gateway)
     adapter = plugin.MediaTelegramAdapter(object())
     assert adapter.authorization_is_upstream is True
+    assert adapter._is_user_authorized_from_message(object()) is True
     allowed = event(1001)
     assert await adapter.handle_message(allowed) is allowed
     with pytest.raises(PermissionError, match="not allowed"):

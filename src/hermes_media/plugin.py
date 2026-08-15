@@ -56,6 +56,19 @@ class MediaTelegramAdapter(_NativeAdapter):  # type: ignore[misc, valid-type]
 
         return True
 
+    def _is_user_authorized_from_message(self, message: object) -> bool:
+        """Defer the intake decision to the gateway's live file-backed policy.
+
+        Hermes' native Telegram prefilter reads the process environment, which
+        does not change when the dashboard atomically edits the policy file.
+        Passing intake here is safe because ``handle_message`` extracts the
+        native Telegram actor and rejects blocked users before calling the
+        native handler or the model.
+        """
+
+        del message
+        return True
+
     async def handle_message(self, event: object) -> object:
         actor = actor_from_event(event)
         role = await _gateway().observe(actor)

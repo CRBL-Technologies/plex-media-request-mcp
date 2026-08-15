@@ -1,9 +1,0 @@
-#!/command/with-contenv sh
-set -eu
-
-# Run before s6-rc brings up policy-helper or the native gateway.  This is a
-# read-only, fail-closed check: it forces deferred Hermes plugin discovery and
-# verifies the last-writer Telegram entry, role-aware tool visibility, pinned
-# source hashes, polling-only config, and private key references.
-exec s6-setuidgid hermes /opt/hermes/.venv/bin/python \
-    -m hermes_media_extension.startup_contract

@@ -1,0 +1,31 @@
+# syntax=docker/dockerfile:1.7
+ARG PYTHON_BASE_IMAGE
+FROM ${PYTHON_BASE_IMAGE}
+
+ARG PYTHON_BASE_IMAGE
+ARG SOURCE_COMMIT
+
+RUN python -c 'import re,sys; sys.exit(0 if re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", sys.argv[1]) else 1)' "$PYTHON_BASE_IMAGE"
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/src \
+    HOME=/opt/data \
+    UMASK=0077
+
+WORKDIR /app
+RUN groupadd --gid 1000 media \
+    && useradd --uid 1000 --gid 1000 --home-dir /opt/data --shell /usr/sbin/nologin media \
+    && mkdir -p /opt/data/state /run/media-secrets \
+    && chown -R 1000:1000 /opt/data /run/media-secrets /app
+
+COPY requirements.txt /app/requirements.txt
+RUN python -m pip install --no-cache-dir --require-hashes -r /app/requirements.txt
+COPY src /app/src
+
+LABEL org.opencontainers.image.source="https://github.com/CRBL-Technologies/plex-media-request-mcp" \
+      org.opencontainers.image.revision="$SOURCE_COMMIT"
+
+USER 1000:1000
+EXPOSE 18082
+ENTRYPOINT ["python", "-m", "media_gateway.app"]

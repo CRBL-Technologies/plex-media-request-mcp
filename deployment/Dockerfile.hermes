@@ -1,68 +1,23 @@
 # syntax=docker/dockerfile:1.7
-#
-# Derived image for the pinned Hermes v2026.8.3 base.  The release pipeline
-# must pass HERMES_BASE_IMAGE as a fully resolved repository@sha256:<digest>.
-# This Dockerfile intentionally does not declare ENTRYPOINT: the base image's
-# /opt/hermes/docker/entrypoint-dispatch.sh remains the owner of PID 1 and
-# delegates to s6-overlay /init.
-
 ARG HERMES_BASE_IMAGE
-FROM ${HERMES_BASE_IMAGE} AS runtime
+FROM ${HERMES_BASE_IMAGE}
 
 ARG HERMES_BASE_IMAGE
 ARG SOURCE_COMMIT
-
-# Validate the resolved build input inside the image build.  A mutable tag or
-# an image reference with an unexpected suffix must fail before any asset is
-# copied into the release image.
 RUN /opt/hermes/.venv/bin/python -c 'import re,sys; sys.exit(0 if re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", sys.argv[1]) else 1)' "$HERMES_BASE_IMAGE"
 
-# Hermes' installed tree is immutable at runtime.  The companion policy
-# module is copied into a separate import root so the extension can consume
-# the canonical ``media_companion.tool_policy`` package without mounting the
-# companion image or its data directory.
-# s6-overlay 3.2.3.0 (the pinned base) otherwise logs a stage-2 cont-init
-# failure and continues starting nonessential services.  Value 2 makes the
-# stage-2 failure fatal, so the startup contract can never be advisory.
 ENV S6_BEHAVIOUR_IF_STAGE2_FAILS=2 \
     PYTHONPATH=/app/src:/opt/hermes
 WORKDIR /opt/hermes
 
-COPY hermes_media_extension /opt/hermes/hermes_media_extension
-COPY src/media_companion /app/src/media_companion
-# The native image already contains ``platforms/telegram``.  Hermes scans
-# platform plugin directories lexically and deferred registration is
-# last-writer-wins, so the CRBL shim must be installed after that directory.
-COPY deployment/hermes/plugins/platforms/media-policy /opt/hermes/plugins/platforms/zzzz-media-policy
+COPY src /app/src
+COPY deployment/hermes/plugin /opt/hermes/plugins/platforms/zzzz-crbl-media
+COPY --chmod=0755 deployment/hermes/03-crbl-media /etc/cont-init.d/03-crbl-media
 
-# cont-init.d runs before the native gateway and fails closed if deferred
-# plugin discovery, source identity, ownership, callback bindings, config,
-# or tool visibility are not exactly the pinned contract.
-COPY --chmod=0755 deployment/hermes/cont-init.d/03-media-policy-contract \
-    /etc/cont-init.d/03-media-policy-contract
+RUN /opt/hermes/.venv/bin/python -c 'import httpx; import hermes_media.plugin' \
+    && test -f /opt/hermes/plugins/platforms/zzzz-crbl-media/plugin.yaml
 
-# The policy helper is a native s6-rc longrun.  Copying the complete directory
-# preserves the base image's service graph and adds only the user-bundle entry
-# and the media-policy helper service.
-COPY deployment/hermes/s6-rc.d/ /etc/s6-overlay/s6-rc.d/
+LABEL org.opencontainers.image.source="https://github.com/CRBL-Technologies/plex-media-request-mcp" \
+      org.opencontainers.image.revision="$SOURCE_COMMIT"
 
-COPY --chmod=0755 deployment/hermes/policy-helper-healthcheck.sh \
-    /opt/hermes/policy-helper-healthcheck.sh
-
-RUN /opt/hermes/.venv/bin/python -m py_compile \
-        /opt/hermes/hermes_media_extension/*.py \
-        /opt/hermes/plugins/platforms/zzzz-media-policy/__init__.py \
-    && test -f /opt/hermes/plugins/platforms/zzzz-media-policy/plugin.yaml \
-    && test -f /etc/s6-overlay/s6-rc.d/policy-helper/run \
-    && test -f /etc/s6-overlay/s6-rc.d/policy-helper/finish \
-    && test -f /etc/s6-overlay/s6-rc.d/user/contents.d/policy-helper
-
-LABEL org.opencontainers.image.title="CRBL Hermes media-policy extension" \
-      org.opencontainers.image.source="https://github.com/crbl-technologies/plex-media-request-mcp" \
-      org.opencontainers.image.revision="$SOURCE_COMMIT" \
-      org.opencontainers.image.hermes-release="2026.8.3"
-
-# The pinned deployment runs the native gateway as /init's main program.  The
-# inherited ENTRYPOINT dispatcher remains untouched, and s6 supervises only
-# its normal native services plus the policy-helper longrun copied above.
 CMD ["gateway", "run"]

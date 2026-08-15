@@ -12,7 +12,17 @@ from media_companion.cursors import (
     InvalidCursor,
     SnapshotStore,
 )
-from media_companion.models import MediaCandidate, MediaType
+from media_companion.models import (
+    MediaCandidate,
+    MediaIdentity,
+    MediaStatus,
+    MediaType,
+    PartialError,
+    QueueItem,
+    QueueState,
+    ServiceName,
+)
+from media_companion.operations import safe_operation_result
 from media_companion.rate_limit import (
     ADMIN_EXECUTION_LIMIT,
     ADMIN_PREVIEW_LIMIT,
@@ -27,6 +37,9 @@ from media_companion.safe_views import (
     PageSizeError,
     ResponseTooLargeError,
     SafePage,
+    SafeLibraryItem,
+    SafeRequestStatus,
+    SafeServiceHealth,
     SafeViewError,
     SafeViewPaginator,
     UnsafeProviderDataError,
@@ -36,6 +49,7 @@ from media_companion.safe_views import (
     normalize_page_size,
     sanitize_library_item,
     serialize_response,
+    serialize_record,
 )
 
 
@@ -258,6 +272,63 @@ class SafeViewContractTests(unittest.TestCase):
         payload = serialize_response(SafePage(items=(candidate,)))
         self.assertNotIn(b"12345", payload)
         self.assertNotIn(b"provider_id", payload)
+
+    def test_operation_allowlist_preserves_every_typed_safe_record_field(self) -> None:
+        records = (
+            MediaCandidate(
+                MediaType.SERIES,
+                411959,
+                "3 Body Problem",
+                2024,
+                "A science-fiction series.",
+                candidate_handle="A" * 43,
+            ),
+            QueueItem(
+                ServiceName.SONARR,
+                "3 Body Problem S01E01",
+                QueueState.DOWNLOADING,
+                progress_percent=42.5,
+                eta_seconds=600,
+                error="waiting",
+                media_type=MediaType.SERIES,
+            ),
+            SafeLibraryItem(
+                MediaType.MOVIE,
+                "Dune",
+                year=2021,
+                library_name="Movies",
+                quality="2160p",
+                added_at=datetime(2026, 8, 15, tzinfo=timezone.utc),
+            ),
+            MediaStatus(
+                MediaIdentity(MediaType.MOVIE, tmdb_id=438631, provider_id="438631"),
+                True,
+                title="Dune",
+                year=2021,
+                quality="2160p",
+                as_of=datetime(2026, 8, 15, tzinfo=timezone.utc),
+            ),
+            SafeServiceHealth(ServiceName.RADARR, True, version="6.0", message="ready"),
+            SafeRequestStatus(
+                "Dune",
+                MediaType.MOVIE,
+                "downloading",
+                year=2021,
+                progress_percent=50,
+                eta_seconds=300,
+                quality="2160p",
+            ),
+        )
+        error = PartialError(ServiceName.SONARR, "queue_unavailable", "temporary", True)
+        for record in records:
+            with self.subTest(record=type(record).__name__):
+                expected = serialize_record(record)
+                result = safe_operation_result(
+                    SafePage(items=(record,), partial_errors=(error,)),
+                    tool="search_media",
+                )
+                self.assertEqual(result["items"][0], expected)
+                self.assertEqual(result["partial_errors"][0], serialize_record(error))
 
     def test_paths_and_uri_schemes_are_rejected_from_untrusted_text(self) -> None:
         for title in (r"\\nas\share\movie", "ssh://nas/movie", "custom:payload"):

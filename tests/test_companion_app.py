@@ -8,6 +8,7 @@ import hmac
 import json
 import time
 from collections.abc import Mapping
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -29,10 +30,18 @@ from media_companion.auth import (  # noqa: E402
     InMemoryConfirmationTokenStore,
     InMemoryNonceReplayStore,
 )
+from media_companion.models import (  # noqa: E402
+    MediaCandidate,
+    MediaType,
+    RequestMode,
+    RequestStatus,
+)
 from media_companion.operations import (  # noqa: E402
     CompanionRuntime,
     DurableStoreRequiredError,
 )
+from media_companion.safe_views import SafePage  # noqa: E402
+from media_companion.requests import RequestIntent, RequestWorkflowResult  # noqa: E402
 from media_companion.tool_policy import (  # noqa: E402
     SHARED_TOOL_SET,
     UPSTREAM_TOOL_SET,
@@ -241,6 +250,20 @@ def test_missing_duplicate_and_replayed_actor_are_denied() -> None:
 
 def test_safe_operation_is_a_typed_mcp_result_decoded_by_hermes() -> None:
     runtime, _calls = _runtime()
+    runtime.mutation_guard = SimpleNamespace(claim=lambda **_kwargs: True)
+    handle = "A" * 43
+    runtime.safe_handlers["search_media"] = lambda *_args, **_kwargs: SafePage(
+        items=(
+            MediaCandidate(
+                MediaType.SERIES,
+                411959,
+                "3 Body Problem",
+                year=2024,
+                candidate_handle=handle,
+            ),
+        ),
+        total=1,
+    )
     app = create_app(runtime)
     args = {"query": "3 Body Problem", "media_type": "series"}
     body = _mcp_body(41, "search_media", args)
@@ -258,11 +281,58 @@ def test_safe_operation_is_a_typed_mcp_result_decoded_by_hermes() -> None:
     result = _decode_result("search_media", payload)
     assert result.is_error is False
     assert result.content == ("search_media completed; use the structured result.",)
-    assert result.structured_content == {
-        "ok": True,
-        "result": {"media_type": "series"},
-        "tool": "search_media",
+    assert result.structured_content is not None
+    assert result.structured_content["items"] == [
+        {
+            "media_type": "series",
+            "title": "3 Body Problem",
+            "year": 2024,
+            "candidate_handle": handle,
+        }
+    ]
+    assert "provider_id" not in result.structured_content["items"][0]
+    assert result.structured_content["total"] == 1
+    assert result.structured_content["tool"] == "search_media"
+
+    runtime.safe_handlers["request_series"] = lambda *_args, **_kwargs: (
+        RequestWorkflowResult(
+            RequestIntent(
+                request_id=7,
+                request_key="series:411959:1",
+                idempotency_key="telegram-update-41",
+                media_type=MediaType.SERIES,
+                provider_id=411959,
+                title="3 Body Problem",
+                year=2024,
+                seasons=(1,),
+                actor=None,
+                mode=RequestMode.SEASON_COMPLETION,
+                status=RequestStatus.ACCEPTED,
+            ),
+            created=True,
+        )
+    )
+    request_args = {
+        "candidate_handle": handle,
+        "seasons": [1],
+        "idempotency_key": "telegram-update-41",
     }
+    request_status, request_payload = _call(
+        app,
+        MCP_PATH,
+        body=_mcp_body(42, "request_series", request_args),
+        headers={
+            "content-type": "application/json",
+            "x-crbl-actor": _actor("request_series", request_args, update_id=41),
+        },
+    )
+    assert request_status == 200
+    assert request_payload is not None
+    request_result = _decode_result("request_series", request_payload)
+    assert request_result.structured_content is not None
+    assert request_result.structured_content["title"] == "3 Body Problem"
+    assert request_result.structured_content["seasons"] == [1]
+    assert request_result.structured_content["status"] == "accepted"
 
 
 def test_exact_args_and_tool_binding_default_deny() -> None:

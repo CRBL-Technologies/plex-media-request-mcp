@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
+from urllib.parse import urlsplit
 
 from .config import Config
 from .constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
@@ -97,6 +98,31 @@ def _bool(value: object) -> bool:
     return value is True
 
 
+def _poster_url(item: dict[str, Any]) -> str | None:
+    """Return the provider's public poster URL, never its private relative path."""
+
+    candidates: list[object] = [item.get("remotePoster")]
+    images = item.get("images")
+    if isinstance(images, list):
+        candidates.extend(
+            image.get("remoteUrl")
+            for image in images
+            if isinstance(image, dict) and image.get("coverType") == "poster"
+        )
+    for candidate in candidates:
+        if not isinstance(candidate, str) or len(candidate) > 2048:
+            continue
+        parsed = urlsplit(candidate)
+        if (
+            parsed.scheme == "https"
+            and parsed.hostname
+            and parsed.username is None
+            and parsed.password is None
+        ):
+            return candidate
+    return None
+
+
 def _season_numbers(item: dict[str, Any]) -> list[int]:
     raw = item.get("seasons")
     if not isinstance(raw, list):
@@ -123,6 +149,7 @@ def _movie_candidate(item: dict[str, Any]) -> dict[str, Any] | None:
         "title": title,
         "year": _year(_first(item, "year", "releaseDate", "inCinemas")),
         "overview": str(item.get("overview") or "")[:1000],
+        "poster_url": _poster_url(item),
         "in_radarr": isinstance(radarr_id, int) and radarr_id > 0,
         "downloaded": _bool(item.get("hasFile")),
     }
@@ -140,6 +167,7 @@ def _series_candidate(item: dict[str, Any]) -> dict[str, Any] | None:
         "title": title,
         "year": _year(_first(item, "year", "firstAired")),
         "overview": str(item.get("overview") or "")[:1000],
+        "poster_url": _poster_url(item),
         "seasons": _season_numbers(item),
         "in_sonarr": isinstance(sonarr_id, int) and sonarr_id > 0,
         "status": str(item.get("status") or "unknown")[:40],
@@ -148,7 +176,12 @@ def _series_candidate(item: dict[str, Any]) -> dict[str, Any] | None:
 
 SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
     "search_media": {
-        "description": "Search Radarr and Sonarr for a movie or series.",
+        "description": (
+            "Search Radarr and Sonarr for a movie or series. Results include poster_url "
+            "when available; show the selected result's poster on Telegram with "
+            "MEDIA:<poster_url>. If in_sonarr is false, say the series is not yet managed "
+            "in Sonarr rather than saying episode availability was not reported."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {

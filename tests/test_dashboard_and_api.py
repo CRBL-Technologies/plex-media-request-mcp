@@ -88,6 +88,7 @@ def test_roles_and_no_selection_token(config: Config) -> None:
                 "title": "A Movie",
                 "year": 2026,
                 "overview": "Summary",
+                "remotePoster": "https://image.tmdb.org/t/p/original/poster.jpg",
             }
         ]
     }
@@ -123,6 +124,7 @@ def test_roles_and_no_selection_token(config: Config) -> None:
         assert response.status_code == 200
         candidate = response.json()["result"]["results"][0]
         assert candidate["tmdb_id"] == 123
+        assert candidate["poster_url"] == "https://image.tmdb.org/t/p/original/poster.jpg"
         assert "selection_token" not in json.dumps(response.json())
 
         denied = client.post(
@@ -453,6 +455,27 @@ def test_plex_webhook_accepts_existing_capability_path(config: Config) -> None:
         assert response.json() == {"accepted": True}
 
 
+def test_plex_webhook_accepts_new_show(config: Config) -> None:
+    app = create_app(config)
+    payload = {
+        "event": "library.new",
+        "Metadata": {
+            "type": "show",
+            "ratingKey": "10537",
+            "title": "3 Body Problem",
+            "Guid": [{"id": "tvdb://411959"}],
+        },
+    }
+    token = "plex-hook-secret-with-at-least-32-bytes"
+    with TestClient(app) as client:
+        response = client.post(f"/private/plex/{token}", json=payload)
+        assert response.json() == {"accepted": True}
+        event = app.state.runtime.store.pending_media_events(int(time.time()) + 10)[0]
+        assert event["media_type"] == "series"
+        assert event["external_id"] == 411959
+        assert event["show_title"] == "3 Body Problem"
+
+
 def test_rejects_oversized_request_before_parsing(config: Config) -> None:
     app = create_app(config)
     with TestClient(app) as client:
@@ -605,3 +628,78 @@ async def test_episode_enrichment_retries_before_requester_notification(config: 
         assert sent == [9001]
         await runtime.notifications.flush()
         assert sent == [9001, 1001]
+
+
+async def test_new_show_webhook_reaches_admin_and_requester(config: Config) -> None:
+    app = create_app(config)
+    sent: list[tuple[int, str]] = []
+    with TestClient(app):
+        runtime = app.state.runtime
+        runtime.store.record_request(
+            media_type="series",
+            external_id=411959,
+            seasons=(1,),
+            title="3 Body Problem",
+            year=2024,
+            actor=Actor(user_id=1001, chat_id=1001),
+        )
+        runtime.store.add_media_event(
+            event_key="show:10537",
+            media_type="series",
+            external_id=411959,
+            rating_key="10537",
+            title="3 Body Problem",
+            show_title="3 Body Problem",
+            season_number=None,
+            episode_number=None,
+            plex_url="https://app.plex.tv/show",
+            observed_at=int(time.time()) - 10,
+        )
+
+        async def capture(chat_id: int, text: str, _url: str) -> None:
+            sent.append((chat_id, text))
+
+        runtime.notifications._send = capture  # type: ignore[method-assign]
+        await runtime.notifications.flush()
+        assert {item[0] for item in sent} == {1001, 9001}
+        assert all("Season 1" in item[1] for item in sent)
+
+
+async def test_season_batch_waits_until_the_latest_episode_is_quiet(config: Config) -> None:
+    app = create_app(config)
+    sent: list[int] = []
+    with TestClient(app):
+        runtime = app.state.runtime
+        runtime.store.add_media_event(
+            event_key="episode:old",
+            media_type="series",
+            external_id=411959,
+            rating_key="1",
+            title="Episode 1",
+            show_title="3 Body Problem",
+            season_number=1,
+            episode_number=1,
+            parent_rating_key="10537",
+            plex_url="https://app.plex.tv/1",
+            observed_at=int(time.time()) - 10,
+        )
+        runtime.store.add_media_event(
+            event_key="episode:young",
+            media_type="series",
+            external_id=411959,
+            rating_key="2",
+            title="Episode 2",
+            show_title="3 Body Problem",
+            season_number=1,
+            episode_number=2,
+            parent_rating_key="10537",
+            plex_url="https://app.plex.tv/2",
+            observed_at=int(time.time()),
+        )
+
+        async def capture(chat_id: int, _text: str, _url: str) -> None:
+            sent.append(chat_id)
+
+        runtime.notifications._send = capture  # type: ignore[method-assign]
+        await runtime.notifications.flush()
+        assert sent == []

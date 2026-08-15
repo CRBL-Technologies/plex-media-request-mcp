@@ -425,6 +425,22 @@ class Store:
                 chats.add(int(row["chat_id"]))
         return chats
 
+    def requested_seasons(self, external_id: int) -> set[int]:
+        """Return outstanding requested seasons for one series."""
+
+        with self._db() as db:
+            rows = db.execute(
+                """SELECT seasons FROM requests
+                WHERE media_type='series' AND external_id=? AND state='requested'""",
+                (external_id,),
+            ).fetchall()
+        result: set[int] = set()
+        for row in rows:
+            result.update(
+                item for item in json.loads(row["seasons"]) if isinstance(item, int) and item > 0
+            )
+        return result
+
     def mark_movie_available(self, external_id: int) -> None:
         now = int(time.time())
         with self._db() as db:

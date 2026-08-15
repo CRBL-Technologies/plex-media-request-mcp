@@ -19,8 +19,22 @@ services:
       - no-new-privileges:true
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=64m
-    env_file:
-      - "${UPSTREAM_ENV_FILE:?UPSTREAM_ENV_FILE must name the canonical upstream.env}"
+    # Portainer must not parse a host-side env_file.  The upstream image is
+    # pinned to Deno 2.6.0; load the one canonical dotenv from inside the
+    # container while preserving the image's original entrypoint and CMD.
+    entrypoint:
+      - deno
+      - run
+      - --env-file=/run/media-secrets/upstream.env
+      - --allow-read
+      - --allow-write
+      - --allow-env
+      - --allow-run
+      - --allow-net
+      - packages/media-server-mcp/src/index.ts
+    command: ["--http", "--host", "0.0.0.0", "--port", "3000"]
+    volumes:
+      - "${UPSTREAM_ENV_FILE:?UPSTREAM_ENV_FILE must name upstream.env}:/run/media-secrets/upstream.env:ro"
     environment:
       UMASK: "0077"
       MCP_HOST: 0.0.0.0
@@ -65,13 +79,29 @@ services:
       - no-new-privileges:true
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=128m
-    env_file:
-      - "${COMPANION_ENV_FILE:?COMPANION_ENV_FILE must name the canonical companion.env}"
     environment:
       UMASK: "0077"
       MEDIA_COMPANION_HOST: 0.0.0.0
       MEDIA_COMPANION_MCP_PORT: "18080"
       MEDIA_COMPANION_UPSTREAM_URL: http://media-server-mcp:3000
+      # Non-secret companion settings are explicit Compose environment values
+      # so Portainer never has to stat a host-side env_file.  Empty optional
+      # selectors preserve the typed defaults; production may set them in the
+      # Portainer stack environment without duplicating credentials.
+      MEDIA_COMPANION_DB_PATH: /opt/data/state/media_requests.sqlite3
+      MEDIA_COMPANION_PLEX_LIBRARY_NAMES: "${MEDIA_COMPANION_PLEX_LIBRARY_NAMES:-}"
+      MEDIA_COMPANION_PLEX_SERVER_UUID: "${MEDIA_COMPANION_PLEX_SERVER_UUID:-}"
+      MEDIA_COMPANION_PLEX_MACHINE_IDENTIFIER: "${MEDIA_COMPANION_PLEX_MACHINE_IDENTIFIER:-}"
+      MEDIA_COMPANION_RADARR_QUALITY_PROFILE_ID: "${MEDIA_COMPANION_RADARR_QUALITY_PROFILE_ID:-}"
+      MEDIA_COMPANION_RADARR_QUALITY_PROFILE_NAME: "${MEDIA_COMPANION_RADARR_QUALITY_PROFILE_NAME:-}"
+      MEDIA_COMPANION_RADARR_ROOT_FOLDER_PATH: "${MEDIA_COMPANION_RADARR_ROOT_FOLDER_PATH:-}"
+      MEDIA_COMPANION_RADARR_TAG_IDS: "${MEDIA_COMPANION_RADARR_TAG_IDS:-}"
+      MEDIA_COMPANION_SONARR_NORMAL_QUALITY_PROFILE_ID: "${MEDIA_COMPANION_SONARR_NORMAL_QUALITY_PROFILE_ID:-}"
+      MEDIA_COMPANION_SONARR_NORMAL_QUALITY_PROFILE_NAME: "${MEDIA_COMPANION_SONARR_NORMAL_QUALITY_PROFILE_NAME:-}"
+      MEDIA_COMPANION_SONARR_ANIME_QUALITY_PROFILE_ID: "${MEDIA_COMPANION_SONARR_ANIME_QUALITY_PROFILE_ID:-}"
+      MEDIA_COMPANION_SONARR_ANIME_QUALITY_PROFILE_NAME: "${MEDIA_COMPANION_SONARR_ANIME_QUALITY_PROFILE_NAME:-}"
+      MEDIA_COMPANION_SONARR_ROOT_FOLDER_PATH: "${MEDIA_COMPANION_SONARR_ROOT_FOLDER_PATH:-}"
+      MEDIA_COMPANION_SONARR_TAG_IDS: "${MEDIA_COMPANION_SONARR_TAG_IDS:-}"
       # The companion parses only approved provider URL selectors from the
       # mounted upstream dotenv; Docker never imports that file as env_file.
       MEDIA_COMPANION_PROVIDER_ENV_FILE: /run/media-secrets/upstream.env
@@ -122,14 +152,13 @@ services:
   hermes-media:
     image: "${HERMES_MEDIA_IMAGE:?HERMES_MEDIA_IMAGE must be a verified digest reference}"
     restart: unless-stopped
-    read_only: true
-    cap_drop:
-      - ALL
     security_opt:
       - no-new-privileges:true
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=128m
-      - /run:rw,noexec,nosuid,nodev,size=64m
+      # s6 and the native Hermes runtime execute helpers from /run; an
+      # explicit exec flag is required when the rest of the root is hardened.
+      - /run:rw,exec,nosuid,nodev,size=64m
     environment:
       UMASK: "0077"
       # The pinned image's s6 dispatcher owns PID 1 and performs the native
@@ -168,12 +197,9 @@ services:
       - "8787"
     healthcheck:
       test:
-        - CMD-SHELL
-        - >-
-          test "$$HERMES_DASHBOARD" = "false" &&
-          test -f /opt/hermes/plugins/platforms/media-policy/plugin.yaml &&
-          test -x /opt/hermes/policy-helper-healthcheck.sh &&
-          /opt/hermes/policy-helper-healthcheck.sh
+        - CMD
+        - /bin/sh
+        - /opt/hermes/policy-helper-healthcheck.sh
       interval: 30s
       timeout: 5s
       start_period: 20s
@@ -191,19 +217,24 @@ services:
       - no-new-privileges:true
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=64m
-    env_file:
-      - "${DASHBOARD_AUTH_ENV_FILE:?DASHBOARD_AUTH_ENV_FILE must name dashboard-auth.env}"
     environment:
       UMASK: "0077"
       MEDIA_DASHBOARD_HOST: 0.0.0.0
       MEDIA_DASHBOARD_PORT: "18082"
       MEDIA_DASHBOARD_COMPANION_URL: http://media-companion:18080
+      # Origins are non-secret deployment policy.  The mounted canonical
+      # dashboard-auth.env contains only the raw password hash, not dotenv
+      # assignments, so Portainer never has to parse it.
+      MEDIA_DASHBOARD_ALLOWED_ORIGINS: "${MEDIA_DASHBOARD_ALLOWED_ORIGINS:?MEDIA_DASHBOARD_ALLOWED_ORIGINS must list the LAN/Tailscale dashboard origins}"
+      MEDIA_DASHBOARD_SECURE_COOKIES: "false"
+      MEDIA_DASHBOARD_PASSWORD_HASH_FILE: /run/media-secrets/dashboard-auth.env
       MEDIA_DASHBOARD_API_KEY_FILE: /run/media-secrets/dashboard-api.key
     ports:
       # LAN/Tailscale access only.  WAN reachability remains a NAS firewall and
       # router concern; this stack adds no Cloudflare route or NAT rule.
       - "18082:18082"
     volumes:
+      - "${DASHBOARD_AUTH_ENV_FILE:?DASHBOARD_AUTH_ENV_FILE must name dashboard-auth.env}:/run/media-secrets/dashboard-auth.env:ro"
       - "${DASHBOARD_API_KEY_FILE:?DASHBOARD_API_KEY_FILE must name dashboard-api.key}:/run/media-secrets/dashboard-api.key:ro"
     networks:
       media-dashboard-backend: {}

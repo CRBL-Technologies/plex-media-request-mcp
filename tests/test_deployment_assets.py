@@ -48,6 +48,7 @@ def _release_env() -> dict[str, str]:
         "ACTOR_SIGNING_KEY_FILE": "/volume2/docker/hermes-media/secrets/actor-signing.key",
         "DASHBOARD_API_KEY_FILE": "/volume2/docker/hermes-media/secrets/dashboard-api.key",
         "DASHBOARD_AUTH_ENV_FILE": "/volume2/docker/hermes-media/secrets/dashboard-auth.env",
+        "MEDIA_DASHBOARD_ALLOWED_ORIGINS": "http://localhost:18082",
     }
 
 
@@ -128,9 +129,16 @@ def test_companion_selects_provider_urls_without_upstream_env_injection() -> Non
     assert companion["environment"]["MEDIA_COMPANION_PROVIDER_ENV_FILE"] == (
         "/run/media-secrets/upstream.env"
     )
-    assert companion["env_file"] == [
-        "/volume2/docker/hermes-media/secrets/companion.env"
-    ]
+    assert "env_file" not in companion
+    assert companion["environment"]["MEDIA_COMPANION_DB_PATH"] == (
+        "/opt/data/state/media_requests.sqlite3"
+    )
+    assert "MEDIA_COMPANION_RADARR_QUALITY_PROFILE_ID" in companion["environment"]
+    assert "MEDIA_COMPANION_SONARR_TAG_IDS" in companion["environment"]
+    assert any(
+        mount.endswith(":/run/media-secrets/companion.env:ro")
+        for mount in companion["volumes"]
+    )
     assert all("hermes.env" not in mount for mount in companion["volumes"])
     assert "MEDIA_COMPANION_TELEGRAM_BOT_TOKEN_FILE" not in companion["environment"]
 
@@ -144,6 +152,42 @@ def test_upstream_service_selects_the_canonical_102_tool_inventory() -> None:
     assert upstream["environment"]["TOOL_PROFILE"] == "full"
     assert upstream["environment"]["TOOL_INCLUDE"] == (
         "tmdb_get_movie_credits,tmdb_get_tv_credits"
+    )
+    assert "env_file" not in upstream
+    assert upstream["entrypoint"] == [
+        "deno",
+        "run",
+        "--env-file=/run/media-secrets/upstream.env",
+        "--allow-read",
+        "--allow-write",
+        "--allow-env",
+        "--allow-run",
+        "--allow-net",
+        "packages/media-server-mcp/src/index.ts",
+    ]
+    assert upstream["command"] == ["--http", "--host", "0.0.0.0", "--port", "3000"]
+    assert any(
+        mount.endswith(":/run/media-secrets/upstream.env:ro")
+        for mount in upstream["volumes"]
+    )
+
+
+def test_dashboard_uses_raw_hash_file_and_environment_origins() -> None:
+    rendered = render_template(
+        DEFAULT_COMPOSE.read_text(encoding="utf-8"), _release_env()
+    )
+    compose = yaml.safe_load(rendered)
+    dashboard = compose["services"]["media-request-dashboard"]
+    assert "env_file" not in dashboard
+    assert dashboard["environment"]["MEDIA_DASHBOARD_ALLOWED_ORIGINS"] == (
+        "http://localhost:18082"
+    )
+    assert dashboard["environment"]["MEDIA_DASHBOARD_PASSWORD_HASH_FILE"] == (
+        "/run/media-secrets/dashboard-auth.env"
+    )
+    assert any(
+        mount.endswith(":/run/media-secrets/dashboard-auth.env:ro")
+        for mount in dashboard["volumes"]
     )
 
 
@@ -170,10 +214,18 @@ def test_hermes_preserves_native_s6_pid1_and_worker_remap() -> None:
     assert "init" not in hermes
     assert hermes["environment"]["HERMES_UID"] == "1000"
     assert hermes["environment"]["HERMES_GID"] == "1000"
+    assert "read_only" not in hermes
+    assert "cap_drop" not in hermes
     assert "entrypoint" not in hermes
     assert hermes["command"] == ["gateway", "run"]
-    assert any(item.startswith("/run:") for item in hermes["tmpfs"])
-    assert "policy-helper-healthcheck.sh" in " ".join(hermes["healthcheck"]["test"])
+    assert any(
+        item.startswith("/run:") and ",exec," in item for item in hermes["tmpfs"]
+    )
+    assert hermes["healthcheck"]["test"] == [
+        "CMD",
+        "/bin/sh",
+        "/opt/hermes/policy-helper-healthcheck.sh",
+    ]
     assert hermes["environment"]["TOOL_PROFILE"] == "full"
     assert hermes["environment"]["TOOL_INCLUDE"] == (
         "tmdb_get_movie_credits,tmdb_get_tv_credits"
@@ -190,8 +242,9 @@ def test_hermes_derived_dockerfile_is_digest_pinned_and_preserves_dispatcher() -
     assert "COPY src/media_companion /app/src/media_companion" in text
     assert (
         "COPY deployment/hermes/plugins/platforms/media-policy "
-        "/opt/hermes/plugins/platforms/media-policy"
+        "/opt/hermes/plugins/platforms/zzzz-media-policy"
     ) in text
+    assert "S6_BEHAVIOUR_IF_STAGE2_FAILS=2" in text
     assert "/etc/cont-init.d/03-media-policy-contract" in text
     assert "COPY deployment/hermes/s6-rc.d/ /etc/s6-overlay/s6-rc.d/" in text
     assert "/opt/hermes/policy-helper-healthcheck.sh" in text

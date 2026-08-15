@@ -57,7 +57,11 @@ EXPECTED_PLATFORM_REGISTRY_SHA256 = (
 )
 EXPECTED_TOOL_INVENTORY = TOOL_INVENTORY
 EXPECTED_CALLBACK_PREFIX = CALLBACK_PREFIX
-DEFAULT_PLUGIN_DIR = Path("/opt/hermes/plugins/platforms/media-policy")
+# Keep the derived plugin after Hermes' bundled ``telegram`` directory.  The
+# pinned Hermes v2026.8.3 platform registry stores one deferred loader per
+# platform and the final registration wins; installing this directory last is
+# what makes the CRBL loader the one that resolves for ``telegram``.
+DEFAULT_PLUGIN_DIR = Path("/opt/hermes/plugins/platforms/zzzz-media-policy")
 DEFAULT_KEY_ENV_NAMES = ("CRBL_ACTOR_SIGNING_KEY_FILE", "ACTOR_SIGNING_KEY_FILE")
 DEFAULT_HELPER_KEY_ENV_NAMES = (
     "CRBL_POLICY_HELPER_KEY_FILE",

@@ -61,6 +61,23 @@ _NETWORK_NAMES = frozenset(
 _PRIVATE_NETWORKS = frozenset(_NETWORK_NAMES - {"media"})
 _MEDIA_BOT_SUBNET = "172.30.40.0/24"
 _MEDIA_BOT_GATEWAY = "172.30.40.1"
+_UPSTREAM_ENTRYPOINT = (
+    "deno",
+    "run",
+    "--env-file=/run/media-secrets/upstream.env",
+    "--allow-read",
+    "--allow-write",
+    "--allow-env",
+    "--allow-run",
+    "--allow-net",
+    "packages/media-server-mcp/src/index.ts",
+)
+_UPSTREAM_COMMAND = ("--http", "--host", "0.0.0.0", "--port", "3000")
+_HERMES_HEALTHCHECK = (
+    "CMD",
+    "/bin/sh",
+    "/opt/hermes/policy-helper-healthcheck.sh",
+)
 _EXPECTED_MEMBERSHIPS: dict[str, frozenset[str]] = {
     "hermes-media": frozenset({"media-bot"}),
     "media-companion": frozenset(
@@ -374,7 +391,15 @@ def validate_compose_document(document: Mapping[str, Any]) -> ValidationResult:
                 )
         elif service.get("user") != "1000:1000":
             errors.append(f"service {service_name} must run as UID/GID 1000")
-        if service.get("read_only") is not True:
+        if service_name == "hermes-media":
+            # Hermes' native s6 runtime needs a writable root and its own
+            # capability set.  Compose must not re-apply the generic
+            # read-only/drop-all hardening used by the Python services.
+            if service.get("read_only") is True:
+                errors.append("Hermes must use a writable root filesystem")
+            if "cap_drop" in service:
+                errors.append("Hermes must not define cap_drop")
+        elif service.get("read_only") is not True:
             errors.append(
                 f"service {service_name} must use a read-only root filesystem"
             )
@@ -395,7 +420,7 @@ def validate_compose_document(document: Mapping[str, Any]) -> ValidationResult:
                 f"service {service_name} must not contain inline secret values"
             )
         capabilities = {item.upper() for item in _string_list(service.get("cap_drop"))}
-        if "ALL" not in capabilities:
+        if service_name != "hermes-media" and "ALL" not in capabilities:
             errors.append(f"service {service_name} must drop all capabilities")
         security = set(_string_list(service.get("security_opt")))
         if "no-new-privileges:true" not in security:
@@ -449,26 +474,29 @@ def validate_compose_document(document: Mapping[str, Any]) -> ValidationResult:
         elif ports:
             errors.append(f"service {service_name} must not publish host ports")
 
-        env_file = _string_list(service.get("env_file"))
-        expected_env_file = {
-            "media-server-mcp": "upstream.env",
-            "media-companion": "companion.env",
-            "media-request-dashboard": "dashboard-auth.env",
-        }.get(service_name)
-        if expected_env_file is None:
-            if env_file:
-                errors.append(
-                    "Hermes must load its native policy file from /opt/data/.env"
-                )
-        elif len(env_file) != 1 or Path(env_file[0]).name != expected_env_file:
-            errors.append(
-                f"service {service_name} must use only canonical {expected_env_file}"
-            )
+        if "env_file" in service:
+            errors.append(f"service {service_name} must not use a host-side env_file")
 
-        if service_name == "media-server-mcp" and _mounts(service):
-            errors.append(
-                "upstream must not mount companion/Hermes state or credentials"
+        if service_name == "media-server-mcp":
+            if _string_list(service.get("entrypoint")) != _UPSTREAM_ENTRYPOINT:
+                errors.append(
+                    "upstream must invoke Deno with the explicit "
+                    "--env-file=/run/media-secrets/upstream.env entrypoint"
+                )
+            if _string_list(service.get("command")) != _UPSTREAM_COMMAND:
+                errors.append(
+                    "upstream must run the reviewed HTTP command on port 3000"
+                )
+            _require_mount(
+                service_name,
+                service,
+                target="/run/media-secrets/upstream.env",
+                mode="ro",
+                source_basename="upstream.env",
+                errors=errors,
             )
+            if len(_mounts(service)) != 1:
+                errors.append("upstream must mount only its canonical upstream.env")
         elif service_name == "media-companion":
             if (
                 not isinstance(environment, Mapping)
@@ -523,6 +551,31 @@ def validate_compose_document(document: Mapping[str, Any]) -> ValidationResult:
                 errors=errors,
             )
         elif service_name == "media-request-dashboard":
+            if (
+                not isinstance(environment, Mapping)
+                or not str(
+                    environment.get("MEDIA_DASHBOARD_ALLOWED_ORIGINS", "")
+                ).strip()
+            ):
+                errors.append(
+                    "dashboard must provide non-empty allowed origins in Compose environment"
+                )
+            if (
+                not isinstance(environment, Mapping)
+                or environment.get("MEDIA_DASHBOARD_PASSWORD_HASH_FILE")
+                != "/run/media-secrets/dashboard-auth.env"
+            ):
+                errors.append(
+                    "dashboard must read its password hash from the mounted dashboard-auth.env"
+                )
+            _require_mount(
+                service_name,
+                service,
+                target="/run/media-secrets/dashboard-auth.env",
+                mode="ro",
+                source_basename="dashboard-auth.env",
+                errors=errors,
+            )
             _require_mount(
                 service_name,
                 service,
@@ -551,21 +604,35 @@ def validate_compose_document(document: Mapping[str, Any]) -> ValidationResult:
             errors.append("Hermes must not expose/listen on port 9119")
         if _string_list(hermes.get("expose")) != ("8787",):
             errors.append("Hermes policy helper must expose only internal port 8787")
-        if not any(
-            item.split(":", 1)[0] == "/run"
+        run_tmpfs = [
+            item
             for item in _string_list(hermes.get("tmpfs"))
-        ):
+            if item.split(":", 1)[0] == "/run"
+        ]
+        if not run_tmpfs:
             errors.append("Hermes must provide a bounded /run tmpfs for s6 state")
+        elif not any(
+            len(item.split(":", 1)) == 2
+            and "exec" in item.split(":", 1)[1].split(",")
+            and "noexec" not in item.split(":", 1)[1].split(",")
+            for item in run_tmpfs
+        ):
+            errors.append("Hermes /run tmpfs must explicitly permit execution")
         if (
             not isinstance(environment, Mapping)
             or str(environment.get("HERMES_UID", "")) != "1000"
             or str(environment.get("HERMES_GID", "")) != "1000"
         ):
             errors.append("Hermes must remap its native workers to UID/GID 1000")
-        healthcheck_text = " ".join(_walk_strings(hermes.get("healthcheck", {})))
-        if "policy-helper-healthcheck.sh" not in healthcheck_text:
+        healthcheck = hermes.get("healthcheck")
+        healthcheck_test = (
+            _string_list(healthcheck.get("test"))
+            if isinstance(healthcheck, Mapping)
+            else ()
+        )
+        if healthcheck_test != _HERMES_HEALTHCHECK:
             errors.append(
-                "Hermes healthcheck must verify the native s6 helper/gateway contract"
+                "Hermes healthcheck must invoke /bin/sh on the native s6 helper script"
             )
 
     return ValidationResult(tuple(dict.fromkeys(errors)))

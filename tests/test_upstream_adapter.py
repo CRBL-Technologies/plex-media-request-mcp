@@ -345,7 +345,18 @@ class UpstreamAdapterTests(unittest.TestCase):
         self.assertLessEqual(timeout[1], 15.0)
         self.assertGreater(timeout[1], 0.0)
         self.assertEqual(transport.redirects, [False])
-        self.assertEqual(json.loads(payload)["method"], "tools/call")
+        request = json.loads(payload)
+        self.assertEqual(request["method"], "tools/call")
+        self.assertEqual(headers["MCP-Protocol-Version"], "2025-11-25")
+        # The pinned v2.3.0 image's 2025 compatibility path accepts the
+        # ordinary tools/call params only.  A modelcontext _meta envelope
+        # switches its validator to the modern 2026 shape and is rejected
+        # unless clientCapabilities are supplied.
+        self.assertEqual(
+            request["params"],
+            {"name": "plex_get_libraries", "arguments": {"include": "all"}},
+        )
+        self.assertNotIn("_meta", request["params"])
 
     def test_redaction_covers_canonical_and_camel_credential_assignments(self) -> None:
         for text in (

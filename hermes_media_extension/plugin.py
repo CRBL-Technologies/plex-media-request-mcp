@@ -577,7 +577,13 @@ def _build_adapter(config: object) -> MediaPolicyTelegramAdapter:
 
 
 def _tool_handler(tool: str):
-    async def handler(arguments: Mapping[str, Any]) -> dict[str, Any]:
+    async def handler(
+        arguments: Mapping[str, Any], task_id: str | None = None
+    ) -> dict[str, Any]:
+        # Hermes supplies its execution task identifier alongside the tool
+        # arguments.  It is supervisor context, not a media-tool argument, so
+        # accept it without forwarding it across the signed companion boundary.
+        del task_id
         runtime = _runtime_for()
         result = await runtime.client.call_tool_async(tool, arguments)
         if result.confirmation is not None:

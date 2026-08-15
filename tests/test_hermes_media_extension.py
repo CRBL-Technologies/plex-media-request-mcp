@@ -214,6 +214,42 @@ def test_registered_tools_use_frozen_closed_schemas_and_metadata() -> None:
         assert registration["description"] == metadata[name]["description"]
 
 
+def test_registered_tool_handler_accepts_hermes_task_id(monkeypatch) -> None:
+    registrations: list[dict[str, object]] = []
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class Context:
+        def register_platform(self, **_: object) -> None:
+            return None
+
+        def register_tool(self, **kwargs: object) -> None:
+            registrations.append(kwargs)
+
+    class Client:
+        async def call_tool_async(
+            self, tool: str, arguments: Mapping[str, object]
+        ) -> object:
+            calls.append((tool, dict(arguments)))
+            return SimpleNamespace(
+                confirmation=None,
+                to_dict=lambda: {"ok": True},
+            )
+
+    monkeypatch.setattr(
+        "hermes_media_extension.plugin._runtime_for",
+        lambda *_args, **_kwargs: SimpleNamespace(client=Client()),
+    )
+    register(Context())
+    registration = next(
+        item for item in registrations if item["name"] == "search_media"
+    )
+    handler = registration["handler"]
+    assert callable(handler)
+    result = asyncio.run(handler({"query": "Matrix"}, task_id="task-1"))
+    assert result == {"ok": True}
+    assert calls == [("search_media", {"query": "Matrix"})]
+
+
 def test_crbl_callback_is_consumed_without_delegating_to_native_catch_all() -> None:
     token = "A" * 43
     seen: list[dict[str, object]] = []

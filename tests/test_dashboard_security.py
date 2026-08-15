@@ -190,6 +190,26 @@ class DashboardHTTPTests(unittest.TestCase):
         )
         self.assertEqual(status, 400)
 
+    def test_root_redirects_unauthenticated_html_to_login(self) -> None:
+        status, headers, body = self._request("GET", "/", accept="text/html")
+        self.assertEqual(status, 303)
+        self.assertEqual(dict(headers)["Location"], "/login")
+        self.assertEqual(body, b"")
+
+        status, _headers, body = self._request(
+            "GET", "/", cookies=["dashboard_session=expired"], accept="text/html"
+        )
+        self.assertEqual(status, 303)
+        self.assertEqual(body, b"")
+
+        status, _headers, body = self._request("GET", "/")
+        self.assertEqual(status, 401)
+        self.assertEqual(json.loads(body), {"error": "request_failed"})
+
+        status, _headers, body = self._request("GET", "/login", accept="text/html")
+        self.assertEqual(status, 200)
+        self.assertIn(b'type="password"', body)
+
     def test_health_status_readiness_and_path_framing(self) -> None:
         self.assertEqual(self._request("GET", "/healthz", host="evil")[0], 200)
         self.assertEqual(self._request("GET", "/readyz", host="evil")[0], 400)

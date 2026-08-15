@@ -34,7 +34,10 @@ def verify_password(password: str, encoded: str) -> bool:
         return False
     try:
         algorithm, n, r, p, salt, expected = encoded.strip().split("$")
-        if (algorithm, n, r, p) != ("scrypt", "32768", "8", "1"):
+        if algorithm != "scrypt" or (n, r, p) not in {
+            ("16384", "8", "1"),  # Existing dashboard hashes before this rewrite.
+            ("32768", "8", "1"),
+        }:
             return False
         decoded_salt = _decode(salt)
         decoded_expected = _decode(expected)
@@ -43,9 +46,9 @@ def verify_password(password: str, encoded: str) -> bool:
         actual = hashlib.scrypt(
             password.encode(),
             salt=decoded_salt,
-            n=32768,
-            r=8,
-            p=1,
+            n=int(n),
+            r=int(r),
+            p=int(p),
             dklen=32,
             maxmem=64 * 1024 * 1024,
         )

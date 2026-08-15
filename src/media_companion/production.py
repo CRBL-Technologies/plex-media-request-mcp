@@ -1148,48 +1148,48 @@ class ProductionOperations:
         claims: object | None = None,
         **_: object,
     ) -> SafePage[Any]:
+        """Return credential-free Radarr and Sonarr connectivity.
+
+        The frozen shared-tool schema intentionally accepts no arguments for
+        ``media_status``.  Availability for a selected title is handled by the
+        search/request workflow; this endpoint reports only whether the two
+        Arr dependencies can answer their bounded system-status calls.
+        """
+
         values: list[object] = []
-        raw_type = arguments.get("media_type", arguments.get("type", "movie"))
-        media_type = (
-            MediaType.EPISODE
-            if raw_type == "episode"
-            else MediaType.SERIES
-            if raw_type in {"series", "show"}
-            else MediaType.MOVIE
-        )
-        raw_provider = arguments.get(
-            "provider_id",
-            arguments.get("tmdb_id" if media_type is MediaType.MOVIE else "tvdb_id"),
-        )
-        if (
-            isinstance(raw_provider, bool)
-            or not isinstance(raw_provider, (str, int))
-            or not str(raw_provider).strip()
+        for client, service in (
+            (self.radarr, ServiceName.RADARR),
+            (self.sonarr, ServiceName.SONARR),
         ):
-            raise ValueError("provider_id is required")
-        provider_id = str(raw_provider).strip()
-        identity = MediaIdentity(
-            media_type,
-            tmdb_id=int(provider_id)
-            if media_type is MediaType.MOVIE and provider_id.isdigit()
-            else None,
-            tvdb_id=int(provider_id)
-            if media_type in {MediaType.SERIES, MediaType.EPISODE}
-            and provider_id.isdigit()
-            else None,
-            provider_id=provider_id,
-        )
-        try:
-            result = _call(getattr(self.plex, "status_for_identity"), identity)
-            values.append(sanitize_media_status(cast(Any, result)))
-        except Exception:
-            values.append(MediaStatus(identity=identity, available=False, title=None))
+            if client is None:
+                values.append(
+                    SafeServiceHealth(service, False, message="not configured")
+                )
+                continue
+            try:
+                status = _call(getattr(client, "system_status"))
+                if not isinstance(status, Mapping):
+                    raise ValueError("service status is not typed")
+                raw_ok = status.get("is_up", True)
+                ok = raw_ok if isinstance(raw_ok, bool) else False
+                raw_version = status.get("version")
+                version = raw_version if isinstance(raw_version, str) else None
+                values.append(
+                    SafeServiceHealth(
+                        service,
+                        ok,
+                        version=version,
+                        message=None if ok else "unavailable",
+                    )
+                )
+            except Exception:
+                values.append(SafeServiceHealth(service, False, message="unavailable"))
         return self._page(
             values,
             tool="media_status",
             arguments=arguments,
             claims=claims,
-            normalize=sanitize_media_status,
+            normalize=sanitize_service_health,
             total=len(values),
         )
 

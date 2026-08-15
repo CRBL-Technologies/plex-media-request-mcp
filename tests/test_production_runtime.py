@@ -208,6 +208,9 @@ class ArrFake:
             items=(MediaCandidate(MediaType.SERIES, 20, "Fixture Series", 2026),)
         )
 
+    def system_status(self) -> dict[str, object]:
+        return {"version": "2026.8.15", "is_up": True}
+
     def find_existing_movie(self, tmdb_id: int) -> object | None:
         del tmdb_id
         return None
@@ -618,6 +621,19 @@ def test_search_issues_actor_update_bound_handle_and_requests_resolve_only_that_
             },
             claims=SimpleNamespace(**{**vars(bundle.claims), "user_id": 99}),
         )
+
+
+def test_media_status_matches_the_no_argument_shared_tool_contract(
+    tmp_path: Path,
+) -> None:
+    bundle = make_bundle(tmp_path)
+
+    page = bundle.runtime.operations.media_status({}, claims=bundle.claims)
+
+    assert [(item.service.value, item.ok, item.version) for item in page.items] == [
+        ("radarr", True, "2026.8.15"),
+        ("sonarr", True, "2026.8.15"),
+    ]
 
 
 def test_activation_needs_two_complete_passes_and_only_pass_two_new_is_obligation(

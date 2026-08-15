@@ -87,6 +87,15 @@ class Notifications:
             show_title = str(metadata.get("title") or "Untitled")[:300]
             season = None
             episode = None
+        elif kind == "season":
+            external_id = _guide_id(metadata.get("parentGuid"), "tvdb")
+            raw_parent_key = metadata.get("parentRatingKey")
+            parent_key = raw_parent_key if isinstance(raw_parent_key, str) else None
+            show_title = (
+                str(metadata.get("parentTitle"))[:300] if metadata.get("parentTitle") else None
+            )
+            season = _positive(metadata.get("index"))
+            episode = None
         else:
             external_id = _guide_id(metadata.get("grandparentGuid"), "tvdb")
             raw_parent_key = metadata.get("grandparentRatingKey")
@@ -96,8 +105,8 @@ class Notifications:
                 if metadata.get("grandparentTitle")
                 else None
             )
-            season = _positive(metadata.get("index" if kind == "season" else "parentIndex"))
-            episode = _positive(metadata.get("index")) if kind == "episode" else None
+            season = _positive(metadata.get("parentIndex"))
+            episode = _positive(metadata.get("index"))
         title = str(metadata.get("title") or "Untitled")[:300]
         encoded_key = quote(f"/library/metadata/{rating_key}", safe="")
         url = (

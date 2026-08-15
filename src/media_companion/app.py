@@ -802,7 +802,7 @@ async def _mcp_endpoint(request: Request) -> Response:
             if tool in {"request_movie", "request_series"}:
                 runtime.claim_safe_mutation(claims)
             value = await _dispatch_shared(runtime, tool, arguments, claims, policy)
-            result = safe_operation_result(value, tool=tool)
+            result = _mcp_tool_result(value, tool=tool)
         elif tool in ADMIN_TOOL_SET:
             classification = classify_admin_tool(tool)
             if classification is None:
@@ -814,7 +814,7 @@ async def _mcp_endpoint(request: Request) -> Response:
                 result = await _admin_preview(runtime, tool, arguments, claims, policy)
             else:
                 value = await _dispatch_admin_read(runtime, tool, arguments)
-                result = safe_operation_result(value, tool=tool)
+                result = _mcp_tool_result(value, tool=tool)
         else:  # pragma: no cover - exact inventory check above
             raise HTTPBoundaryError(403, code="tool_denied")
         envelope = {"jsonrpc": "2.0", "id": request_id, "result": result}
@@ -842,6 +842,32 @@ async def _mcp_endpoint(request: Request) -> Response:
             status=500,
             maximum=MAX_MCP_RESPONSE_BYTES,
         )
+
+
+def _mcp_tool_result(value: object, *, tool: str) -> dict[str, Any]:
+    """Wrap one safe operation value in the MCP ``CallToolResult`` contract.
+
+    Safe pages and workflow results are application values, not MCP result
+    envelopes.  Keeping them at the top level makes a strict MCP client see an
+    empty result because neither ``content`` nor ``structuredContent`` exists.
+    Explicit typed MCP results remain unchanged; ordinary safe values are
+    exposed once as structured content with a small deterministic text item.
+    """
+
+    safe = safe_operation_result(value, tool=tool)
+    if "content" in safe or "structuredContent" in safe:
+        return safe
+    return {
+        "content": [
+            {
+                "type": "text",
+                "text": f"{tool} completed; use the structured result.",
+            }
+        ],
+        "structuredContent": safe,
+        "isError": False,
+        "tool": tool,
+    }
 
 
 async def _helper_authenticated(request: Request, runtime: CompanionRuntime) -> None:

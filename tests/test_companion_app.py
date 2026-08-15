@@ -37,6 +37,7 @@ from media_companion.tool_policy import (  # noqa: E402
     SHARED_TOOL_SET,
     UPSTREAM_TOOL_SET,
 )
+from hermes_media_extension.companion_client import _decode_result  # noqa: E402
 
 
 ACTOR_KEY = b"a" * 32
@@ -236,6 +237,32 @@ def test_missing_duplicate_and_replayed_actor_are_denied() -> None:
     headers = {"content-type": "application/json", "x-crbl-actor": token}
     assert _call(app, MCP_PATH, body=body, headers=headers)[0] == 200
     assert _call(app, MCP_PATH, body=body, headers=headers)[0] == 403
+
+
+def test_safe_operation_is_a_typed_mcp_result_decoded_by_hermes() -> None:
+    runtime, _calls = _runtime()
+    app = create_app(runtime)
+    args = {"query": "3 Body Problem", "media_type": "series"}
+    body = _mcp_body(41, "search_media", args)
+    token = _actor("search_media", args, update_id=41)
+
+    status, payload = _call(
+        app,
+        MCP_PATH,
+        body=body,
+        headers={"content-type": "application/json", "x-crbl-actor": token},
+    )
+
+    assert status == 200
+    assert payload is not None
+    result = _decode_result("search_media", payload)
+    assert result.is_error is False
+    assert result.content == ("search_media completed; use the structured result.",)
+    assert result.structured_content == {
+        "ok": True,
+        "result": {"media_type": "series"},
+        "tool": "search_media",
+    }
 
 
 def test_exact_args_and_tool_binding_default_deny() -> None:

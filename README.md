@@ -11,12 +11,17 @@ Compose launches that image with its original entrypoint and command.
 
 ## Architecture
 
-The stack has three services:
+The media subsystem has three services:
 
 1. `media-server-mcp`: the untouched, pinned upstream MCP on an internal network;
 2. `media-gateway`: CRBL policy, safe tools, Plex notifications, SQLite state,
    and the LAN/Tailscale dashboard;
 3. `hermes-media`: the pinned Hermes image plus a thin Telegram identity adapter.
+
+The Portainer stack file also preserves the existing `hermes` and
+`hermes-accountant` services because a stack update replaces the full Compose
+document. Those agents are outside this project; this release does not change
+their behavior or data mounts.
 
 The gateway exposes exactly seven tools to an allowed Telegram user:
 

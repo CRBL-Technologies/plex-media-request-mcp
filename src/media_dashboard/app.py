@@ -900,6 +900,7 @@ class DashboardRequestHandler(http.server.BaseHTTPRequestHandler):
                 require_origin=method in {"POST", "PUT", "PATCH", "DELETE"},
                 allow_referer_fallback=login_post,
                 allow_missing_origin=login_post,
+                allow_opaque_origin=login_post,
             )
             if path == "/login":
                 if method == "GET" or method == "HEAD":
@@ -1010,6 +1011,7 @@ class DashboardRequestHandler(http.server.BaseHTTPRequestHandler):
         require_origin: bool,
         allow_referer_fallback: bool = False,
         allow_missing_origin: bool = False,
+        allow_opaque_origin: bool = False,
     ) -> None:
         host_values = self.headers.get_all("Host", [])
         if len(host_values) != 1:
@@ -1019,6 +1021,12 @@ class DashboardRequestHandler(http.server.BaseHTTPRequestHandler):
             raise DashboardHTTPError(400)
         host = host_values[0]
         origin = origin_values[0] if origin_values else None
+        # Firefox can serialize a privacy-restricted form submission's opaque
+        # origin as the literal value ``null``.  Treat it like an omitted
+        # origin only on the password login route.  The exact Host allowlist,
+        # password verification, and login rate limit remain mandatory.
+        if allow_opaque_origin and origin == "null":
+            origin = None
         if origin is None and require_origin and allow_referer_fallback:
             referer_values = self.headers.get_all("Referer", [])
             if len(referer_values) > 1:

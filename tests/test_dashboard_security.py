@@ -226,6 +226,20 @@ class DashboardHTTPTests(unittest.TestCase):
         self.assertEqual(status, 303)
         self.assertGreaterEqual(len(self._cookies(headers)), 2)
 
+        # Firefox may use an opaque origin for a privacy-restricted form. A
+        # same-origin Referer still proves the browser boundary.
+        status, headers, _ = self._request(
+            "POST",
+            "/login",
+            body="password=dashboard+password",
+            accept="text/html",
+            content_type="application/x-www-form-urlencoded",
+            origin="null",
+            referer="http://dashboard.test/login",
+        )
+        self.assertEqual(status, 303)
+        self.assertGreaterEqual(len(self._cookies(headers)), 2)
+
         # Safari and privacy-focused clients may omit both headers on a
         # same-origin form submission. The password boundary must still be
         # reachable; Host validation and login rate limiting remain active.
@@ -243,6 +257,7 @@ class DashboardHTTPTests(unittest.TestCase):
 
         for origin, referer in (
             (None, "http://evil.example/login"),
+            ("null", "http://evil.example/login"),
             ("http://evil.example", None),
         ):
             status, _headers, _ = self._request(

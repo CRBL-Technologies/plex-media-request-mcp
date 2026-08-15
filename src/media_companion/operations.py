@@ -167,6 +167,9 @@ SAFE_RESULT_KEYS: Final[frozenset[str]] = frozenset(
         "request_id",
         "subscription_id",
         "request_key",
+        # Deliberately model-visible, short-lived capability issued by the
+        # trusted search workflow. Provider identifiers remain server-side.
+        "candidate_handle",
         "created",
         "media_type",
         "provider_id",

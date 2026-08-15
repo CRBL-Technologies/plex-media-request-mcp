@@ -29,10 +29,12 @@ from media_companion.auth import (  # noqa: E402
     InMemoryConfirmationTokenStore,
     InMemoryNonceReplayStore,
 )
+from media_companion.models import MediaCandidate, MediaType  # noqa: E402
 from media_companion.operations import (  # noqa: E402
     CompanionRuntime,
     DurableStoreRequiredError,
 )
+from media_companion.safe_views import SafePage  # noqa: E402
 from media_companion.tool_policy import (  # noqa: E402
     SHARED_TOOL_SET,
     UPSTREAM_TOOL_SET,
@@ -241,6 +243,19 @@ def test_missing_duplicate_and_replayed_actor_are_denied() -> None:
 
 def test_safe_operation_is_a_typed_mcp_result_decoded_by_hermes() -> None:
     runtime, _calls = _runtime()
+    handle = "A" * 43
+    runtime.safe_handlers["search_media"] = lambda *_args, **_kwargs: SafePage(
+        items=(
+            MediaCandidate(
+                MediaType.SERIES,
+                411959,
+                "3 Body Problem",
+                year=2024,
+                candidate_handle=handle,
+            ),
+        ),
+        total=1,
+    )
     app = create_app(runtime)
     args = {"query": "3 Body Problem", "media_type": "series"}
     body = _mcp_body(41, "search_media", args)
@@ -258,11 +273,18 @@ def test_safe_operation_is_a_typed_mcp_result_decoded_by_hermes() -> None:
     result = _decode_result("search_media", payload)
     assert result.is_error is False
     assert result.content == ("search_media completed; use the structured result.",)
-    assert result.structured_content == {
-        "ok": True,
-        "result": {"media_type": "series"},
-        "tool": "search_media",
-    }
+    assert result.structured_content is not None
+    assert result.structured_content["items"] == [
+        {
+            "media_type": "series",
+            "title": "3 Body Problem",
+            "year": 2024,
+            "candidate_handle": handle,
+        }
+    ]
+    assert "provider_id" not in result.structured_content["items"][0]
+    assert result.structured_content["total"] == 1
+    assert result.structured_content["tool"] == "search_media"
 
 
 def test_exact_args_and_tool_binding_default_deny() -> None:

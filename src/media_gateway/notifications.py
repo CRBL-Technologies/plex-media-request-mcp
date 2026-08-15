@@ -134,6 +134,8 @@ class Notifications:
         raw = container.get("Metadata")
         if isinstance(raw, list):
             return [item for item in raw if isinstance(item, dict)]
+        if isinstance(raw, dict):
+            return [raw]
         return [container]
 
     async def run(self) -> None:
@@ -162,10 +164,16 @@ class Notifications:
 
     async def sync_user(self, user_id: int) -> None:
         token = self._telegram_token()
-        async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.post(
-                f"https://api.telegram.org/bot{token}/getChat", json={"chat_id": user_id}
-            )
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                response = await client.post(
+                    f"https://api.telegram.org/bot{token}/getChat", json={"chat_id": user_id}
+                )
+        except httpx.HTTPError:
+            # HTTPX exception messages include the request URL. Telegram puts
+            # the bot token in that URL, so replace the exception at this
+            # boundary before a caller can log it.
+            raise RuntimeError("Telegram identity lookup failed") from None
         if response.is_error:
             raise RuntimeError(f"Telegram identity lookup failed ({response.status_code})")
         value = response.json().get("result")
@@ -216,9 +224,9 @@ class Notifications:
         for event in events:
             if event.get("external_id") is None:
                 is_series = event.get("media_type") == "series"
-                lookup_key = (
-                    event.get("parent_rating_key") if is_series else event.get("rating_key")
-                )
+                lookup_key = event.get("rating_key")
+                if is_series and event.get("parent_rating_key"):
+                    lookup_key = event.get("parent_rating_key")
                 provider = "tvdb" if is_series else "tmdb"
                 try:
                     if not isinstance(lookup_key, str) or not lookup_key:
@@ -310,10 +318,15 @@ class Notifications:
             "disable_web_page_preview": True,
             "reply_markup": {"inline_keyboard": [[{"text": "Open in Plex", "url": plex_url}]]},
         }
-        async with httpx.AsyncClient(timeout=15) as client:
-            response = await client.post(
-                f"https://api.telegram.org/bot{token}/sendMessage", json=body
-            )
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                response = await client.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage", json=body
+                )
+        except httpx.HTTPError:
+            # Do not let a network exception copy the token-bearing request
+            # URL into the worker log.
+            raise RuntimeError("Telegram notification request failed") from None
         if response.is_error:
             # Do not raise HTTPStatusError: its message includes the bot token
             # embedded in the request URL.

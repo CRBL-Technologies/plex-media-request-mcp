@@ -4,6 +4,8 @@ import json
 import time
 from typing import Any
 
+import httpx
+import pytest
 from conftest import FakeUpstream
 from starlette.testclient import TestClient
 
@@ -690,6 +692,49 @@ async def test_new_show_webhook_reaches_admin_and_requester(config: Config) -> N
         assert all("Season 1" in item[1] for item in sent)
 
 
+async def test_new_show_without_guid_enriches_from_its_own_rating_key(
+    config: Config,
+) -> None:
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["plex_get_metadata"] = {
+        "MediaContainer": {"Metadata": {"Guid": [{"id": "tvdb://411959"}]}}
+    }
+    sent: list[int] = []
+    with TestClient(app):
+        runtime = app.state.runtime
+        runtime.notifications.upstream = fake
+        runtime.store.record_request(
+            media_type="series",
+            external_id=411959,
+            seasons=(1,),
+            title="3 Body Problem",
+            year=2024,
+            actor=Actor(user_id=1001, chat_id=1001),
+        )
+        runtime.store.add_media_event(
+            event_key="show:10537",
+            media_type="series",
+            external_id=None,
+            rating_key="10537",
+            title="3 Body Problem",
+            show_title="3 Body Problem",
+            season_number=None,
+            episode_number=None,
+            plex_url="https://app.plex.tv/show",
+            observed_at=int(time.time()) - 10,
+        )
+
+        async def capture(chat_id: int, _text: str, _url: str) -> None:
+            sent.append(chat_id)
+
+        runtime.notifications._send = capture  # type: ignore[method-assign]
+        await runtime.notifications.flush()
+
+        assert ("plex_get_metadata", {"ratingKey": "10537"}) in fake.calls
+        assert set(sent) == {1001, 9001}
+
+
 async def test_season_batch_waits_until_the_latest_episode_is_quiet(config: Config) -> None:
     app = create_app(config)
     sent: list[int] = []
@@ -728,3 +773,28 @@ async def test_season_batch_waits_until_the_latest_episode_is_quiet(config: Conf
         runtime.notifications._send = capture  # type: ignore[method-assign]
         await runtime.notifications.flush()
         assert sent == []
+
+
+async def test_telegram_network_error_does_not_expose_bot_token(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = create_app(config)
+
+    class FailingClient:
+        async def __aenter__(self) -> FailingClient:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def post(self, url: str, **_kwargs: object) -> None:
+            request = httpx.Request("POST", url)
+            raise httpx.ConnectError("connection failed", request=request)
+
+    monkeypatch.setattr(
+        "media_gateway.notifications.httpx.AsyncClient",
+        lambda **_kwargs: FailingClient(),
+    )
+    with TestClient(app), pytest.raises(RuntimeError) as captured:
+        await app.state.runtime.notifications._send(9001, "Available", "https://app.plex.tv/item")
+    assert "test-token" not in str(captured.value)

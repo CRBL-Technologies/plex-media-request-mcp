@@ -577,9 +577,7 @@ def _build_adapter(config: object) -> MediaPolicyTelegramAdapter:
 
 
 def _tool_handler(tool: str):
-    async def handler(
-        arguments: Mapping[str, Any], **runtime_context: Any
-    ) -> dict[str, Any]:
+    async def handler(arguments: Mapping[str, Any], **runtime_context: Any) -> str:
         # Hermes supplies execution metadata (currently task_id and session_id)
         # alongside the tool arguments. It is supervisor context, not media-tool
         # input, so accept it without forwarding it across the signed companion
@@ -596,7 +594,11 @@ def _tool_handler(tool: str):
                     "native Telegram adapter is unavailable for confirmation delivery"
                 )
             await deliver(result.confirmation)
-        return result.to_dict()
+        # Hermes's registry accepts string results (plus one private
+        # multimodal envelope), not arbitrary mappings.  The companion's
+        # structured response remains machine-readable JSON while satisfying
+        # the native dispatch contract.
+        return json.dumps(result.to_dict(), ensure_ascii=False, separators=(",", ":"))
 
     return handler
 

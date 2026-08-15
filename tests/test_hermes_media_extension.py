@@ -309,8 +309,54 @@ def test_registered_tool_handler_accepts_hermes_runtime_context(monkeypatch) -> 
             future_dispatch_metadata="ignored",
         )
     )
-    assert result == {"ok": True}
+    assert isinstance(result, str)
+    assert json.loads(result) == {"ok": True}
     assert calls == [("search_media", {"query": "Matrix"})]
+
+
+def test_registered_tool_handler_satisfies_hermes_result_contract(
+    monkeypatch,
+) -> None:
+    registrations: list[dict[str, object]] = []
+
+    class Context:
+        def register_platform(self, **_: object) -> None:
+            return None
+
+        def register_tool(self, **kwargs: object) -> None:
+            registrations.append(kwargs)
+
+    class Client:
+        async def call_tool_async(
+            self, _tool: str, _arguments: Mapping[str, object]
+        ) -> object:
+            return SimpleNamespace(
+                confirmation=None,
+                to_dict=lambda: {
+                    "tool": "search_media",
+                    "content": [{"type": "text", "text": "ok"}],
+                    "is_error": False,
+                    "structuredContent": {"candidates": []},
+                },
+            )
+
+    monkeypatch.setattr(
+        "hermes_media_extension.plugin._runtime_for",
+        lambda *_args, **_kwargs: SimpleNamespace(client=Client()),
+    )
+    register(Context())
+    registration = next(
+        item for item in registrations if item["name"] == "search_media"
+    )
+    handler = registration["handler"]
+    assert callable(handler)
+
+    result = asyncio.run(handler({"query": "Matrix"}))
+
+    # Mirror tools.registry.ToolRegistry._normalize_handler_result from the
+    # pinned Hermes base: normal results must be strings.
+    assert isinstance(result, str)
+    assert json.loads(result)["structuredContent"] == {"candidates": []}
 
 
 def test_crbl_callback_is_consumed_without_delegating_to_native_catch_all() -> None:
@@ -511,8 +557,11 @@ def test_role_aware_toolset_patch_seals_regular_and_admin_visibility(
 def test_pinned_extracted_hermes_tool_assembly_is_role_aware() -> None:
     assert EXTRACTED_HERMES_SOURCE is not None
     script = """
+import json
+from types import SimpleNamespace
 from hermes_cli import tools_config
 from toolsets import resolve_toolset
+import hermes_media_extension.plugin as media_plugin
 from hermes_media_extension.companion_client import policy_membership_scope
 from hermes_media_extension.companion_client import ADMIN_TOOLS, SHARED_TOOLS
 from hermes_media_extension.plugin import ADMIN_TOOLSET, SHARED_TOOLSET, register
@@ -544,6 +593,25 @@ def assembled(toolsets):
     return tools
 assert assembled(regular_tools) == set(SHARED_TOOLS)
 assert assembled(admin_tools) == set(SHARED_TOOLS + ADMIN_TOOLS)
+
+class Client:
+    async def call_tool_async(self, tool, arguments):
+        return SimpleNamespace(
+            confirmation=None,
+            to_dict=lambda: {
+                "tool": tool,
+                "content": [{"type": "text", "text": "ok"}],
+                "is_error": False,
+                "structuredContent": {"query": arguments["query"]},
+            },
+        )
+
+media_plugin._runtime_for = lambda *_args, **_kwargs: SimpleNamespace(client=Client())
+dispatched = registry.dispatch("search_media", {"query": "Matrix"})
+assert isinstance(dispatched, str)
+payload = json.loads(dispatched)
+assert "error" not in payload
+assert payload["structuredContent"] == {"query": "Matrix"}
 """
     environment = os.environ.copy()
     source = str(EXTRACTED_HERMES_SOURCE)

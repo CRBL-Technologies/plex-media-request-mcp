@@ -1772,7 +1772,16 @@ class CompanionRuntime:
                 result = _call_with_supported_arguments(
                     cast(Callable[..., object], target)
                 )
-                if inspect.isawaitable(result):
+                # A synchronous ``start()`` commonly returns the background
+                # task it just scheduled.  That task represents the worker's
+                # lifetime, not startup completion, so awaiting it here would
+                # block ASGI lifespan startup and prevent the HTTP listener
+                # from ever opening.
+                import asyncio
+
+                if isinstance(result, asyncio.Future):
+                    self._worker_task = result
+                elif inspect.isawaitable(result):
                     result = await cast(Awaitable[object], result)
                 if callable(result):
                     self._worker_stop_callback = cast(Callable[..., object], result)

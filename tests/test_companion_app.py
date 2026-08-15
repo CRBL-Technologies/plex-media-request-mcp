@@ -893,3 +893,36 @@ def test_production_runtime_rejects_in_process_auth_state() -> None:
         CompanionRuntime(
             actor_verifier=verifier, confirmation_store=InMemoryConfirmationTokenStore()
         )
+
+
+def test_background_worker_task_does_not_block_lifespan_startup() -> None:
+    class BackgroundWorker:
+        def __init__(self) -> None:
+            self.release = asyncio.Event()
+            self.task: asyncio.Task[None] | None = None
+
+        async def run(self) -> None:
+            await self.release.wait()
+
+        def start(self) -> asyncio.Task[None]:
+            self.task = asyncio.create_task(self.run())
+            return self.task
+
+        async def stop(self) -> None:
+            self.release.set()
+            if self.task is not None:
+                await self.task
+
+    async def exercise() -> None:
+        runtime, _calls = _runtime()
+        worker = BackgroundWorker()
+        runtime.worker = worker
+
+        await asyncio.wait_for(runtime.start_worker(), timeout=0.1)
+
+        assert runtime._worker_started is True
+        assert runtime._worker_task is worker.task
+        assert worker.task is not None and not worker.task.done()
+        await runtime.stop_worker()
+
+    asyncio.run(exercise())

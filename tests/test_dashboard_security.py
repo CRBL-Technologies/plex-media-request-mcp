@@ -93,11 +93,14 @@ class DashboardHTTPTests(unittest.TestCase):
         accept: str = "application/json",
         content_type: str = "application/json",
         origin: str | None = "http://dashboard.test",
+        referer: str | None = None,
         host: str = "dashboard.test",
     ) -> tuple[int, list[tuple[str, str]], bytes]:
         headers = {"Host": host, "Accept": accept}
         if origin is not None:
             headers["Origin"] = origin
+        if referer is not None:
+            headers["Referer"] = referer
         if cookies:
             headers["Cookie"] = "; ".join(cookie.split(";", 1)[0] for cookie in cookies)
         payload: bytes | None
@@ -209,6 +212,31 @@ class DashboardHTTPTests(unittest.TestCase):
         status, _headers, body = self._request("GET", "/login", accept="text/html")
         self.assertEqual(status, 200)
         self.assertIn(b'type="password"', body)
+
+    def test_login_accepts_exact_same_origin_referer_fallback(self) -> None:
+        status, headers, _ = self._request(
+            "POST",
+            "/login",
+            body="password=dashboard+password",
+            accept="text/html",
+            content_type="application/x-www-form-urlencoded",
+            origin=None,
+            referer="http://dashboard.test/login",
+        )
+        self.assertEqual(status, 303)
+        self.assertGreaterEqual(len(self._cookies(headers)), 2)
+
+        for referer in (None, "http://evil.example/login"):
+            status, _headers, _ = self._request(
+                "POST",
+                "/login",
+                body="password=dashboard+password",
+                accept="text/html",
+                content_type="application/x-www-form-urlencoded",
+                origin=None,
+                referer=referer,
+            )
+            self.assertEqual(status, 400)
 
     def test_health_status_readiness_and_path_framing(self) -> None:
         self.assertEqual(self._request("GET", "/healthz", host="evil")[0], 200)

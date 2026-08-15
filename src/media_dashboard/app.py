@@ -896,7 +896,8 @@ class DashboardRequestHandler(http.server.BaseHTTPRequestHandler):
                 self._readyz(method)
                 return
             self._validate_browser_boundary(
-                require_origin=method in {"POST", "PUT", "PATCH", "DELETE"}
+                require_origin=method in {"POST", "PUT", "PATCH", "DELETE"},
+                allow_referer_fallback=path == "/login" and method == "POST",
             )
             if path == "/login":
                 if method == "GET" or method == "HEAD":
@@ -1001,7 +1002,9 @@ class DashboardRequestHandler(http.server.BaseHTTPRequestHandler):
         if method in {"GET", "HEAD"} and length != 0:
             raise DashboardHTTPError(400)
 
-    def _validate_browser_boundary(self, *, require_origin: bool) -> None:
+    def _validate_browser_boundary(
+        self, *, require_origin: bool, allow_referer_fallback: bool = False
+    ) -> None:
         host_values = self.headers.get_all("Host", [])
         if len(host_values) != 1:
             raise DashboardHTTPError(400)
@@ -1010,6 +1013,20 @@ class DashboardRequestHandler(http.server.BaseHTTPRequestHandler):
             raise DashboardHTTPError(400)
         host = host_values[0]
         origin = origin_values[0] if origin_values else None
+        if origin is None and require_origin and allow_referer_fallback:
+            referer_values = self.headers.get_all("Referer", [])
+            if len(referer_values) != 1:
+                raise DashboardHTTPError(400)
+            referer = urlsplit(referer_values[0])
+            if (
+                referer.scheme.lower() not in {"http", "https"}
+                or not referer.netloc
+                or referer.username is not None
+                or referer.password is not None
+                or referer.fragment
+            ):
+                raise DashboardHTTPError(400)
+            origin = f"{referer.scheme.lower()}://{referer.netloc}"
         try:
             validate_request_origin(
                 host=host,

@@ -214,7 +214,7 @@ def test_registered_tools_use_frozen_closed_schemas_and_metadata() -> None:
         assert registration["description"] == metadata[name]["description"]
 
 
-def test_registered_tool_handler_accepts_hermes_task_id(monkeypatch) -> None:
+def test_registered_tool_handler_accepts_hermes_runtime_context(monkeypatch) -> None:
     registrations: list[dict[str, object]] = []
     calls: list[tuple[str, dict[str, object]]] = []
 
@@ -245,7 +245,14 @@ def test_registered_tool_handler_accepts_hermes_task_id(monkeypatch) -> None:
     )
     handler = registration["handler"]
     assert callable(handler)
-    result = asyncio.run(handler({"query": "Matrix"}, task_id="task-1"))
+    result = asyncio.run(
+        handler(
+            {"query": "Matrix"},
+            task_id="task-1",
+            session_id="session-1",
+            future_dispatch_metadata="ignored",
+        )
+    )
     assert result == {"ok": True}
     assert calls == [("search_media", {"query": "Matrix"})]
 

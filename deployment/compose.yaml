@@ -1,0 +1,257 @@
+# Production topology for the CRBL media request services.
+#
+# There is intentionally no Plex service in this file.  Plex remains an
+# existing host-network container outside this stack; it calls the companion's
+# loopback-only webhook at 127.0.0.1:18081.  This release does not require a
+# Plex restart or recreation, and any separately verified/authorized Plex
+# action remains outside this Compose project.
+
+services:
+  media-server-mcp:
+    image: "${MEDIA_SERVER_MCP_IMAGE:?MEDIA_SERVER_MCP_IMAGE must be a verified digest reference}"
+    restart: unless-stopped
+    user: "1000:1000"
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    env_file:
+      - "${UPSTREAM_ENV_FILE:?UPSTREAM_ENV_FILE must name the canonical upstream.env}"
+    environment:
+      UMASK: "0077"
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: "3000"
+      MCP_TRANSPORT: streamable-http
+      # The upstream image's full profile omits these two reviewed tools;
+      # include them explicitly so its runtime tools/list is the canonical
+      # 102-tool inventory consumed by the companion/Hermes contract.
+      TOOL_PROFILE: full
+      TOOL_INCLUDE: tmdb_get_movie_credits,tmdb_get_tv_credits
+    expose:
+      - "3000"
+    networks:
+      media-mcp-backend:
+        aliases:
+          - media-server-mcp
+      media-service-egress: {}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          if command -v wget >/dev/null 2>&1;
+          then wget -q -O /dev/null http://127.0.0.1:3000/health;
+          elif command -v curl >/dev/null 2>&1;
+          then curl --fail --silent --show-error --max-time 3 http://127.0.0.1:3000/health >/dev/null;
+          else exit 1;
+          fi
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  media-companion:
+    image: "${MEDIA_COMPANION_IMAGE:?MEDIA_COMPANION_IMAGE must be a verified digest reference}"
+    restart: unless-stopped
+    user: "1000:1000"
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=128m
+    env_file:
+      - "${COMPANION_ENV_FILE:?COMPANION_ENV_FILE must name the canonical companion.env}"
+    environment:
+      UMASK: "0077"
+      MEDIA_COMPANION_HOST: 0.0.0.0
+      MEDIA_COMPANION_MCP_PORT: "18080"
+      MEDIA_COMPANION_UPSTREAM_URL: http://media-server-mcp:3000
+      # The companion parses only approved provider URL selectors from the
+      # mounted upstream dotenv; Docker never imports that file as env_file.
+      MEDIA_COMPANION_PROVIDER_ENV_FILE: /run/media-secrets/upstream.env
+      CRBL_POLICY_HELPER_URL: http://hermes-media:8787
+      CRBL_POLICY_HELPER_KEY_FILE: /run/media-secrets/actor-signing.key
+      # Host-network Plex reaches the loopback-published webhook through this
+      # deterministic media-bot bridge gateway.  The companion rejects every
+      # other source before evaluating the capability token.
+      MEDIA_COMPANION_PLEX_TRUSTED_PEERS: 172.30.40.1
+      MEDIA_COMPANION_UPSTREAM_TOKEN_FILE: /run/media-secrets/upstream.env
+      MEDIA_COMPANION_PLEX_TOKEN_FILE: /run/media-secrets/upstream.env
+      MEDIA_COMPANION_RADARR_API_KEY_FILE: /run/media-secrets/upstream.env
+      MEDIA_COMPANION_SONARR_API_KEY_FILE: /run/media-secrets/upstream.env
+      MEDIA_COMPANION_TMDB_API_KEY_FILE: /run/media-secrets/upstream.env
+      MEDIA_COMPANION_ACTOR_SIGNING_KEY_FILE: /run/media-secrets/actor-signing.key
+      MEDIA_COMPANION_DASHBOARD_API_KEY_FILE: /run/media-secrets/dashboard-api.key
+      MEDIA_COMPANION_PLEX_WEBHOOK_CAPABILITY_FILE: /run/media-secrets/companion.env
+    expose:
+      - "18080"
+    ports:
+      # Plex uses host networking.  This is the only published companion port
+      # and is deliberately unreachable from non-loopback interfaces.
+      - "127.0.0.1:18081:18080"
+    volumes:
+      - "${COMPANION_STATE_DIR:?COMPANION_STATE_DIR must name the private state directory}:/opt/data/state:rw"
+      - "${UPSTREAM_ENV_FILE:?UPSTREAM_ENV_FILE must name upstream.env}:/run/media-secrets/upstream.env:ro"
+      - "${COMPANION_ENV_FILE:?COMPANION_ENV_FILE must name companion.env}:/run/media-secrets/companion.env:ro"
+      - "${ACTOR_SIGNING_KEY_FILE:?ACTOR_SIGNING_KEY_FILE must name actor-signing.key}:/run/media-secrets/actor-signing.key:ro"
+      - "${DASHBOARD_API_KEY_FILE:?DASHBOARD_API_KEY_FILE must name dashboard-api.key}:/run/media-secrets/dashboard-api.key:ro"
+    networks:
+      media-bot: {}
+      media-mcp-backend: {}
+      media-service-egress: {}
+      media-dashboard-backend: {}
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:18080/readyz', timeout=3).read(1)
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  hermes-media:
+    image: "${HERMES_MEDIA_IMAGE:?HERMES_MEDIA_IMAGE must be a verified digest reference}"
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=128m
+      - /run:rw,noexec,nosuid,nodev,size=64m
+    environment:
+      UMASK: "0077"
+      # The pinned image's s6 dispatcher owns PID 1 and performs the native
+      # worker remap. Do not wrap it with Compose user/init; keep workers at
+      # the deployment UID/GID instead.
+      HERMES_UID: "1000"
+      HERMES_GID: "1000"
+      HERMES_HOME: /opt/data
+      HERMES_DASHBOARD: "false"
+      TOOL_PROFILE: full
+      TOOL_INCLUDE: tmdb_get_movie_credits,tmdb_get_tv_credits
+      TELEGRAM_WEBHOOK_URL: ""
+      CRBL_COMPANION_URL: http://media-companion:18080
+      CRBL_POLICY_HELPER_HOST: 0.0.0.0
+      CRBL_POLICY_HELPER_PORT: "8787"
+      # Native startup validation and the local Telegram adapter use the
+      # authenticated loopback endpoint; this is never published by Docker.
+      CRBL_POLICY_HELPER_URL: http://127.0.0.1:8787
+      CRBL_POLICY_HELPER_KEY_FILE: /run/media-secrets/actor-signing.key
+      CRBL_POLICY_FILE: /opt/data/.env
+      CRBL_ACTOR_SIGNING_KEY_FILE: /run/media-secrets/actor-signing.key
+    # Preserve the derived image's native
+    # /opt/hermes/docker/entrypoint-dispatch.sh -> /init -> s6 PID1 chain.
+    # The dispatcher receives this native gateway command as /init's main
+    # program; the policy helper itself is an s6-rc longrun.
+    command: ["gateway", "run"]
+    volumes:
+      # Hermes' native policy helper edits only TELEGRAM_ALLOWED_USERS in this
+      # scoped data directory.  The directory is operator-owned/private; the
+      # actor key remains a separate read-only mount.
+      - "${HERMES_DATA_DIR:?HERMES_DATA_DIR must name the scoped Hermes data directory}:/opt/data:rw"
+      - "${ACTOR_SIGNING_KEY_FILE:?ACTOR_SIGNING_KEY_FILE must name actor-signing.key}:/run/media-secrets/actor-signing.key:ro"
+    networks:
+      media-bot: {}
+    expose:
+      - "8787"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          test "$$HERMES_DASHBOARD" = "false" &&
+          test -f /opt/hermes/plugins/platforms/media-policy/plugin.yaml &&
+          test -x /opt/hermes/policy-helper-healthcheck.sh &&
+          /opt/hermes/policy-helper-healthcheck.sh
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  media-request-dashboard:
+    image: "${MEDIA_DASHBOARD_IMAGE:?MEDIA_DASHBOARD_IMAGE must be a verified digest reference}"
+    restart: unless-stopped
+    user: "1000:1000"
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    env_file:
+      - "${DASHBOARD_AUTH_ENV_FILE:?DASHBOARD_AUTH_ENV_FILE must name dashboard-auth.env}"
+    environment:
+      UMASK: "0077"
+      MEDIA_DASHBOARD_HOST: 0.0.0.0
+      MEDIA_DASHBOARD_PORT: "18082"
+      MEDIA_DASHBOARD_COMPANION_URL: http://media-companion:18080
+      MEDIA_DASHBOARD_API_KEY_FILE: /run/media-secrets/dashboard-api.key
+    ports:
+      # LAN/Tailscale access only.  WAN reachability remains a NAS firewall and
+      # router concern; this stack adds no Cloudflare route or NAT rule.
+      - "18082:18082"
+    volumes:
+      - "${DASHBOARD_API_KEY_FILE:?DASHBOARD_API_KEY_FILE must name dashboard-api.key}:/run/media-secrets/dashboard-api.key:ro"
+    networks:
+      media-dashboard-backend: {}
+      media:
+        aliases:
+          - media-request-dashboard
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:18082/healthz', timeout=3).read(1)
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+networks:
+  # Dedicated bot-to-companion path; Hermes also needs its native Telegram
+  # long-polling egress.  No unrelated Hermes/media container joins it.
+  media-bot:
+    name: media-bot
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.40.0/24
+          gateway: 172.30.40.1
+  # Private companion-to-upstream MCP path.
+  media-mcp-backend:
+    name: media-mcp-backend
+    internal: true
+    driver: bridge
+  # Companion/upstream-only egress path for configured provider origins.
+  media-service-egress:
+    name: media-service-egress
+    driver: bridge
+  # Private dashboard-to-companion operations path.
+  media-dashboard-backend:
+    name: media-dashboard-backend
+    internal: true
+    driver: bridge
+  # Existing NAS network.  The dashboard is the only service allowed here.
+  media:
+    name: media
+    external: true
+
+# No top-level volumes are needed.  State and canonical host files are bound
+# explicitly above so their ownership, mode, backup, and lifecycle remain
+# visible to the release operator.

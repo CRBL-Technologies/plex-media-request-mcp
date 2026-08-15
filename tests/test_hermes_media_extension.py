@@ -518,7 +518,7 @@ assert set(registry.get_tool_names_for_toolset("media-policy-shared")) == {
     "search_media", "request_movie", "request_series", "request_status",
     "download_status", "browse_library", "media_status",
 }
-assert len(registry.get_tool_names_for_toolset("media-policy-admin")) == 103
+assert len(registry.get_tool_names_for_toolset("media-policy-admin")) == 65
 """
         completed = subprocess.run(
             [sys.executable, "-c", script],
@@ -790,7 +790,7 @@ def test_external_startup_contract_fails_closed_and_accepts_complete_fake_eviden
                     "CRBL_POLICY_HELPER_PORT": "8787",
                     "CRBL_POLICY_FILE": "/opt/data/.env",
                     "TOOL_PROFILE": "full",
-                    "TOOL_INCLUDE": "tmdb_get_movie_credits,tmdb_get_tv_credits",
+                    "TOOL_INCLUDE": "",
                 },
                 plugin_dir=plugin_dir,
                 visibility_patch=True,

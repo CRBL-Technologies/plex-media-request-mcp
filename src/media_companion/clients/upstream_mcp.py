@@ -2,7 +2,7 @@
 
 The upstream service is deliberately kept behind this narrow boundary:
 
-* only the exact 102 reviewed tool names are accepted;
+* only the exact 64 reviewed tool names are accepted;
 * JSON-RPC envelopes are parsed into typed records rather than returned raw;
 * response bodies and normalized text are bounded before and after parsing;
 * credentials, paths, and provider URLs are scrubbed from selected output and
@@ -72,7 +72,7 @@ MAX_PAGE_SIZE: Final[int] = 250
 MAX_QUEUE_ITEMS: Final[int] = 5_000
 MAX_QUEUE_ERROR_BYTES: Final[int] = 2 * 1024
 MAX_CREDENTIAL_BYTES: Final[int] = 16 * 1024
-MAX_CONTRACT_TOOLS: Final[int] = 102
+MAX_CONTRACT_TOOLS: Final[int] = 64
 MAX_CONTRACT_PAGES: Final[int] = 8
 _JSONRPC_VERSION: Final[str] = "2.0"
 # v2.3.0 exposes the SDK's 2025-era stateless compatibility path.  The newer
@@ -185,7 +185,7 @@ def _safe_json(
 
 
 # This is intentionally a conservative structural allowlist rather than a
-# generic recursive pass-through.  Upstream's 102 tools have heterogeneous
+# generic recursive pass-through.  Upstream's 64 tools have heterogeneous
 # provider schemas; only fields useful for an operator-facing summary cross
 # this adapter.  New fields stay denied until explicitly reviewed.
 _SAFE_STRUCTURED_KEYS: Final[frozenset[str]] = frozenset(

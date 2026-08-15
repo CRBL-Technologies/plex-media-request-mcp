@@ -36,6 +36,3 @@ requires_env:
   - name: TOOL_PROFILE
     description: "Pinned upstream media-server-mcp tool profile"
     password: false
-  - name: TOOL_INCLUDE
-    description: "Pinned upstream tools omitted by the full profile"
-    password: false

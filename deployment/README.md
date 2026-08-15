@@ -33,10 +33,9 @@ release. The supported integration is the loopback webhook delivered to
 operation remains outside this stack; do not grant it a Docker socket or add a
 `docker ... plex` lifecycle command to Compose or the release manifest.
 
-The upstream `media-server-mcp` service is run with `TOOL_PROFILE=full` plus
-`TOOL_INCLUDE=tmdb_get_movie_credits,tmdb_get_tv_credits`. Those explicit
-runtime settings restore the two tools omitted by the full profile and keep
-the upstream `tools/list` contract at the pinned 102-tool inventory.
+The upstream `media-server-mcp` service is run with `TOOL_PROFILE=full` and no
+`TOOL_INCLUDE` override. Its live `tools/list` contract is pinned to the 64
+Plex/Radarr/Sonarr tools captured in the checked-in contract artifact.
 
 ## Host files
 

@@ -143,16 +143,14 @@ def test_companion_selects_provider_urls_without_upstream_env_injection() -> Non
     assert "MEDIA_COMPANION_TELEGRAM_BOT_TOKEN_FILE" not in companion["environment"]
 
 
-def test_upstream_service_selects_the_canonical_102_tool_inventory() -> None:
+def test_upstream_service_selects_the_canonical_64_tool_inventory() -> None:
     rendered = render_template(
         DEFAULT_COMPOSE.read_text(encoding="utf-8"), _release_env()
     )
     compose = yaml.safe_load(rendered)
     upstream = compose["services"]["media-server-mcp"]
     assert upstream["environment"]["TOOL_PROFILE"] == "full"
-    assert upstream["environment"]["TOOL_INCLUDE"] == (
-        "tmdb_get_movie_credits,tmdb_get_tv_credits"
-    )
+    assert "TOOL_INCLUDE" not in upstream["environment"]
     assert "env_file" not in upstream
     assert upstream["entrypoint"] == [
         "deno",
@@ -227,9 +225,7 @@ def test_hermes_preserves_native_s6_pid1_and_worker_remap() -> None:
         "/opt/hermes/policy-helper-healthcheck.sh",
     ]
     assert hermes["environment"]["TOOL_PROFILE"] == "full"
-    assert hermes["environment"]["TOOL_INCLUDE"] == (
-        "tmdb_get_movie_credits,tmdb_get_tv_credits"
-    )
+    assert "TOOL_INCLUDE" not in hermes["environment"]
 
 
 def test_hermes_derived_dockerfile_is_digest_pinned_and_preserves_dispatcher() -> None:
@@ -270,7 +266,8 @@ def test_pinned_tool_contract_has_exact_upstream_projection_and_closed_registrat
     )
     contract = json.loads(contract_path.read_text(encoding="utf-8"))
     upstream = contract["upstream_tools"]
-    assert len(upstream) == 102
+    assert len(upstream) == 64
+    assert all(not entry["name"].startswith("tmdb_") for entry in upstream)
     projected = [
         {
             key: entry[key]
@@ -290,10 +287,10 @@ def test_pinned_tool_contract_has_exact_upstream_projection_and_closed_registrat
         ).encode("utf-8")
     ).hexdigest()
     assert contract["upstream_tool_digest"] == "sha256:" + digest
-    assert digest == "31451102af4d424ce516d5515db5839028f17e9363651e0d1a2d64518633f2b1"
+    assert digest == "65b3b6a3d439de558ba5c1f76cc755a2f05ca57474812c765313c654b509597e"
     entries = upstream + contract["companion_tools"]
-    assert len(entries) == 110
-    assert len({entry["name"] for entry in entries}) == 110
+    assert len(entries) == 72
+    assert len({entry["name"] for entry in entries}) == 72
     assert all(
         entry["inputSchema"]["type"] == "object"
         and entry["inputSchema"].get("additionalProperties") is not True

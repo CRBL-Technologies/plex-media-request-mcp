@@ -40,11 +40,7 @@ services:
       MCP_HOST: 0.0.0.0
       MCP_PORT: "3000"
       MCP_TRANSPORT: streamable-http
-      # The upstream image's full profile omits these two reviewed tools;
-      # include them explicitly so its runtime tools/list is the canonical
-      # 102-tool inventory consumed by the companion/Hermes contract.
       TOOL_PROFILE: full
-      TOOL_INCLUDE: tmdb_get_movie_credits,tmdb_get_tv_credits
     expose:
       - "3000"
     networks:
@@ -169,7 +165,6 @@ services:
       HERMES_HOME: /opt/data
       HERMES_DASHBOARD: "false"
       TOOL_PROFILE: full
-      TOOL_INCLUDE: tmdb_get_movie_credits,tmdb_get_tv_credits
       TELEGRAM_WEBHOOK_URL: ""
       CRBL_COMPANION_URL: http://media-companion:18080
       CRBL_POLICY_HELPER_HOST: 0.0.0.0

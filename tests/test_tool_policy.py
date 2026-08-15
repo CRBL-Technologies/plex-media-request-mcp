@@ -23,11 +23,11 @@ class ToolPolicyTests(unittest.TestCase):
         self.assertEqual(len(policy.SHARED_TOOL_SET), 7)
 
     def test_upstream_surface_has_exact_category_counts(self) -> None:
-        self.assertEqual(len(policy.UPSTREAM_TOOLS), 102)
-        self.assertEqual(len(policy.UPSTREAM_TOOL_SET), 102)
+        self.assertEqual(len(policy.UPSTREAM_TOOLS), 64)
+        self.assertEqual(len(policy.UPSTREAM_TOOL_SET), 64)
         self.assertEqual(
             dict(policy.UPSTREAM_TOOL_CATEGORY_COUNTS),
-            {"plex": 12, "radarr": 22, "sonarr": 30, "tmdb": 38},
+            {"radarr": 22, "sonarr": 30, "plex": 12},
         )
         self.assertEqual(
             sum(policy.UPSTREAM_TOOL_CATEGORY_COUNTS.values()),
@@ -51,13 +51,13 @@ class ToolPolicyTests(unittest.TestCase):
         self.assertEqual(
             set(policy.UPSTREAM_TOOL_CLASSIFICATIONS), set(policy.UPSTREAM_TOOLS)
         )
-        self.assertEqual(len(policy.ADMIN_TOOL_CLASSIFICATIONS), 103)
+        self.assertEqual(len(policy.ADMIN_TOOL_CLASSIFICATIONS), 65)
         self.assertEqual(
             sum(
                 value is policy.ToolClassification.READ
                 for value in policy.ADMIN_TOOL_CLASSIFICATIONS.values()
             ),
-            70,
+            32,
         )
         self.assertEqual(
             sum(
@@ -66,7 +66,7 @@ class ToolPolicyTests(unittest.TestCase):
             ),
             33,
         )
-        self.assertEqual(len(policy.UPSTREAM_READ_ONLY_TOOLS), 70)
+        self.assertEqual(len(policy.UPSTREAM_READ_ONLY_TOOLS), 32)
         self.assertEqual(len(policy.UPSTREAM_MUTATING_TOOLS), 32)
 
     def test_unknown_names_fail_closed_on_both_surfaces(self) -> None:
@@ -132,9 +132,7 @@ class ToolPolicyTests(unittest.TestCase):
         self.assertEqual(
             policy.classify_tool("plex_get_metadata"), policy.ToolClassification.READ
         )
-        self.assertEqual(
-            policy.classify_tool("tmdb_get_tv_credits"), policy.ToolClassification.READ
-        )
+        self.assertIsNone(policy.classify_tool("tmdb_get_tv_credits"))
 
     def test_provenance_is_pinned(self) -> None:
         self.assertEqual(policy.UPSTREAM_VERSION, "2.3.0")

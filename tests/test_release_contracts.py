@@ -146,16 +146,13 @@ def test_openapi_documents_actual_companion_routes_and_shared_inventory() -> Non
         "dashboardSignature",
     }
     upstream_contract = document["x-upstream-tool-contract"]
-    assert upstream_contract["tool_count"] == 102
+    assert upstream_contract["tool_count"] == 64
     assert upstream_contract["source_revision"] == tool_policy.UPSTREAM_REVISION
     assert upstream_contract["image"] == tool_policy.UPSTREAM_IMAGE
     assert upstream_contract["schema_sha256"] == (
-        "31451102af4d424ce516d5515db5839028f17e9363651e0d1a2d64518633f2b1"
+        "65b3b6a3d439de558ba5c1f76cc755a2f05ca57474812c765313c654b509597e"
     )
-    assert upstream_contract["required_include"] == [
-        "tmdb_get_movie_credits",
-        "tmdb_get_tv_credits",
-    ]
+    assert upstream_contract["required_include"] == []
     assert paths["/private/plex/{capability}"]["post"]["x-security-boundary"] == {
         "type": "path-capability",
         "parameter": "capability",
@@ -163,15 +160,12 @@ def test_openapi_documents_actual_companion_routes_and_shared_inventory() -> Non
     }
 
 
-def test_release_contract_pins_the_canonical_102_tool_inventory() -> None:
+def test_release_contract_pins_the_canonical_64_tool_inventory() -> None:
     """A release must not silently publish a different upstream tool schema."""
 
-    assert len(tool_policy.UPSTREAM_TOOLS) == 102
-    assert len(tool_policy.UPSTREAM_TOOL_SET) == 102
-    assert {
-        "tmdb_get_movie_credits",
-        "tmdb_get_tv_credits",
-    }.issubset(tool_policy.UPSTREAM_TOOL_SET)
+    assert len(tool_policy.UPSTREAM_TOOLS) == 64
+    assert len(tool_policy.UPSTREAM_TOOL_SET) == 64
+    assert not any(name.startswith("tmdb_") for name in tool_policy.UPSTREAM_TOOL_SET)
     assert tool_policy.UPSTREAM_REVISION == "8b469d2b321b27dd1e4f5b89a7236b3ea43c3c72"
     assert tool_policy.UPSTREAM_OCI_DIGEST == (
         "sha256:f83620da1d008ef18df3324b15e44854572ea41b528eff585033e4054b438377"
@@ -180,7 +174,7 @@ def test_release_contract_pins_the_canonical_102_tool_inventory() -> None:
         hashlib.sha256(
             json.dumps(tool_policy.UPSTREAM_TOOLS, separators=(",", ":")).encode()
         ).hexdigest()
-        == "02390ae11d07dae8920276460e83503ddd0d115d4ea7f76f19a1f48648f46b24"
+        == "50fe2d725b8452dc0dddbe0e4cd3b01a5f6a720ea1e06fbe308ad77db3cc0c62"
     )
 
     contract = json.loads(
@@ -195,9 +189,10 @@ def test_release_contract_pins_the_canonical_102_tool_inventory() -> None:
         ).read_text(encoding="utf-8")
     )
     upstream = contract["upstream_tools"]
-    assert len(upstream) == 102
+    assert len(upstream) == 64
+    assert all(not entry["name"].startswith("tmdb_") for entry in upstream)
     assert contract["upstream_source_revision"] == tool_policy.UPSTREAM_REVISION
-    schema_digest = "31451102af4d424ce516d5515db5839028f17e9363651e0d1a2d64518633f2b1"
+    schema_digest = "65b3b6a3d439de558ba5c1f76cc755a2f05ca57474812c765313c654b509597e"
     assert contract["upstream_tool_digest"] == "sha256:" + schema_digest
     projected = [
         {
@@ -213,10 +208,7 @@ def test_release_contract_pins_the_canonical_102_tool_inventory() -> None:
         + b"\n"
     )
     assert hashlib.sha256(canonical).hexdigest() == schema_digest
-    assert {
-        "tmdb_get_movie_credits",
-        "tmdb_get_tv_credits",
-    }.issubset({entry["name"] for entry in upstream})
+    assert not any(entry["name"].startswith("tmdb_") for entry in upstream)
 
     native_contract = json.loads(
         (
@@ -230,8 +222,5 @@ def test_release_contract_pins_the_canonical_102_tool_inventory() -> None:
         ).read_text(encoding="utf-8")
     )
     assert native_contract["tool_profile"] == "full"
-    assert native_contract["tool_include"] == [
-        "tmdb_get_movie_credits",
-        "tmdb_get_tv_credits",
-    ]
+    assert native_contract["tool_include"] == []
     assert native_contract["upstream_tool_contract_sha256"] == schema_digest

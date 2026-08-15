@@ -166,13 +166,13 @@ class UpstreamAdapterTests(unittest.TestCase):
         }
 
     def test_exact_pinned_surface_and_future_default_deny(self) -> None:
-        self.assertEqual(len(tool_policy.UPSTREAM_TOOLS), 102)
+        self.assertEqual(len(tool_policy.UPSTREAM_TOOLS), 64)
         inventory_digest = hashlib.sha256(
             json.dumps(tool_policy.UPSTREAM_TOOLS, separators=(",", ":")).encode()
         ).hexdigest()
         self.assertEqual(
             inventory_digest,
-            "02390ae11d07dae8920276460e83503ddd0d115d4ea7f76f19a1f48648f46b24",
+            "50fe2d725b8452dc0dddbe0e4cd3b01a5f6a720ea1e06fbe308ad77db3cc0c62",
         )
         client = UpstreamMCPClient(
             "http://media-server:3000", transport=RecordingTransport({})
@@ -200,7 +200,7 @@ class UpstreamAdapterTests(unittest.TestCase):
             client.call_tool("future_tool")
 
     def test_frozen_contract_artifact_has_exact_digest_and_fields(self) -> None:
-        self.assertEqual(len(FROZEN_UPSTREAM_TOOLS), 102)
+        self.assertEqual(len(FROZEN_UPSTREAM_TOOLS), 64)
         self.assertEqual(
             canonical_tool_digest(FROZEN_UPSTREAM_TOOLS), UPSTREAM_TOOL_CONTRACT_SHA256
         )

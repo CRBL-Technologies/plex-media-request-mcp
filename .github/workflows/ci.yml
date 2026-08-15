@@ -49,6 +49,48 @@ jobs:
           docker build --build-arg PYTHON_BASE_IMAGE="$PYTHON_BASE_IMAGE"
           --build-arg SOURCE_COMMIT="$GITHUB_SHA"
           -f deployment/Dockerfile.gateway -t crbl-media-gateway:ci .
+      - name: Verify gateway container stays running
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke="$RUNNER_TEMP/media-gateway-smoke"
+          mkdir -p "$smoke/state"
+          chmod 0777 "$smoke/state"
+          printf '%s\n' 'TELEGRAM_ALLOWED_USERS=1' 'TELEGRAM_ADMIN_USERS=1' > "$smoke/policy.env"
+          printf '%064d\n' 0 > "$smoke/gateway.key"
+          printf '%064d\n' 0 > "$smoke/session.key"
+          printf '%064d\n' 0 > "$smoke/plex.key"
+          printf '%s\n' 'placeholder-password-hash' > "$smoke/password.hash"
+          printf '%s\n' 'MCP_AUTH_TOKEN=00000000000000000000000000000000' > "$smoke/upstream.env"
+          set +e
+          timeout 5s docker run --rm --network none --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev \
+            -e MEDIA_GATEWAY_HOST=127.0.0.1 \
+            -e MEDIA_GATEWAY_PORT=18082 \
+            -e MEDIA_GATEWAY_DB_PATH=/opt/data/state/gateway.sqlite3 \
+            -e MEDIA_GATEWAY_POLICY_FILE=/opt/hermes-data/.env \
+            -e MEDIA_GATEWAY_TOKEN_FILE=/run/media-secrets/gateway.key \
+            -e MEDIA_GATEWAY_UPSTREAM_URL=http://127.0.0.1:3000 \
+            -e MEDIA_GATEWAY_UPSTREAM_TOKEN_FILE=/run/media-secrets/upstream.env \
+            -e MEDIA_GATEWAY_DASHBOARD_PASSWORD_HASH_FILE=/run/media-secrets/password.hash \
+            -e MEDIA_GATEWAY_DASHBOARD_SESSION_KEY_FILE=/run/media-secrets/session.key \
+            -e MEDIA_GATEWAY_PLEX_WEBHOOK_TOKEN_FILE=/run/media-secrets/plex.key \
+            -e MEDIA_GATEWAY_RADARR_PROFILE_ID=25 \
+            -e MEDIA_GATEWAY_RADARR_ROOT=/data/media/movies \
+            -e MEDIA_GATEWAY_SONARR_PROFILE_ID=25 \
+            -e MEDIA_GATEWAY_SONARR_ROOT=/data/media/tv \
+            -e MEDIA_GATEWAY_PLEX_MACHINE_ID=smoke \
+            -e MEDIA_GATEWAY_TELEGRAM_IDENTITY_SYNC=false \
+            -v "$smoke/state:/opt/data/state" \
+            -v "$smoke/policy.env:/opt/hermes-data/.env:ro" \
+            -v "$smoke/gateway.key:/run/media-secrets/gateway.key:ro" \
+            -v "$smoke/session.key:/run/media-secrets/session.key:ro" \
+            -v "$smoke/plex.key:/run/media-secrets/plex.key:ro" \
+            -v "$smoke/password.hash:/run/media-secrets/password.hash:ro" \
+            -v "$smoke/upstream.env:/run/media-secrets/upstream.env:ro" \
+            crbl-media-gateway:ci
+          status=$?
+          set -e
+          test "$status" -eq 124
       - name: Build Hermes adapter
         run: >-
           docker build --build-arg HERMES_BASE_IMAGE="$HERMES_BASE_IMAGE"

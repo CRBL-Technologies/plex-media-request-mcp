@@ -1463,17 +1463,17 @@ class CompanionRuntime:
             or isinstance(inventory, (str, bytes))
         ):
             raise OperationDependencyError(
-                "upstream broker inventory is not the pinned 102-tool set"
+                "upstream broker inventory is not the pinned 64-tool set"
             )
         try:
             inventory_set = set(cast(Iterable[object], inventory))
         except TypeError as exc:
             raise OperationDependencyError(
-                "upstream broker inventory is not the pinned 102-tool set"
+                "upstream broker inventory is not the pinned 64-tool set"
             ) from exc
         if inventory_set != set(UPSTREAM_TOOL_SET):
             raise OperationDependencyError(
-                "upstream broker inventory is not the pinned 102-tool set"
+                "upstream broker inventory is not the pinned 64-tool set"
             )
 
         guard = self.mutation_guard

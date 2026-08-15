@@ -62,14 +62,14 @@ CALLBACK_PREFIX = "crblc:"
 SHARED_TOOLSET = "media-policy-shared"
 ADMIN_TOOLSET = "media-policy-admin"
 UPSTREAM_TOOL_CONTRACT_SHA256 = (
-    "31451102af4d424ce516d5515db5839028f17e9363651e0d1a2d64518633f2b1"
+    "65b3b6a3d439de558ba5c1f76cc755a2f05ca57474812c765313c654b509597e"
 )
 # Compatibility name used by the external startup contract.  It is the
 # canonical digest of the pinned upstream projection, not a live registry
 # listing or MCP response.
 TOOL_SCHEMA_SHA256 = UPSTREAM_TOOL_CONTRACT_SHA256
 TOOL_PROFILE = "full"
-TOOL_INCLUDE = ("tmdb_get_movie_credits", "tmdb_get_tv_credits")
+TOOL_INCLUDE: tuple[str, ...] = ()
 _TOOL_SCHEMA_ASSET = "tool_contract.json"
 
 _active_adapter: ContextVar[object | None] = ContextVar(

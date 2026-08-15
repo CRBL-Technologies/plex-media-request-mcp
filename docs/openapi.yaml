@@ -60,16 +60,14 @@ x-shared-tools:
 
 # The administrator-only proxy remains closed at the checked-in upstream
 # contract. This provenance is included for release review without exposing
-# those 102 tools as ordinary public operations.
+# those 64 tools as ordinary public operations.
 x-upstream-tool-contract:
   version: 2.3.0
   source_revision: 8b469d2b321b27dd1e4f5b89a7236b3ea43c3c72
   image: ghcr.io/wyattjoh/media-server-mcp@sha256:f83620da1d008ef18df3324b15e44854572ea41b528eff585033e4054b438377
-  tool_count: 102
-  schema_sha256: 31451102af4d424ce516d5515db5839028f17e9363651e0d1a2d64518633f2b1
-  required_include:
-    - tmdb_get_movie_credits
-    - tmdb_get_tv_credits
+  tool_count: 64
+  schema_sha256: 65b3b6a3d439de558ba5c1f76cc755a2f05ca57474812c765313c654b509597e
+  required_include: []
 
 # The legacy MCP server still documents these useful tool contracts.  They are
 # component schemas, not `/tools/<name>` HTTP routes; the companion receives

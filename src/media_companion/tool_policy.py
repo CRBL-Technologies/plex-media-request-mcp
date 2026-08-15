@@ -4,9 +4,9 @@ The two MCP surfaces have deliberately different contracts:
 
 * regular users receive only the seven companion-owned tools in
   :data:`SHARED_TOOLS`; and
-* the private administrator surface may proxy only the exact tools registered
-  by upstream media-server-mcp v2.3.0, plus the reviewed companion repair
-  operation.
+* the private administrator surface may proxy only the exact 64 tools
+  registered by upstream media-server-mcp v2.3.0, plus the reviewed companion
+  repair operation.
 
 This module is intentionally data-only.  The tuples, sets, and mappings below
 are immutable so a future upstream discovery response cannot expand the live
@@ -141,56 +141,14 @@ _SONARR_TOOLS: Final[tuple[str, ...]] = (
     "sonarr_mark_failed",
 )
 
-_TMDB_TOOLS: Final[tuple[str, ...]] = (
-    "tmdb_find_by_external_id",
-    "tmdb_search_movies",
-    "tmdb_search_tv",
-    "tmdb_search_multi",
-    "tmdb_get_popular_movies",
-    "tmdb_discover_movies",
-    "tmdb_discover_tv",
-    "tmdb_get_genres",
-    "tmdb_get_trending",
-    "tmdb_get_now_playing_movies",
-    "tmdb_get_top_rated_movies",
-    "tmdb_get_upcoming_movies",
-    "tmdb_get_popular_tv",
-    "tmdb_get_top_rated_tv",
-    "tmdb_get_on_the_air_tv",
-    "tmdb_get_airing_today_tv",
-    "tmdb_get_movie_details",
-    "tmdb_get_tv_details",
-    "tmdb_get_movie_recommendations",
-    "tmdb_get_tv_recommendations",
-    "tmdb_get_similar_movies",
-    "tmdb_get_similar_tv",
-    "tmdb_search_people",
-    "tmdb_get_popular_people",
-    "tmdb_get_person_details",
-    "tmdb_get_person_movie_credits",
-    "tmdb_get_person_tv_credits",
-    "tmdb_search_collections",
-    "tmdb_get_collection_details",
-    "tmdb_search_keywords",
-    "tmdb_get_movies_by_keyword",
-    "tmdb_get_certifications",
-    "tmdb_get_watch_providers",
-    "tmdb_get_configuration",
-    "tmdb_get_countries",
-    "tmdb_get_languages",
-    "tmdb_get_movie_credits",
-    "tmdb_get_tv_credits",
-)
-
 # Keep service order and tool order aligned with the canonical audit.  The
 # values are tuples so this remains a checked-in inventory, not a discovery
 # cache.
 UPSTREAM_TOOLS_BY_SERVICE: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
     {
-        "plex": _PLEX_TOOLS,
         "radarr": _RADARR_TOOLS,
         "sonarr": _SONARR_TOOLS,
-        "tmdb": _TMDB_TOOLS,
+        "plex": _PLEX_TOOLS,
     }
 )
 UPSTREAM_TOOL_CATEGORIES: Final[Mapping[str, tuple[str, ...]]] = (

@@ -578,8 +578,8 @@ def check_startup_contract(
     )
     check(
         "tool_include",
-        include == ("tmdb_get_movie_credits", "tmdb_get_tv_credits"),
-        "pinned upstream TOOL_INCLUDE must add the two omitted TMDB credit tools",
+        include == (),
+        "pinned upstream TOOL_INCLUDE must remain empty",
     )
     if registered_tools is None:
         warnings.append(

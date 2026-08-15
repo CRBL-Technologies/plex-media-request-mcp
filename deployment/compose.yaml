@@ -74,6 +74,11 @@ services:
       timeout: 5s
       start_period: 15s
       retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
 
   media-gateway:
     image: ${MEDIA_GATEWAY_IMAGE:?required digest reference}
@@ -113,6 +118,11 @@ services:
       timeout: 5s
       start_period: 10s
       retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
 
   hermes-media:
     image: ${HERMES_MEDIA_IMAGE:?required digest reference}
@@ -136,11 +146,26 @@ services:
     depends_on:
       media-gateway:
         condition: service_healthy
+    healthcheck:
+      test: [CMD, pgrep, -f, "^/opt/hermes/.venv/bin/python3 /opt/hermes/.venv/bin/hermes gateway run --replace$"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
 
 networks:
   media-bot:
     name: media-bot
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.40.0/24
+          gateway: 172.30.40.1
   media-mcp:
     name: media-mcp
     internal: true

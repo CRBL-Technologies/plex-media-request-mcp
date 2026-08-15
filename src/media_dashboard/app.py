@@ -1101,7 +1101,13 @@ class DashboardRequestHandler(http.server.BaseHTTPRequestHandler):
             self._send_json(200, {"ok": True}, cookies=cookies)
 
     def _dashboard_page(self) -> None:
-        session, _token = self._require_session()
+        try:
+            session, _token = self._require_session()
+        except DashboardHTTPError as exc:
+            if exc.status == 401 and self._accepts_html():
+                self._send_redirect("/login")
+                return
+            raise
         self._send_html(
             200,
             dashboard_view(

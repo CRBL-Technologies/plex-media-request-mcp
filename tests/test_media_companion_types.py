@@ -25,6 +25,10 @@ from media_companion.models import (
 )
 
 
+SYNTHETIC_REQUESTER_USER_ID = 42
+SYNTHETIC_REQUESTER_CHAT_ID = -10042
+
+
 class SecretReferenceTests(unittest.TestCase):
     def test_file_reference_is_lexical_and_does_not_require_existing_file(self) -> None:
         reference = parse_secret_file_reference(
@@ -136,8 +140,8 @@ class NormalizedModelTests(unittest.TestCase):
             provider_id=123,
             title="Example",
             seasons=(2, 0, 2, 1),
-            requested_by_user_id=42,
-            requested_by_chat_id=-10042,
+            requested_by_user_id=SYNTHETIC_REQUESTER_USER_ID,
+            requested_by_chat_id=SYNTHETIC_REQUESTER_CHAT_ID,
         )
 
         self.assertEqual(request.seasons, (0, 1, 2))

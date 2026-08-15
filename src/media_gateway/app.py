@@ -402,3 +402,7 @@ def main() -> None:
         proxy_headers=False,
         access_log=False,
     )
+
+
+if __name__ == "__main__":
+    main()

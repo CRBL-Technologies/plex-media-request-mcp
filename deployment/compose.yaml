@@ -62,10 +62,28 @@ services:
     security_opt: [no-new-privileges:true]
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=64m
-    env_file:
-      - ${UPSTREAM_ENV_FILE:?required}
+    # Portainer is intentionally not mounted into project directories, so it
+    # cannot resolve Compose env_file paths itself. Mount the file through the
+    # Docker daemon and let the upstream image's native Deno runtime read it.
+    entrypoint:
+      - deno
+      - run
+      - --env-file=/run/media-secrets/upstream.env
+      - --allow-read
+      - --allow-write
+      - --allow-env
+      - --allow-run
+      - --allow-net
+      - packages/media-server-mcp/src/index.ts
+    command: [--http, --host, 0.0.0.0, --port, "3000"]
     environment:
+      UMASK: "0077"
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: "3000"
+      MCP_TRANSPORT: streamable-http
       TOOL_PROFILE: full
+    volumes:
+      - ${UPSTREAM_ENV_FILE:?required}:/run/media-secrets/upstream.env:ro
     expose: ["3000"]
     networks: [media-mcp, media]
     healthcheck:

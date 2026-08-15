@@ -476,6 +476,31 @@ def test_plex_webhook_accepts_new_show(config: Config) -> None:
         assert event["show_title"] == "3 Body Problem"
 
 
+def test_plex_webhook_maps_season_parent_fields(config: Config) -> None:
+    app = create_app(config)
+    payload = {
+        "event": "library.new",
+        "Metadata": {
+            "type": "season",
+            "ratingKey": "10538",
+            "title": "Season 1",
+            "index": 1,
+            "parentRatingKey": "10537",
+            "parentTitle": "3 Body Problem",
+            "parentGuid": "tvdb://411959",
+        },
+    }
+    token = "plex-hook-secret-with-at-least-32-bytes"
+    with TestClient(app) as client:
+        response = client.post(f"/private/plex/{token}", json=payload)
+        assert response.json() == {"accepted": True}
+        event = app.state.runtime.store.pending_media_events(int(time.time()) + 10)[0]
+        assert event["external_id"] == 411959
+        assert event["parent_rating_key"] == "10537"
+        assert event["show_title"] == "3 Body Problem"
+        assert event["season_number"] == 1
+
+
 def test_rejects_oversized_request_before_parsing(config: Config) -> None:
     app = create_app(config)
     with TestClient(app) as client:

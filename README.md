@@ -7,7 +7,8 @@ It does **not** fork, copy, or patch that MCP server.
 Production keeps the upstream image pinned to version `2.3.0`, source revision
 `8b469d2b321b27dd1e4f5b89a7236b3ea43c3c72`, and OCI digest
 `sha256:f83620da1d008ef18df3324b15e44854572ea41b528eff585033e4054b438377`.
-Compose launches that image with its original entrypoint and command.
+Compose runs its original Deno application directly and uses Deno's native
+`--env-file` option because Portainer cannot resolve NAS project paths itself.
 
 ## Architecture
 
@@ -38,18 +39,24 @@ discovered from the pinned upstream MCP. Future upstream tools are not admitted
 automatically. No selection token is used: requests take the TMDB or TVDB ID
 returned by a current search.
 
+Search results retain the provider's public poster URL. The Hermes tool
+description tells the Telegram agent to render it through Hermes' native
+`MEDIA:` delivery convention rather than exposing an inaccessible Radarr or
+Sonarr cover path.
+
 Upstream 2.3.0 lists `radarr_get_queue` in its full profile but does not register
 the tool. The gateway therefore contains one narrow read-only Radarr queue call;
 all other provider operations go through upstream MCP.
 
 ## Notifications
 
-Plex `library.new` webhooks are the availability authority. Every new movie or
-episode notifies each configured administrator. A bot requester is notified
-only when the matching movie or requested season appears in Plex. Episodes
-arriving in the same delay window are grouped into one season message; weekly
-episodes remain individual messages. Each message contains an `Open in Plex`
-button.
+Plex `library.new` webhooks are the availability authority. Movie, show,
+season, and episode payloads are supported. Every accepted addition notifies
+each configured administrator. A bot requester is notified only when the
+matching movie or requested season appears in Plex. A season batch waits until
+the latest event has been quiet for the configured delay, so a bulk import
+sends one message while weekly episodes remain individual messages. Each
+message contains an `Open in Plex` button.
 
 Webhook events and delivery receipts are durable and deduplicated in SQLite.
 Unresolved Plex provider IDs remain retryable, and terminal operational data is

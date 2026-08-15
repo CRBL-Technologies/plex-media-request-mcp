@@ -799,10 +799,14 @@ class CompanionClient:
         registered: list[str] = []
         for tool in TOOL_INVENTORY:
 
-            async def handler(
-                args: Mapping[str, Any], _tool: str = tool
-            ) -> dict[str, Any]:
-                return (await self.call_tool_async(_tool, args)).to_dict()
+            async def handler(args: Mapping[str, Any], _tool: str = tool) -> str:
+                result = (await self.call_tool_async(_tool, args)).to_dict()
+                # Hermes's native registry accepts text results (or its private
+                # multimodal envelope), not arbitrary mappings.  Preserve the
+                # reviewed structured companion payload as JSON text at this
+                # platform boundary so the registry, hooks, and model all see
+                # the same valid result contract.
+                return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
 
             register(
                 name=tool,

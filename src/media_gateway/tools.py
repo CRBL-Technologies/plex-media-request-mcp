@@ -124,7 +124,7 @@ def _movie_candidate(item: dict[str, Any]) -> dict[str, Any] | None:
         "year": _year(_first(item, "year", "releaseDate", "inCinemas")),
         "overview": str(item.get("overview") or "")[:1000],
         "in_radarr": isinstance(radarr_id, int) and radarr_id > 0,
-        "available": _bool(item.get("hasFile")),
+        "downloaded": _bool(item.get("hasFile")),
     }
 
 
@@ -325,9 +325,15 @@ class ToolService:
         if candidate is None or candidate["year"] is None:
             raise ToolError("Radarr returned incomplete movie metadata")
         existing_id = source.get("id")
-        if isinstance(existing_id, int) and existing_id > 0:
-            if candidate["available"]:
-                action = "available"
+        try:
+            visible_in_plex = await self._movie_in_plex(tmdb_id, candidate["title"])
+        except UpstreamError:
+            visible_in_plex = False
+        if visible_in_plex:
+            action = "available"
+        elif isinstance(existing_id, int) and existing_id > 0:
+            if candidate["downloaded"]:
+                action = "awaiting_plex"
             else:
                 await self.upstream.call("radarr_search_movie_releases", {"id": existing_id})
                 action = "search_started"
@@ -366,6 +372,40 @@ class ToolService:
                 "year": candidate["year"],
             },
         }
+
+    async def _movie_in_plex(self, tmdb_id: int, title: str) -> bool:
+        raw = await self.upstream.call(
+            "plex_search", {"query": title, "limit": 20, "searchTypes": ["movies"]}
+        )
+        if not isinstance(raw, dict):
+            raise UpstreamError("Plex search returned an invalid response")
+        container = raw.get("MediaContainer")
+        if not isinstance(container, dict) or not isinstance(container.get("Hub"), list):
+            return False
+        candidates: list[dict[str, Any]] = []
+        for hub in container["Hub"]:
+            if not isinstance(hub, dict) or not isinstance(hub.get("Metadata"), list):
+                continue
+            candidates.extend(item for item in hub["Metadata"] if isinstance(item, dict))
+        for item in candidates[:20]:
+            if item.get("type") != "movie":
+                continue
+            rating_key = item.get("ratingKey")
+            if not isinstance(rating_key, str) or not rating_key:
+                continue
+            metadata = await self.upstream.call("plex_get_metadata", {"ratingKey": rating_key})
+            for record in self._plex_rows(metadata, "Metadata"):
+                guides = record.get("Guid")
+                if not isinstance(guides, list):
+                    continue
+                for guide in guides:
+                    value = guide.get("id") if isinstance(guide, dict) else None
+                    if not isinstance(value, str) or not value.startswith("tmdb://"):
+                        continue
+                    raw_id = value.removeprefix("tmdb://").split("?", 1)[0]
+                    if raw_id.isdigit() and int(raw_id) == tmdb_id:
+                        return True
+        return False
 
     async def _request_series(self, arguments: object, actor: Actor, _role: Role) -> dict[str, Any]:
         args = _exact(arguments, {"tvdb_id", "seasons", "anime"})

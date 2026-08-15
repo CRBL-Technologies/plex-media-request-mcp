@@ -193,6 +193,57 @@ def test_existing_missing_movie_starts_a_search(config: Config) -> None:
         assert ("radarr_search_movie_releases", {"id": 77}) in fake.calls
 
 
+def test_movie_is_available_only_after_exact_plex_match(config: Config) -> None:
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["radarr_search_movie"] = {
+        "data": [{"id": 77, "tmdbId": 123, "title": "A Movie", "year": 2026, "hasFile": True}]
+    }
+    fake.responses["plex_search"] = {
+        "MediaContainer": {"Hub": [{"Metadata": [{"type": "movie", "ratingKey": "42"}]}]}
+    }
+    fake.responses["plex_get_metadata"] = {
+        "MediaContainer": {"Metadata": [{"Guid": [{"id": "tmdb://123"}]}]}
+    }
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "request_movie",
+                "arguments": {"tmdb_id": 123},
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["result"]["status"] == "available"
+        assert app.state.runtime.store.requests_for(1001)[0]["state"] == "available"
+
+
+def test_downloaded_movie_not_in_plex_remains_pending(config: Config) -> None:
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["radarr_search_movie"] = {
+        "data": [{"id": 77, "tmdbId": 123, "title": "A Movie", "year": 2026, "hasFile": True}]
+    }
+    fake.responses["plex_search"] = {"MediaContainer": {"Hub": []}}
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "request_movie",
+                "arguments": {"tmdb_id": 123},
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["result"]["status"] == "awaiting_plex"
+        assert app.state.runtime.store.requests_for(1001)[0]["state"] == "requested"
+
+
 def test_download_status_includes_both_queues_for_regular_users(config: Config) -> None:
     app = create_app(config)
     fake = FakeUpstream()

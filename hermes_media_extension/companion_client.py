@@ -293,7 +293,11 @@ def _decode_result(tool: str, response: object) -> CompanionResult:
         except (TypeError, ValueError):
             status_int = 500
         if status_int < 200 or status_int >= 300:
-            raise CompanionUnavailable("companion returned a non-success status")
+            # The numeric status is safe operational context and is essential
+            # for distinguishing authentication/policy failures from service
+            # outages. Never include the response body here: it may contain
+            # provider-controlled or sensitive diagnostic text.
+            raise CompanionUnavailable(f"companion returned HTTP {status_int}")
         body = getattr(response, "content", None)
         if body is None:
             body = getattr(response, "text", None)
@@ -832,6 +836,13 @@ def _read_key_file(path: str | os.PathLike[str]) -> bytes:
     except OSError as exc:
         raise CompanionUnavailable("actor signing key is unavailable") from exc
     if not data or len(data) > 16 * 1024:
+        raise CompanionUnavailable("actor signing key is invalid")
+    # Secret files conventionally end with one newline. The companion's
+    # production verifier removes CR/LF framing through _read_secret_reference;
+    # the Hermes signer must use the identical effective bytes or every signed
+    # tool call is rejected even though both containers mount the same file.
+    data = data.rstrip(b"\r\n")
+    if not data:
         raise CompanionUnavailable("actor signing key is invalid")
     return data
 

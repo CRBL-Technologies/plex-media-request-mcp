@@ -21,8 +21,11 @@ from hermes_media_extension.companion_client import (
     PRIVATE_CONFIRM_CALLBACK_ENDPOINT,
     CompanionClient,
     CompanionToolDenied,
+    CompanionUnavailable,
     ConfirmationEnvelope,
     _decode_result,
+    _load_signer,
+    _read_key_file,
     policy_membership_scope,
 )
 from hermes_media_extension.confirmation_callback import ConfirmationCallbackHandler
@@ -61,7 +64,12 @@ from hermes_media_extension.trusted_context import (
     trusted_context_scope,
 )
 
-from media_companion.auth import ActorAssertionSigner, confirmation_callback_data
+from media_companion.auth import (
+    ActorAssertionSigner,
+    ActorAssertionVerifier,
+    InMemoryNonceReplayStore,
+    confirmation_callback_data,
+)
 from media_companion.clients.telegram import TelegramError, TelegramErrorClass
 from media_companion.production import HermesTelegramBridge
 
@@ -164,6 +172,48 @@ def test_companion_wrapper_binds_native_actor_header_and_denies_unknown_tools() 
     assert json.loads(transport.calls[0][2])["params"]["name"] == "search_media"
     with pytest.raises(CompanionToolDenied):
         client.call_tool("not-a-reviewed-tool", {})
+
+
+def test_actor_key_file_framing_matches_companion_verifier(tmp_path: Path) -> None:
+    key_file = tmp_path / "actor-signing.key"
+    key_file.write_bytes(b"actor-key\r\n")
+    signer = _load_signer(_read_key_file(key_file))
+    arguments = {"query": "Matrix", "media_type": "movie"}
+    assertion = signer.issue(
+        audience="media-companion",
+        tool="search_media",
+        arguments=arguments,
+        user_id=42,
+        chat_id=42,
+        chat_type="private",
+        role="admin",
+        update_id=7,
+        update_type="message",
+        message_id=8,
+        allowlist_fingerprint="f" * 64,
+    )
+    verifier = ActorAssertionVerifier(
+        b"actor-key", nonce_store=InMemoryNonceReplayStore()
+    )
+    claims = verifier.verify_bound(
+        assertion,
+        expected_audience="media-companion",
+        expected_tool="search_media",
+        arguments=arguments,
+    )
+    assert claims.user_id == 42
+
+
+def test_companion_http_error_retains_safe_status_without_body() -> None:
+    response = SimpleNamespace(
+        status_code=403,
+        content=b'{"error":"secret provider diagnostic"}',
+    )
+    with pytest.raises(
+        CompanionUnavailable, match="companion returned HTTP 403"
+    ) as error:
+        _decode_result("search_media", response)
+    assert "secret provider diagnostic" not in str(error.value)
 
 
 def test_plugin_registers_last_writer_platform_and_exact_frozen_tools() -> None:

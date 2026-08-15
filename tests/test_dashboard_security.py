@@ -226,14 +226,32 @@ class DashboardHTTPTests(unittest.TestCase):
         self.assertEqual(status, 303)
         self.assertGreaterEqual(len(self._cookies(headers)), 2)
 
-        for referer in (None, "http://evil.example/login"):
+        # Safari and privacy-focused clients may omit both headers on a
+        # same-origin form submission. The password boundary must still be
+        # reachable; Host validation and login rate limiting remain active.
+        status, headers, _ = self._request(
+            "POST",
+            "/login",
+            body="password=dashboard+password",
+            accept="text/html",
+            content_type="application/x-www-form-urlencoded",
+            origin=None,
+            referer=None,
+        )
+        self.assertEqual(status, 303)
+        self.assertGreaterEqual(len(self._cookies(headers)), 2)
+
+        for origin, referer in (
+            (None, "http://evil.example/login"),
+            ("http://evil.example", None),
+        ):
             status, _headers, _ = self._request(
                 "POST",
                 "/login",
                 body="password=dashboard+password",
                 accept="text/html",
                 content_type="application/x-www-form-urlencoded",
-                origin=None,
+                origin=origin,
                 referer=referer,
             )
             self.assertEqual(status, 400)

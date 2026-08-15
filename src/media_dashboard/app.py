@@ -895,9 +895,11 @@ class DashboardRequestHandler(http.server.BaseHTTPRequestHandler):
                 self._require_session()
                 self._readyz(method)
                 return
+            login_post = path == "/login" and method == "POST"
             self._validate_browser_boundary(
                 require_origin=method in {"POST", "PUT", "PATCH", "DELETE"},
-                allow_referer_fallback=path == "/login" and method == "POST",
+                allow_referer_fallback=login_post,
+                allow_missing_origin=login_post,
             )
             if path == "/login":
                 if method == "GET" or method == "HEAD":
@@ -1003,7 +1005,11 @@ class DashboardRequestHandler(http.server.BaseHTTPRequestHandler):
             raise DashboardHTTPError(400)
 
     def _validate_browser_boundary(
-        self, *, require_origin: bool, allow_referer_fallback: bool = False
+        self,
+        *,
+        require_origin: bool,
+        allow_referer_fallback: bool = False,
+        allow_missing_origin: bool = False,
     ) -> None:
         host_values = self.headers.get_all("Host", [])
         if len(host_values) != 1:
@@ -1015,24 +1021,31 @@ class DashboardRequestHandler(http.server.BaseHTTPRequestHandler):
         origin = origin_values[0] if origin_values else None
         if origin is None and require_origin and allow_referer_fallback:
             referer_values = self.headers.get_all("Referer", [])
-            if len(referer_values) != 1:
+            if len(referer_values) > 1:
                 raise DashboardHTTPError(400)
-            referer = urlsplit(referer_values[0])
-            if (
-                referer.scheme.lower() not in {"http", "https"}
-                or not referer.netloc
-                or referer.username is not None
-                or referer.password is not None
-                or referer.fragment
-            ):
-                raise DashboardHTTPError(400)
-            origin = f"{referer.scheme.lower()}://{referer.netloc}"
+            if referer_values:
+                referer = urlsplit(referer_values[0])
+                if (
+                    referer.scheme.lower() not in {"http", "https"}
+                    or not referer.netloc
+                    or referer.username is not None
+                    or referer.password is not None
+                    or referer.fragment
+                ):
+                    raise DashboardHTTPError(400)
+                origin = f"{referer.scheme.lower()}://{referer.netloc}"
         try:
             validate_request_origin(
                 host=host,
                 origin=origin,
                 allowed_origins=self.app.config.allowed_origins,
-                require_origin=require_origin,
+                # Some privacy-focused browsers omit both Origin and Referer
+                # on a same-origin password form POST. Login remains protected
+                # by an exact Host allowlist, a strong password, and a strict
+                # rate limit. Explicit Origin/Referer values are still checked;
+                # only their total absence is tolerated on this one endpoint.
+                require_origin=require_origin
+                and not (allow_missing_origin and origin is None),
             )
         except (InvalidRequestOrigin, ValueError):
             raise DashboardHTTPError(400) from None

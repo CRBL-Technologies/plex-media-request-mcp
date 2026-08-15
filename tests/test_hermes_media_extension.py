@@ -207,11 +207,17 @@ def test_registered_tools_use_frozen_closed_schemas_and_metadata() -> None:
     for registration in registrations:
         name = registration["name"]
         assert isinstance(name, str)
+        description = metadata[name]["description"]
         schema = registration["schema"]
-        assert schema == schemas[name]
-        assert schema["type"] == "object"  # type: ignore[index]
-        assert schema["additionalProperties"] is False  # type: ignore[index]
-        assert registration["description"] == metadata[name]["description"]
+        assert schema == {
+            "name": name,
+            "description": description,
+            "parameters": schemas[name],
+        }
+        parameters = schema["parameters"]  # type: ignore[index]
+        assert parameters["type"] == "object"
+        assert parameters["additionalProperties"] is False
+        assert registration["description"] == description
 
 
 def test_registered_tool_handler_accepts_hermes_runtime_context(monkeypatch) -> None:

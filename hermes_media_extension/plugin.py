@@ -619,10 +619,20 @@ def _register_tools(ctx: object) -> tuple[str, ...]:
         description = record.get("description")
         if not isinstance(description, str) or not description.strip():
             raise RuntimeError(f"media-policy description is missing for {tool!r}")
+        # Hermes's registry expects an OpenAI function schema wrapper. Passing
+        # only the inner JSON Schema is accepted by register_tool(), but its
+        # deferred tool discovery then exposes an empty description and empty
+        # parameters to the model. Keep the reviewed companion contract as the
+        # inner ``parameters`` object and adapt it only at this native boundary.
+        hermes_schema = {
+            "name": tool,
+            "description": description,
+            "parameters": copy.deepcopy(schema),
+        }
         register(
             name=tool,
             toolset=(SHARED_TOOLSET if tool in SHARED_TOOLS else ADMIN_TOOLSET),
-            schema=copy.deepcopy(schema),
+            schema=hermes_schema,
             handler=_tool_handler(tool),
             is_async=True,
             description=description,

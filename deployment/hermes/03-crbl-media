@@ -1,0 +1,45 @@
+#!/bin/sh
+set -eu
+
+/opt/hermes/.venv/bin/python - <<'PY'
+import os
+import sys
+import time
+from pathlib import Path
+
+import httpx
+
+url = os.environ["CRBL_MEDIA_GATEWAY_URL"].rstrip("/") + "/api/schema"
+token = Path(os.environ["CRBL_MEDIA_GATEWAY_TOKEN_FILE"]).read_text().strip()
+for _ in range(30):
+    try:
+        response = httpx.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=5)
+        response.raise_for_status()
+        tools = response.json().get("tools")
+        if isinstance(tools, list) and len(tools) == 71:
+            sys.exit(0)
+    except Exception:
+        pass
+    time.sleep(2)
+raise SystemExit("CRBL media gateway contract is unavailable")
+PY
+
+/opt/hermes/.venv/bin/python - <<'PY'
+from gateway.platform_registry import platform_registry
+from hermes_cli import tools_config
+from hermes_cli.plugins import PluginManager
+from media_gateway.constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
+
+manager = PluginManager()
+manager.discover_and_load()
+entry = platform_registry.get("telegram")
+if entry is None or entry.plugin_name != "crbl-media":
+    raise SystemExit("CRBL Telegram adapter did not replace the native entry")
+expected = set(SHARED_TOOLS) | ADMIN_UPSTREAM_TOOLS
+missing = expected - manager._plugin_tool_names
+if missing:
+    raise SystemExit(f"CRBL media plugin did not register {sorted(missing)[0]}")
+resolver = getattr(tools_config, "_get_platform_tools", None)
+if not getattr(resolver, "__crbl_media__", False):
+    raise SystemExit("CRBL role-aware tool resolver is not active")
+PY

@@ -1,0 +1,16 @@
+name: telegram-platform
+label: Telegram CRBL media policy
+kind: platform
+version: 1.0.0
+description: Trusted Telegram identity and role-aware media tools.
+author: CRBL
+requires_env:
+  - name: TELEGRAM_BOT_TOKEN
+    description: Native Hermes Telegram token
+    password: true
+  - name: CRBL_MEDIA_GATEWAY_URL
+    description: Private media gateway URL
+    password: false
+  - name: CRBL_MEDIA_GATEWAY_TOKEN_FILE
+    description: Private gateway credential file
+    password: false

@@ -1,7 +1,0 @@
--r requirements.in
-
-mypy
-openapi-spec-validator
-pip-audit
-ruff
-types-requests

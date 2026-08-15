@@ -2,55 +2,54 @@ name: CI
 
 on:
   pull_request:
-    branches:
-      - main
   push:
-    branches:
-      - main
+    branches: [main]
 
 permissions:
   contents: read
 
+env:
+  PYTHON_BASE_IMAGE: python:3.12-slim@sha256:dd29372629eeba2dd003fd9e9d35a5b8236c44727875a0364254b5127af88e65
+  HERMES_BASE_IMAGE: nousresearch/hermes-agent@sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e
+
 jobs:
-  test:
-    name: Test
+  verify:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: requirements-dev.txt
-
-      - name: Install locked dependencies
-        run: python -m pip install --require-hashes -r requirements-dev.txt
-
-      - name: Run unit tests
-        run: python -W error::ResourceWarning -m unittest -q
-
-      - name: Check repository hygiene
-        run: python scripts/check_public_repo.py
-
-      - name: Check lint and formatting
+      - name: Install test dependencies
+        run: python -m pip install -e '.[dev]'
+      - name: Verify Python
         run: |
-          ruff check .
-          ruff format --check .
-
-      - name: Check types
-        run: mypy --check-untyped-defs media_request_server.py radarr_webhook_bridge.py scripts/check_public_repo.py
-
-      - name: Validate OpenAPI document
-        run: openapi-spec-validator docs/openapi.yaml
-
-      - name: Audit production dependencies
-        run: pip-audit -r requirements.txt
-
-      - name: Build MCP image
-        run: docker build --pull -t plex-media-request-mcp:ci -f Dockerfile .
-
-      - name: Build webhook image
-        run: docker build --pull -t plex-media-request-webhook:ci -f Dockerfile.webhook .
+          ruff check src tests
+          ruff format --check src tests
+          mypy src
+          pytest -q
+          pip-audit -r requirements.txt --require-hashes
+      - name: Validate Compose
+        env:
+          MEDIA_GATEWAY_IMAGE: ghcr.io/crbl-technologies/media-request-companion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          HERMES_MEDIA_IMAGE: ghcr.io/crbl-technologies/hermes-media@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          HERMES_DATA_DIR: /tmp/hermes
+          GATEWAY_STATE_DIR: /tmp/state
+          UPSTREAM_ENV_FILE: /tmp/upstream.env
+          GATEWAY_CONFIG_FILE: /tmp/gateway.env
+          GATEWAY_TOKEN_FILE: /tmp/gateway.key
+          DASHBOARD_PASSWORD_HASH_FILE: /tmp/password.hash
+          DASHBOARD_SESSION_KEY_FILE: /tmp/session.key
+          PLEX_WEBHOOK_TOKEN_FILE: /tmp/plex.key
+        run: docker compose -f deployment/compose.yaml config >/dev/null
+      - name: Build gateway
+        run: >-
+          docker build --build-arg PYTHON_BASE_IMAGE="$PYTHON_BASE_IMAGE"
+          --build-arg SOURCE_COMMIT="$GITHUB_SHA"
+          -f deployment/Dockerfile.gateway -t crbl-media-gateway:ci .
+      - name: Build Hermes adapter
+        run: >-
+          docker build --build-arg HERMES_BASE_IMAGE="$HERMES_BASE_IMAGE"
+          --build-arg SOURCE_COMMIT="$GITHUB_SHA"
+          -f deployment/Dockerfile.hermes -t crbl-hermes-media:ci .

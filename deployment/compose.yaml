@@ -1,0 +1,97 @@
+services:
+  media-server-mcp:
+    image: ghcr.io/wyattjoh/media-server-mcp@sha256:f83620da1d008ef18df3324b15e44854572ea41b528eff585033e4054b438377
+    restart: unless-stopped
+    user: "1000:1000"
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    env_file:
+      - ${UPSTREAM_ENV_FILE:?required}
+    environment:
+      TOOL_PROFILE: full
+    expose: ["3000"]
+    networks: [media-mcp, media]
+    healthcheck:
+      test: [CMD-SHELL, "wget -q -O /dev/null http://127.0.0.1:3000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  media-gateway:
+    image: ${MEDIA_GATEWAY_IMAGE:?required digest reference}
+    restart: unless-stopped
+    user: "1000:1000"
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    environment:
+      MEDIA_GATEWAY_CONFIG_FILE: /run/media-secrets/gateway.env
+    volumes:
+      - ${HERMES_DATA_DIR:?required}:/opt/hermes-data:rw
+      - ${GATEWAY_STATE_DIR:?required}:/opt/data/state:rw
+      - ${GATEWAY_CONFIG_FILE:?required}:/run/media-secrets/gateway.env:ro
+      - ${UPSTREAM_ENV_FILE:?required}:/run/media-secrets/upstream.env:ro
+      - ${GATEWAY_TOKEN_FILE:?required}:/run/media-secrets/gateway.key:ro
+      - ${DASHBOARD_PASSWORD_HASH_FILE:?required}:/run/media-secrets/dashboard-password.hash:ro
+      - ${DASHBOARD_SESSION_KEY_FILE:?required}:/run/media-secrets/dashboard-session.key:ro
+      - ${PLEX_WEBHOOK_TOKEN_FILE:?required}:/run/media-secrets/plex-webhook.key:ro
+    ports:
+      - "18082:18082"
+      - "127.0.0.1:18081:18082"
+    networks: [media-bot, media-mcp, media]
+    depends_on:
+      media-server-mcp:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:18082/readyz', timeout=3)
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  hermes-media:
+    image: ${HERMES_MEDIA_IMAGE:?required digest reference}
+    restart: unless-stopped
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=128m
+      - /run:rw,exec,nosuid,nodev,size=64m
+    command: [gateway, run]
+    environment:
+      HERMES_UID: "1000"
+      HERMES_GID: "1000"
+      HERMES_HOME: /opt/data
+      HERMES_DASHBOARD: "false"
+      CRBL_MEDIA_GATEWAY_URL: http://media-gateway:18082
+      CRBL_MEDIA_GATEWAY_TOKEN_FILE: /run/media-secrets/gateway.key
+    volumes:
+      - ${HERMES_DATA_DIR:?required}:/opt/data:rw
+      - ${GATEWAY_TOKEN_FILE:?required}:/run/media-secrets/gateway.key:ro
+    networks: [media-bot]
+    depends_on:
+      media-gateway:
+        condition: service_healthy
+
+networks:
+  media-bot:
+    name: media-bot
+    driver: bridge
+  media-mcp:
+    name: media-mcp
+    internal: true
+    driver: bridge
+  media:
+    name: media
+    external: true

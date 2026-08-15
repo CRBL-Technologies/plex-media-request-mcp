@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "crbl-media-gateway"
+version = "0.1.0"
+description = "Small policy, notification, and dashboard layer for media-server-mcp"
+requires-python = ">=3.12"
+dependencies = [
+  "httpx>=0.28,<1",
+  "mcp>=1.13,<2",
+  "python-multipart>=0.0.20,<1",
+  "starlette>=1.3.1,<2",
+  "uvicorn>=0.35,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.17,<2",
+  "pip-audit>=2.10,<3",
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.1,<2",
+  "ruff>=0.12,<1",
+]
+
+[project.scripts]
+media-gateway = "media_gateway.app:main"
+media-password = "media_gateway.password:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/media_gateway", "src/hermes_media"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/media_gateway/dashboard.py" = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["media_gateway", "hermes_media"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

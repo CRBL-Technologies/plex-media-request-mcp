@@ -1,0 +1,23 @@
+# syntax=docker/dockerfile:1.7
+ARG HERMES_BASE_IMAGE
+FROM ${HERMES_BASE_IMAGE}
+
+ARG HERMES_BASE_IMAGE
+ARG SOURCE_COMMIT
+RUN /opt/hermes/.venv/bin/python -c 'import re,sys; sys.exit(0 if re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", sys.argv[1]) else 1)' "$HERMES_BASE_IMAGE"
+
+ENV S6_BEHAVIOUR_IF_STAGE2_FAILS=2 \
+    PYTHONPATH=/app/src:/opt/hermes
+WORKDIR /opt/hermes
+
+COPY src /app/src
+COPY deployment/hermes/plugin /opt/hermes/plugins/platforms/zzzz-crbl-media
+COPY --chmod=0755 deployment/hermes/03-crbl-media /etc/cont-init.d/03-crbl-media
+
+RUN /opt/hermes/.venv/bin/python -c 'import httpx; import hermes_media.plugin' \
+    && test -f /opt/hermes/plugins/platforms/zzzz-crbl-media/plugin.yaml
+
+LABEL org.opencontainers.image.source="https://github.com/CRBL-Technologies/plex-media-request-mcp" \
+      org.opencontainers.image.revision="$SOURCE_COMMIT"
+
+CMD ["gateway", "run"]

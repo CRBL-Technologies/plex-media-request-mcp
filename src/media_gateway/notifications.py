@@ -70,25 +70,35 @@ class Notifications:
         if not isinstance(metadata, dict):
             return False
         kind = metadata.get("type")
-        if kind not in {"movie", "episode"}:
+        if kind not in {"movie", "show", "season", "episode"}:
             return False
         rating_key = str(metadata.get("ratingKey") or "").strip()
         if not rating_key or len(rating_key) > 100:
             return False
         external_id: int | None
+        parent_key: str | None = None
         if kind == "movie":
             external_id = _external_id(metadata, "tmdb")
+            show_title = None
+            season = None
+            episode = None
+        elif kind == "show":
+            external_id = _external_id(metadata, "tvdb")
+            show_title = str(metadata.get("title") or "Untitled")[:300]
+            season = None
+            episode = None
         else:
             external_id = _guide_id(metadata.get("grandparentGuid"), "tvdb")
-            parent_key = metadata.get("grandparentRatingKey")
+            raw_parent_key = metadata.get("grandparentRatingKey")
+            parent_key = raw_parent_key if isinstance(raw_parent_key, str) else None
+            show_title = (
+                str(metadata.get("grandparentTitle"))[:300]
+                if metadata.get("grandparentTitle")
+                else None
+            )
+            season = _positive(metadata.get("index" if kind == "season" else "parentIndex"))
+            episode = _positive(metadata.get("index")) if kind == "episode" else None
         title = str(metadata.get("title") or "Untitled")[:300]
-        show_title = (
-            str(metadata.get("grandparentTitle"))[:300]
-            if metadata.get("grandparentTitle")
-            else None
-        )
-        season = _positive(metadata.get("parentIndex"))
-        episode = _positive(metadata.get("index"))
         encoded_key = quote(f"/library/metadata/{rating_key}", safe="")
         url = (
             "https://app.plex.tv/desktop/#!/server/"
@@ -103,9 +113,7 @@ class Notifications:
             show_title=show_title,
             season_number=season,
             episode_number=episode,
-            parent_rating_key=(
-                parent_key if kind == "episode" and isinstance(parent_key, str) else None
-            ),
+            parent_rating_key=parent_key,
             plex_url=url,
         )
 
@@ -170,9 +178,12 @@ class Notifications:
         )
 
     async def flush(self) -> None:
-        before = int(time.time()) - self.config.notification_delay_seconds
-        events = self.store.pending_media_events(before)
-        events = await self._enrich(events)
+        now = int(time.time())
+        before = now - self.config.notification_delay_seconds
+        # Read young rows too: a season batch is delivered only after the
+        # entire group has been quiet for the configured delay. Filtering in
+        # SQL first would send early episodes while later ones were arriving.
+        events = self.store.pending_media_events(now, limit=500)
         grouped: dict[tuple[object, ...], list[dict[str, Any]]] = defaultdict(list)
         for event in events:
             key: tuple[object, ...]
@@ -186,6 +197,9 @@ class Notifications:
                 key = ("movie", event["event_key"])
             grouped[key].append(event)
         for batch in grouped.values():
+            if max(int(item["observed_at"]) for item in batch) > before:
+                continue
+            batch = await self._enrich(batch)
             await self._deliver_batch(batch)
 
     async def _enrich(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -212,6 +226,18 @@ class Notifications:
                 if external_id is not None:
                     event["external_id"] = external_id
                     self.store.set_media_external_id(str(event["event_key"]), external_id)
+            if (
+                event.get("media_type") == "series"
+                and event.get("season_number") is None
+                and isinstance(event.get("external_id"), int)
+            ):
+                requested = self.store.requested_seasons(int(event["external_id"]))
+                if len(requested) == 1:
+                    # A first-time Plex show event represents the newly added
+                    # series as a whole. Preserve the one requested season in
+                    # the notification even though Plex omits it from the
+                    # top-level webhook payload.
+                    event["season_number"] = next(iter(requested))
             ready.append(event)
         return ready
 
@@ -252,9 +278,13 @@ class Notifications:
             return f"🍿 <b>Available in Plex</b>\n{html.escape(str(first['title']))}"
         show = html.escape(str(first["show_title"] or first["title"]))
         season = first["season_number"]
+        episodes = [item for item in batch if item["episode_number"] is not None]
+        if not episodes:
+            label = f"Season {season}" if season is not None else "New series"
+            return f"📺 <b>Available in Plex</b>\n{show} · {label}"
         if len(batch) > 1:
             label = f"Season {season}" if season is not None else "New episodes"
-            return f"📺 <b>Available in Plex</b>\n{show} · {label} ({len(batch)} episodes)"
+            return f"📺 <b>Available in Plex</b>\n{show} · {label} ({len(episodes)} episodes)"
         episode = first["episode_number"]
         marker = ""
         if season is not None and episode is not None:

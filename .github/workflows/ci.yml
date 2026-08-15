@@ -96,3 +96,35 @@ jobs:
           docker build --build-arg HERMES_BASE_IMAGE="$HERMES_BASE_IMAGE"
           --build-arg SOURCE_COMMIT="$GITHUB_SHA"
           -f deployment/Dockerfile.hermes -t crbl-hermes-media:ci .
+      - name: Verify Hermes adapter under s6-overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+          network="crbl-hermes-ci-$GITHUB_RUN_ID"
+          stub="crbl-gateway-stub-$GITHUB_RUN_ID"
+          cleanup() {
+            docker rm -f "$stub" >/dev/null 2>&1 || true
+            docker network rm "$network" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          smoke="$RUNNER_TEMP/hermes-adapter-smoke"
+          mkdir -p "$smoke"
+          printf '%064d\n' 0 > "$smoke/gateway.key"
+          docker network create "$network" >/dev/null
+          docker run --detach --rm --name "$stub" --network "$network" --network-alias gateway \
+            -e PYTHONPATH=/app/src \
+            -v "$GITHUB_WORKSPACE/src:/app/src:ro" \
+            -v "$GITHUB_WORKSPACE/tests/hermes_gateway_stub.py:/app/stub.py:ro" \
+            python:3.12-slim@sha256:dd29372629eeba2dd003fd9e9d35a5b8236c44727875a0364254b5127af88e65 \
+            python /app/stub.py >/dev/null
+          docker run --rm --network "$network" \
+            --tmpfs /opt/data:rw,nosuid,nodev,size=64m \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=128m \
+            --tmpfs /run:rw,exec,nosuid,nodev,size=64m \
+            -e HERMES_UID=1000 \
+            -e HERMES_GID=1000 \
+            -e HERMES_HOME=/opt/data \
+            -e CRBL_MEDIA_GATEWAY_URL=http://gateway:18082 \
+            -e CRBL_MEDIA_GATEWAY_TOKEN_FILE=/run/media-secrets/gateway.key \
+            -v "$smoke/gateway.key:/run/media-secrets/gateway.key:ro" \
+            crbl-hermes-media:ci true

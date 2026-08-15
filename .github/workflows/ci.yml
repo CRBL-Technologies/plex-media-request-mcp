@@ -36,7 +36,7 @@ jobs:
           HERMES_MEDIA_IMAGE: ghcr.io/crbl-technologies/hermes-media@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
           HERMES_DATA_DIR: /tmp/hermes
           GATEWAY_STATE_DIR: /tmp/state
-          UPSTREAM_ENV_FILE: /tmp/upstream.env
+          UPSTREAM_ENV_FILE: ${{ github.workspace }}/deployment/upstream.env.example
           GATEWAY_CONFIG_FILE: /tmp/gateway.env
           GATEWAY_TOKEN_FILE: /tmp/gateway.key
           DASHBOARD_PASSWORD_HASH_FILE: /tmp/password.hash

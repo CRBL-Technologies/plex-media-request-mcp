@@ -27,9 +27,10 @@ PY
 /opt/hermes/.venv/bin/python - <<'PY'
 from gateway.platform_registry import platform_registry
 from agent.web_search_registry import get_active_extract_provider, get_active_search_provider
-from agent.tool_guardrails import LoopCapConfig
+from hermes_cli.config import load_config_readonly
 from hermes_cli import tools_config
 from hermes_cli.plugins import PluginManager
+from hermes_media.plugin import validate_search_guardrail
 from media_gateway.constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
 from toolsets import TOOLSETS
 
@@ -53,6 +54,5 @@ if provider is None or provider.name != "ddgs" or not provider.is_available():
     raise SystemExit("DuckDuckGo search provider is unavailable")
 if get_active_extract_provider() is not None:
     raise SystemExit("CRBL media bot must not enable web extraction")
-if LoopCapConfig.from_mapping({"max_web_searches": 50}).max_web_searches != 10:
-    raise SystemExit("CRBL web-search loop cap is inactive")
+validate_search_guardrail(load_config_readonly())
 PY

@@ -40,8 +40,10 @@ movie recommendations, release dates, and viewing-order research. The image
 bakes a hash-locked provider dependency; it does not expose `web_extract`,
 browser automation, files, a shell, or arbitrary URL fetching. Hermes treats
 search results as untrusted web content. The adapter clamps the native runaway
-guardrail to at most ten web searches per response without rewriting Hermes'
-persistent configuration.
+guardrail to ten web searches per response through Hermes' canonical
+`tool_loop_guardrails.loop_caps.max_web_searches` setting. The image startup
+gate refuses to run if the persisted value is absent or different, so the
+agent and release verifier always read the same setting.
 
 Configured administrators also receive the reviewed Plex/Radarr/Sonarr tools
 discovered from the pinned upstream MCP. Future upstream tools are not admitted
@@ -98,6 +100,16 @@ material is stored in individual read-only files.
 The dashboard binds NAS port `18082` for LAN/Tailscale access. Port `18081` is
 loopback-only for the host-network Plex webhook. The Hermes dashboard and Docker
 socket are absent. The upstream MCP has no published port.
+
+The media agent's canonical `/opt/data/config.yaml` must contain:
+
+```yaml
+tool_loop_guardrails:
+  loop_caps:
+    max_web_searches: 10
+```
+
+This is a native Hermes setting, not a second CRBL configuration source.
 
 The new gateway database is schema-versioned and fails closed on an incompatible
 old database. Back up the previous file, then start the clean deployment with a

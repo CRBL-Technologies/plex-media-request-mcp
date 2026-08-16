@@ -152,26 +152,13 @@ def test_platform_visibility_adds_search_only_for_media_telegram(
     assert resolver({}, "discord") == {"native"}
 
 
-def test_web_search_guardrail_is_clamped_without_persistent_config(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    @dataclass(frozen=True)
-    class FakeLoopCapConfig:
-        max_web_searches: int = 50
-
-        @classmethod
-        def from_mapping(cls, data: dict[str, Any] | None) -> FakeLoopCapConfig:
-            value = 50 if data is None else int(data.get("max_web_searches", 50))
-            return cls(max_web_searches=value)
-
-    agent = ModuleType("agent")
-    agent.__path__ = []  # type: ignore[attr-defined]
-    guardrails = ModuleType("agent.tool_guardrails")
-    guardrails.LoopCapConfig = FakeLoopCapConfig  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "agent", agent)
-    monkeypatch.setitem(sys.modules, "agent.tool_guardrails", guardrails)
-
-    plugin._guardrail_patch()
-    assert FakeLoopCapConfig.from_mapping({"max_web_searches": 50}).max_web_searches == 10
-    assert FakeLoopCapConfig.from_mapping({"max_web_searches": 0}).max_web_searches == 10
-    assert FakeLoopCapConfig.from_mapping({"max_web_searches": 5}).max_web_searches == 5
+def test_web_search_guardrail_uses_canonical_hermes_config() -> None:
+    plugin.validate_search_guardrail(
+        {"tool_loop_guardrails": {"loop_caps": {"max_web_searches": 10}}}
+    )
+    with pytest.raises(RuntimeError, match="max_web_searches"):
+        plugin.validate_search_guardrail({})
+    with pytest.raises(RuntimeError, match="max_web_searches"):
+        plugin.validate_search_guardrail(
+            {"tool_loop_guardrails": {"loop_caps": {"max_web_searches": 50}}}
+        )

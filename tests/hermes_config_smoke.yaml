@@ -1,0 +1,4 @@
+_config_version: 33
+tool_loop_guardrails:
+  loop_caps:
+    max_web_searches: 10

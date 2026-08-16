@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import threading
+import time
 import uuid
 from collections.abc import Callable, Coroutine, Mapping
 from concurrent.futures import Future
@@ -35,6 +36,8 @@ from .trusted import (
     actor_from_event,
     actor_scope,
     current_role,
+    current_turn_text,
+    is_recommendation_turn,
     require_actor,
     require_session_key,
     session_key_from_event,
@@ -45,6 +48,7 @@ SHARED_TOOLSET = "crbl-media-shared"
 ADMIN_TOOLSET = "crbl-media-admin"
 SEARCH_TOOLSET = "search"
 WEB_SEARCH_CAP = 10
+RECOMMENDATION_CONTEXT_SECONDS = 30 * 60
 SEARCH_PRESENTATION_LIMIT = 4
 BUTTON_LABEL_LIMIT = 34
 CAPTION_HEADING_LIMIT = 200
@@ -63,8 +67,9 @@ PLATFORM_HINT = (
     "reuse search results from conversation history. search_media itself handles any "
     "ambiguous-result selection before it returns. Never repeat its candidate list or "
     "call clarify for those same candidates. For a recommendation request, use web_search to "
-    "choose 2-4 distinct titles, then call recommend_media exactly once with those exact titles "
-    "and years; never call search_media separately for each recommendation. If the user's "
+    "choose exactly 4 distinct titles, then call recommend_media exactly once with those exact "
+    "titles and years; never call search_media separately for each recommendation. Discovery "
+    "turns reject model-generated single-title searches before a card is sent. If the user's "
     "current message explicitly says "
     "to add or request media, continue to request the selected result, whether it was chosen by "
     "button or by typed reply. The Telegram media card's Request movie action performs the "
@@ -92,6 +97,7 @@ _client: GatewayClient | None = None
 class _PendingMediaPicker:
     clarify_id: str
     choices: tuple[str, ...]
+    session_key: str = ""
     candidates: tuple[dict[str, Any], ...] = ()
     posters: tuple[str | None, ...] = ()
     actor_user_id: int = 0
@@ -103,6 +109,18 @@ class _PendingMediaPicker:
 
 _pending_picker_lock = threading.Lock()
 _pending_pickers: dict[str, _PendingMediaPicker] = {}
+_recommendation_context_lock = threading.Lock()
+_recommendation_contexts: dict[str, float] = {}
+
+
+_RECOMMENDATION_PATTERNS = (
+    re.compile(r"\b(?:recommend|recommendation|suggest|suggestion)s?\b", re.IGNORECASE),
+    re.compile(r"\bsomething\b", re.IGNORECASE),
+    re.compile(r"\b(?:what|which)\b.{0,40}\bwatch\b", re.IGNORECASE),
+    re.compile(r"\b(?:movie|show|series|film)s?\b.{0,30}\bfor tonight\b", re.IGNORECASE),
+    re.compile(r"\b(?:watch|watching)\b.{0,20}\btonight\b", re.IGNORECASE),
+    re.compile(r"\bsimilar to\b", re.IGNORECASE),
+)
 
 
 def _gateway() -> GatewayClient:
@@ -110,6 +128,43 @@ def _gateway() -> GatewayClient:
     if _client is None:
         _client = GatewayClient.from_env()
     return _client
+
+
+def _looks_like_recommendation(text: str) -> bool:
+    return any(pattern.search(text) for pattern in _RECOMMENDATION_PATTERNS)
+
+
+def _recommendation_context(session_key: str, text: str) -> bool:
+    now = time.monotonic()
+    with _recommendation_context_lock:
+        expired = [key for key, deadline in _recommendation_contexts.items() if deadline <= now]
+        for key in expired:
+            _recommendation_contexts.pop(key, None)
+        if _looks_like_recommendation(text):
+            _recommendation_contexts[session_key] = now + RECOMMENDATION_CONTEXT_SECONDS
+        return session_key in _recommendation_contexts
+
+
+def _clear_recommendation_context(session_key: str) -> None:
+    with _recommendation_context_lock:
+        _recommendation_contexts.pop(session_key, None)
+
+
+def _normalized_words(value: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", value.casefold())
+
+
+def _query_is_from_current_message(query: object, message: str) -> bool:
+    if not isinstance(query, str):
+        return False
+    query_words = _normalized_words(query)
+    message_words = _normalized_words(message)
+    if not query_words or not message_words:
+        return False
+    width = len(query_words)
+    return any(
+        message_words[index : index + width] == query_words for index in range(len(message_words))
+    )
 
 
 class MediaTelegramAdapter(_NativeAdapter):  # type: ignore[misc, valid-type]
@@ -151,8 +206,15 @@ class MediaTelegramAdapter(_NativeAdapter):  # type: ignore[misc, valid-type]
         role = await _gateway().observe(actor)
         if role is Role.BLOCKED:
             raise PermissionError("Telegram user is not allowed")
-        with actor_scope(actor, role, session_key):
-            text = _event_text(event)
+        text = _event_text(event)
+        recommendation_turn = _recommendation_context(session_key, text)
+        with actor_scope(
+            actor,
+            role,
+            session_key,
+            turn_text=text,
+            recommendation_turn=recommendation_turn,
+        ):
             if text and not text.startswith("/"):
                 picker_action = await _resolve_pending_picker_text(session_key, text)
                 if picker_action == "selected":
@@ -174,6 +236,7 @@ def _event_text(event: object) -> str:
 
 def _set_pending_picker(session_key: str, pending: _PendingMediaPicker) -> None:
     with _pending_picker_lock:
+        pending.session_key = session_key
         _pending_pickers[session_key] = pending
 
 
@@ -274,6 +337,12 @@ async def _resolve_pending_picker_text(session_key: str, text: str) -> str:
     # can no longer be mistaken for a second answer to the stale picker.
     await asyncio.to_thread(clarify.wait_for_response, pending.clarify_id, 0.05)
     _discard_pending_picker(session_key, pending.clarify_id)
+    if selection is None:
+        interrupt_running_turn(
+            _active_adapter,
+            session_key,
+            "Telegram media picker superseded by a new message",
+        )
     return "selected" if selection is not None else "superseded"
 
 
@@ -445,6 +514,7 @@ async def _select_search_result(
     pending = _PendingMediaPicker(
         clarify_id=clarify_id,
         choices=tuple(choices),
+        session_key=session_key,
         candidates=tuple(candidates),
         posters=tuple(posters),
         actor_user_id=actor_user_id,
@@ -489,6 +559,8 @@ async def _select_search_result(
         response = await asyncio.to_thread(clarify.wait_for_response, clarify_id, timeout)
         if isinstance(response, str) and response.strip():
             return response.strip()
+        if recommendation_mode:
+            _clear_recommendation_context(session_key)
         interrupt_running_turn(adapter, session_key, "Telegram media picker expired")
         return MEDIA_PICKER_EXPIRED
     finally:
@@ -597,6 +669,13 @@ async def _handle_media_picker_callback(update: object, adapter: object) -> bool
     if not clarify.resolve_gateway_clarify(callback.picker_id, response):
         await answer_media_callback(query, "This media card has expired.")
         return True
+    if response == MEDIA_PICKER_CANCELLED:
+        _clear_recommendation_context(pending.session_key)
+        interrupt_running_turn(
+            adapter or _active_adapter,
+            pending.session_key,
+            "Telegram media picker cancelled",
+        )
     acknowledgement = {
         MEDIA_PICKER_CANCELLED: "Cancelled",
         MEDIA_PICKER_MORE: "Searching for more…",
@@ -699,6 +778,7 @@ async def _decorate_search_result(
         }
         return decorated
     if selection == MEDIA_PICKER_CANCELLED:
+        _clear_recommendation_context(session_key)
         decorated["results"] = []
         decorated["telegram_presentation"] = {
             "poster_cards_delivered": delivered,
@@ -765,6 +845,7 @@ async def _decorate_search_result(
             }
             return decorated
         if recommendation_mode:
+            _clear_recommendation_context(session_key)
             instruction = (
                 "The user picked this exact recommendation. Answer only about this title and "
                 "offer to request it if unavailable; do not request it unless the user asked."
@@ -847,11 +928,39 @@ def _handler(name: str) -> Callable[..., Coroutine[Any, Any, str]]:
     async def call(arguments: Mapping[str, Any], **runtime: Any) -> str:
         del runtime
         actor = require_actor()
+        session_key = require_session_key()
+        if name == "search_media" and is_recommendation_turn():
+            turn_text = current_turn_text()
+            query = arguments.get("query")
+            if _looks_like_recommendation(turn_text) or not _query_is_from_current_message(
+                query, turn_text
+            ):
+                logger.info(
+                    "Redirected single-title search to recommendation batch for session %s",
+                    session_key,
+                )
+                return json.dumps(
+                    {
+                        "query": query,
+                        "results": [],
+                        "telegram_presentation": {
+                            "poster_cards_delivered": False,
+                            "selection_status": "recommendation_batch_required",
+                            "instruction": (
+                                "This is a recommendation turn. Choose exactly 4 distinct titles "
+                                "and call recommend_media once; do not call search_media again."
+                            ),
+                        },
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            _clear_recommendation_context(session_key)
         result = await _gateway().call(actor, name, dict(arguments))
         if name in {"search_media", "recommend_media"} and isinstance(result.get("results"), list):
             result = await _decorate_search_result(
                 actor.chat_id,
-                require_session_key(),
+                session_key,
                 result,
             )
         return json.dumps(result, ensure_ascii=False, separators=(",", ":"))

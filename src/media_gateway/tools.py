@@ -209,7 +209,7 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "recommend_media": {
         "description": (
-            "Present one exact Radarr/Sonarr match for each of 2-4 distinct titles after "
+            "Present one exact Radarr/Sonarr match for each of exactly 4 distinct titles after "
             "recommendation research. Use this once for discovery requests instead of calling "
             "search_media separately for every title. Include a year in each title when known. "
             "On Telegram this creates one recommendation card with Pick, Search more, and "
@@ -221,7 +221,7 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
                 "titles": {
                     "type": "array",
                     "items": {"type": "string", "minLength": 2, "maxLength": 120},
-                    "minItems": 2,
+                    "minItems": 4,
                     "maxItems": 4,
                     "uniqueItems": True,
                 },
@@ -419,8 +419,8 @@ class ToolService:
     ) -> dict[str, Any]:
         args = _exact(arguments, {"titles", "media_type"})
         raw_titles = args.get("titles")
-        if not isinstance(raw_titles, list) or not 2 <= len(raw_titles) <= 4:
-            raise ToolError("titles must contain between 2 and 4 items")
+        if not isinstance(raw_titles, list) or len(raw_titles) != 4:
+            raise ToolError("titles must contain exactly 4 items")
         titles = [_short_text(item, "title", minimum=2) for item in raw_titles]
         if len({_recommendation_target(title)[0] for title in titles}) != len(titles):
             raise ToolError("titles must be distinct")

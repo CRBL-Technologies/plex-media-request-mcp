@@ -64,10 +64,12 @@ so a typed number or button click cannot become a second bare query. Remote
 poster URLs are never sent through Hermes' local-file `MEDIA:` convention.
 An exact number, unique year, or exact title still selects a result, while
 other text supersedes the old card and starts a fresh request.
-Recommendation research uses `recommend_media` once with two to four distinct
-titles instead of opening one ambiguity picker per suggestion. Its card offers
-Pick, Search more, and Cancel. Search more explicitly asks Hermes for a fresh,
-different batch; silence never advances recommendation research.
+Recommendation research uses `recommend_media` once with four distinct titles
+instead of opening one ambiguity picker per suggestion. Recommendation turns
+reject model-generated single-title lookups before a card is sent. The one
+four-title card offers Pick, Search more, and Cancel; Search more explicitly
+asks Hermes for a fresh batch that excludes the current titles. Silence never
+advances recommendation research.
 Every title lookup, availability check, and request must refresh `search_media`
 in the current turn; conversation history is never a valid substitute for a
 current provider result. Hermes's built-in Telegram hint takes precedence over

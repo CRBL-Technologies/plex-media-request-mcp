@@ -58,6 +58,8 @@ def _text(value: object) -> str | None:
 _ACTOR: ContextVar[Actor | None] = ContextVar("crbl_media_actor", default=None)
 _ROLE: ContextVar[Role | None] = ContextVar("crbl_media_role", default=None)
 _SESSION_KEY: ContextVar[str | None] = ContextVar("crbl_media_session_key", default=None)
+_TURN_TEXT: ContextVar[str] = ContextVar("crbl_media_turn_text", default="")
+_RECOMMENDATION_TURN: ContextVar[bool] = ContextVar("crbl_media_recommendation_turn", default=False)
 
 
 def session_key_from_event(
@@ -91,13 +93,24 @@ def session_key_from_event(
 
 
 @contextmanager
-def actor_scope(actor: Actor, role: Role, session_key: str | None = None) -> Iterator[None]:
+def actor_scope(
+    actor: Actor,
+    role: Role,
+    session_key: str | None = None,
+    *,
+    turn_text: str = "",
+    recommendation_turn: bool = False,
+) -> Iterator[None]:
     actor_token = _ACTOR.set(actor)
     role_token = _ROLE.set(role)
     session_token = _SESSION_KEY.set(session_key or f"agent:main:telegram:dm:{actor.chat_id}")
+    turn_text_token = _TURN_TEXT.set(turn_text)
+    recommendation_token = _RECOMMENDATION_TURN.set(recommendation_turn)
     try:
         yield
     finally:
+        _RECOMMENDATION_TURN.reset(recommendation_token)
+        _TURN_TEXT.reset(turn_text_token)
         _SESSION_KEY.reset(session_token)
         _ROLE.reset(role_token)
         _ACTOR.reset(actor_token)
@@ -115,6 +128,14 @@ def require_session_key() -> str:
     if session_key is None:
         raise TrustError("no trusted Telegram session is active")
     return session_key
+
+
+def current_turn_text() -> str:
+    return _TURN_TEXT.get()
+
+
+def is_recommendation_turn() -> bool:
+    return _RECOMMENDATION_TURN.get()
 
 
 def current_role() -> Role | None:

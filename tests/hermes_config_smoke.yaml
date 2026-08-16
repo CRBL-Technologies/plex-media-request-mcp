@@ -1,4 +1,8 @@
 _config_version: 33
+platform_hints:
+  telegram:
+    append: >-
+      Telegram identity is trusted automatically; never request user IDs. For every movie or series title lookup, availability check, or request, call search_media in the current turn before answering or changing anything. Never reuse search results from conversation history. When search_media returns telegram_presentation and the user must choose among multiple matches, call the clarify tool with the exact clarify_choices.
 tool_loop_guardrails:
   loop_caps:
     max_web_searches: 10

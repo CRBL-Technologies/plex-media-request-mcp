@@ -58,7 +58,10 @@ and resumes the same turn with the selected TMDB or TVDB result. Remote poster
 URLs are never sent through Hermes' local-file `MEDIA:` convention.
 Every title lookup, availability check, and request must refresh `search_media`
 in the current turn; conversation history is never a valid substitute for a
-current provider result.
+current provider result. Hermes's built-in Telegram hint takes precedence over
+plugin metadata, so this rule is also installed as the canonical
+`platform_hints.telegram.append` override. The image startup gate validates the
+effective resolved prompt before the agent starts.
 
 Upstream 2.3.0 lists `radarr_get_queue` in its full profile but does not register
 the tool. The gateway therefore contains one narrow read-only Radarr queue call;

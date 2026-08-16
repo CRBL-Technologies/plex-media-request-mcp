@@ -25,12 +25,16 @@ raise SystemExit("CRBL media gateway contract is unavailable")
 PY
 
 /opt/hermes/.venv/bin/python - <<'PY'
+from types import SimpleNamespace
+
 from gateway.platform_registry import platform_registry
+from agent.prompt_builder import PLATFORM_HINTS
+from agent.system_prompt import _resolve_platform_hint
 from agent.web_search_registry import get_active_extract_provider, get_active_search_provider
 from hermes_cli.config import load_config_readonly
 from hermes_cli import tools_config
 from hermes_cli.plugins import PluginManager
-from hermes_media.plugin import validate_search_guardrail
+from hermes_media.plugin import PLATFORM_HINT, validate_platform_hint, validate_search_guardrail
 from media_gateway.constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
 from toolsets import TOOLSETS
 
@@ -54,5 +58,14 @@ if provider is None or provider.name != "ddgs" or not provider.is_available():
     raise SystemExit("DuckDuckGo search provider is unavailable")
 if get_active_extract_provider() is not None:
     raise SystemExit("CRBL media bot must not enable web extraction")
-validate_search_guardrail(load_config_readonly())
+config = load_config_readonly()
+validate_search_guardrail(config)
+validate_platform_hint(config)
+effective_hint = _resolve_platform_hint(
+    SimpleNamespace(_platform_hint_overrides=config["platform_hints"]),
+    "telegram",
+    PLATFORM_HINTS["telegram"],
+)
+if PLATFORM_HINT not in effective_hint:
+    raise SystemExit("CRBL media guidance is absent from the effective Telegram prompt")
 PY

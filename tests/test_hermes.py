@@ -243,3 +243,13 @@ def test_web_search_guardrail_uses_canonical_hermes_config() -> None:
         plugin.validate_search_guardrail(
             {"tool_loop_guardrails": {"loop_caps": {"max_web_searches": 50}}}
         )
+
+
+def test_platform_hint_requires_effective_telegram_override() -> None:
+    plugin.validate_platform_hint(
+        {"platform_hints": {"telegram": {"append": plugin.PLATFORM_HINT}}}
+    )
+    with pytest.raises(RuntimeError, match=r"platform_hints\.telegram\.append"):
+        plugin.validate_platform_hint({})
+    with pytest.raises(RuntimeError, match=r"platform_hints\.telegram\.append"):
+        plugin.validate_platform_hint({"platform_hints": {"telegram": plugin.PLATFORM_HINT}})

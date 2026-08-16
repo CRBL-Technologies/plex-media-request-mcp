@@ -7,9 +7,12 @@ import inspect
 import json
 import logging
 import os
+import re
+import threading
 import uuid
 from collections.abc import Callable, Coroutine, Mapping
 from concurrent.futures import Future
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -32,6 +35,9 @@ ADMIN_TOOLSET = "crbl-media-admin"
 SEARCH_TOOLSET = "search"
 WEB_SEARCH_CAP = 10
 SEARCH_PRESENTATION_LIMIT = 4
+MEDIA_PICKER_TIMEOUT_SECONDS = 120.0
+MEDIA_PICKER_SUPERSEDED = "__crbl_media_picker_superseded__"
+MEDIA_PICKER_EXPIRED = "__crbl_media_picker_expired__"
 PLATFORM_HINT = (
     "Telegram identity is trusted automatically; never request user IDs. "
     "For every movie or series title lookup, availability check, or request, call "
@@ -64,6 +70,16 @@ def _native_adapter() -> type:
 
 _NativeAdapter = _native_adapter()
 _client: GatewayClient | None = None
+
+
+@dataclass(frozen=True)
+class _PendingMediaPicker:
+    clarify_id: str
+    choices: tuple[str, ...]
+
+
+_pending_picker_lock = threading.Lock()
+_pending_pickers: dict[str, _PendingMediaPicker] = {}
 
 
 def _gateway() -> GatewayClient:
@@ -112,11 +128,103 @@ class MediaTelegramAdapter(_NativeAdapter):  # type: ignore[misc, valid-type]
         if role is Role.BLOCKED:
             raise PermissionError("Telegram user is not allowed")
         with actor_scope(actor, role, session_key):
+            text = _event_text(event)
+            if text and not text.startswith("/"):
+                picker_action = await _resolve_pending_picker_text(session_key, text)
+                if picker_action == "selected":
+                    return None
             result = super().handle_message(event)
             return await result if inspect.isawaitable(result) else result
 
 
 _active_adapter: MediaTelegramAdapter | None = None
+
+
+def _event_text(event: object) -> str:
+    value = getattr(event, "text", None)
+    if not isinstance(value, str):
+        raw_message = getattr(event, "raw_message", None)
+        value = getattr(raw_message, "text", None)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _set_pending_picker(session_key: str, pending: _PendingMediaPicker) -> None:
+    with _pending_picker_lock:
+        _pending_pickers[session_key] = pending
+
+
+def _get_pending_picker(session_key: str) -> _PendingMediaPicker | None:
+    with _pending_picker_lock:
+        return _pending_pickers.get(session_key)
+
+
+def _discard_pending_picker(session_key: str, clarify_id: str) -> None:
+    with _pending_picker_lock:
+        current = _pending_pickers.get(session_key)
+        if current is not None and current.clarify_id == clarify_id:
+            _pending_pickers.pop(session_key, None)
+    adapter = _active_adapter
+    native_state = getattr(adapter, "_clarify_state", None)
+    if isinstance(native_state, dict):
+        native_state.pop(clarify_id, None)
+
+
+def _picker_choice(text: str, choices: tuple[str, ...]) -> str | None:
+    """Resolve only unambiguous selection-shaped text.
+
+    Everything else is a new conversational request and supersedes the
+    picker. This keeps a title such as ``avengers`` from becoming free-form
+    input to the previous media search.
+    """
+
+    normalized = " ".join(text.casefold().split())
+    if not normalized:
+        return None
+    if normalized.isdecimal():
+        index = int(normalized)
+        if 1 <= index <= len(choices):
+            return choices[index - 1]
+    exact = [choice for choice in choices if " ".join(choice.casefold().split()) == normalized]
+    if len(exact) == 1:
+        return exact[0]
+    if re.fullmatch(r"\d{4}", normalized):
+        by_year = [choice for choice in choices if f"({normalized})" in choice]
+        if len(by_year) == 1:
+            return by_year[0]
+    by_title = []
+    for choice in choices:
+        title = choice.split(" · ", 1)[0]
+        title = re.sub(r"\s+\(\d{4}\)$", "", title)
+        if " ".join(title.casefold().split()) == normalized:
+            by_title.append(choice)
+    return by_title[0] if len(by_title) == 1 else None
+
+
+def _picker_timeout(configured_timeout: float) -> float:
+    if configured_timeout <= 0:
+        return MEDIA_PICKER_TIMEOUT_SECONDS
+    return min(configured_timeout, MEDIA_PICKER_TIMEOUT_SECONDS)
+
+
+async def _resolve_pending_picker_text(session_key: str, text: str) -> str:
+    """Select an active picker or cancel it in favor of a fresh message."""
+
+    pending = _get_pending_picker(session_key)
+    if pending is None:
+        return "none"
+    selection = _picker_choice(text, pending.choices)
+    response = selection or MEDIA_PICKER_SUPERSEDED
+    clarify = _clarify_gateway()
+    if not clarify.resolve_gateway_clarify(pending.clarify_id, response):
+        _discard_pending_picker(session_key, pending.clarify_id)
+        return "none"
+
+    # Drain the native entry immediately. The original tool waiter owns the
+    # same event object and receives the same response, while the new message
+    # can no longer be mistaken for a second answer to the stale picker.
+    await asyncio.to_thread(clarify.wait_for_response, pending.clarify_id, 0.05)
+    _discard_pending_picker(session_key, pending.clarify_id)
+    return "selected" if selection is not None else "superseded"
 
 
 def _candidate_label(candidate: object) -> str | None:
@@ -261,6 +369,13 @@ async def _select_search_result(
         choices=choices,
         multi_select=False,
     )
+    pending = _PendingMediaPicker(clarify_id=clarify_id, choices=tuple(choices))
+    previous = _get_pending_picker(session_key)
+    if previous is not None:
+        clarify.resolve_gateway_clarify(previous.clarify_id, MEDIA_PICKER_SUPERSEDED)
+        await asyncio.to_thread(clarify.wait_for_response, previous.clarify_id, 0.05)
+        _discard_pending_picker(session_key, previous.clarify_id)
+    _set_pending_picker(session_key, pending)
 
     async def deliver() -> bool:
         response = await send_clarify(
@@ -274,18 +389,23 @@ async def _select_search_result(
         return bool(getattr(response, "success", False))
 
     try:
-        delivered = bool(await _on_adapter_loop(deliver, timeout=15))
-    except Exception:
-        logger.warning("Telegram media picker delivery failed", exc_info=True)
-        delivered = False
-    if not delivered:
-        clarify.resolve_gateway_clarify(clarify_id, "")
-        await asyncio.to_thread(clarify.wait_for_response, clarify_id, 0.01)
-        return None
+        try:
+            delivered = bool(await _on_adapter_loop(deliver, timeout=15))
+        except Exception:
+            logger.warning("Telegram media picker delivery failed", exc_info=True)
+            delivered = False
+        if not delivered:
+            clarify.resolve_gateway_clarify(clarify_id, "")
+            await asyncio.to_thread(clarify.wait_for_response, clarify_id, 0.01)
+            return None
 
-    timeout = float(clarify.get_clarify_timeout())
-    response = await asyncio.to_thread(clarify.wait_for_response, clarify_id, timeout)
-    return response.strip() if isinstance(response, str) and response.strip() else None
+        timeout = _picker_timeout(float(clarify.get_clarify_timeout()))
+        response = await asyncio.to_thread(clarify.wait_for_response, clarify_id, timeout)
+        if isinstance(response, str) and response.strip():
+            return response.strip()
+        return MEDIA_PICKER_EXPIRED
+    finally:
+        _discard_pending_picker(session_key, clarify_id)
 
 
 async def _decorate_search_result(
@@ -313,6 +433,30 @@ async def _decorate_search_result(
         return decorated
 
     selection = await _select_search_result(actor_chat_id, session_key, choices)
+    if selection == MEDIA_PICKER_SUPERSEDED:
+        decorated["results"] = []
+        decorated["telegram_presentation"] = {
+            "poster_cards_delivered": delivered,
+            "poster_count": len(cards),
+            "selection_status": "superseded",
+            "instruction": (
+                "The user sent a new request instead of selecting this result. End this turn "
+                "without a user-facing response; the new request is queued separately."
+            ),
+        }
+        return decorated
+    if selection == MEDIA_PICKER_EXPIRED:
+        decorated["results"] = []
+        decorated["telegram_presentation"] = {
+            "poster_cards_delivered": delivered,
+            "poster_count": len(cards),
+            "selection_status": "expired",
+            "instruction": (
+                "The unanswered result picker expired. End this turn without a user-facing "
+                "response; a later request must perform a fresh search."
+            ),
+        }
+        return decorated
     if selection in choices:
         selected_index = choices.index(selection)
         decorated["results"] = [candidates[selected_index]]

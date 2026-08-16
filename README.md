@@ -69,6 +69,12 @@ Upstream 2.3.0 lists `radarr_get_queue` in its full profile but does not registe
 the tool. The gateway therefore contains one narrow read-only Radarr queue call;
 all other provider operations go through upstream MCP.
 
+The picker is interruptible. A reply containing a result number, a unique
+result year, or an exact title selects it. Any other normal message cancels the
+old picker and continues as a fresh request; unanswered media pickers expire
+after two minutes. This prevents a new title search from waiting behind an
+abandoned selection prompt.
+
 ## Notifications
 
 Plex `library.new` webhooks are the availability authority. Movie, show,

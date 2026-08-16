@@ -26,6 +26,7 @@ dev = [
 
 [project.scripts]
 media-gateway = "media_gateway.app:main"
+media-legacy-import = "media_gateway.legacy:main"
 media-password = "media_gateway.password:main"
 
 [tool.hatch.build.targets.wheel]

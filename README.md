@@ -87,8 +87,39 @@ fallback admission boundary.
 
 The dashboard is password protected with a scrypt hash, server-side signed
 sessions, strict same-site cookies, and CSRF tokens. It shows real observed and
-blocked Telegram users, recent requests, and activity; it does not expose raw
-JSON or secrets.
+blocked Telegram users, paginated requests, and paginated activity; it does not
+expose raw JSON or secrets. Allowed messages update the user's `last_seen`
+timestamp without creating repetitive activity rows. Plex activity identifies
+the exact movie, series, season, or episode that was added.
+
+Requester delivery rechecks the current allowlist. Removing a user preserves
+their historical request for audit but immediately prevents later Telegram
+notifications.
+
+## Legacy request recovery
+
+The explicit `media-legacy-import` command reads the preserved pre-rewrite
+database as an immutable SQLite source. It imports only still-pending requests,
+is idempotent against the gateway's request key, and requires a new verified
+SQLite backup before `--apply`.
+
+Rows with numeric requester IDs retain them. A row that retained only a
+Telegram username fans out to every distinct historical user/chat pair recorded
+for that exact username, preserving requests that intentionally notified more
+than one user. Rows with no recoverable requester identity remain untouched in
+the source backup and are reported as unresolved; they are never guessed or
+assigned to an administrator.
+
+```bash
+# Aggregate dry run; no titles or requester identities are printed.
+python -m media_gateway.legacy --database /opt/data/state/gateway.sqlite3 \
+  --legacy /opt/data/state/pre-rewrite.sqlite3
+
+# Apply only after reviewing the dry run.
+python -m media_gateway.legacy --database /opt/data/state/gateway.sqlite3 \
+  --legacy /opt/data/state/pre-rewrite.sqlite3 --apply \
+  --backup /opt/data/state/gateway.before-legacy-import.sqlite3
+```
 
 ## Deployment
 
@@ -111,9 +142,9 @@ tool_loop_guardrails:
 
 This is a native Hermes setting, not a second CRBL configuration source.
 
-The new gateway database is schema-versioned and fails closed on an incompatible
-old database. Back up the previous file, then start the clean deployment with a
-new `gateway.sqlite3`.
+The gateway database is schema-versioned and fails closed on an incompatible
+database. The current schema remains rollback-compatible with the first clean
+gateway release.
 
 ## Development
 

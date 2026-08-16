@@ -57,10 +57,17 @@ def _time(value: object) -> str:
     return datetime.fromtimestamp(value, tz=UTC).strftime("%Y-%m-%d %H:%M UTC")
 
 
-# Canonical CRBL favicon, copied verbatim from the design system
-# (assets/crbl-favicon.svg): the amber B on a dark rounded square, ~19%
-# corner radius. Do not redraw it here.
-FAVICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">\n  <rect width="32" height="32" rx="6" fill="#1C1917"></rect>\n  <text x="16" y="23" font-family="&#39;JetBrains Mono&#39;, &#39;Geist Mono&#39;, &#39;Fira Code&#39;, monospace" font-weight="700" font-size="20" text-anchor="middle" fill="#F59E0B">B</text>\n</svg>'
+# Brand marks for this dashboard. The glyph is Lucide's clapperboard
+# (lucide-static v1.31.0, ISC) — the design system names Lucide as the
+# official icon set. An amber letter on a dark rounded square is already
+# taken: B is the CRBL favicon and P is the Portless app icon, so a media
+# glyph keeps this dashboard distinct from both.
+#
+# FAVICON follows the app-icon pattern (dark square, ~19% radius, amber
+# glyph). MARK_ICON is the in-page chip, which follows the UI icon rule
+# instead: 20px at stroke 1.5, inheriting its color from the chip.
+FAVICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32"><rect width="32" height="32" rx="6" fill="#1C1917"/><g transform="translate(6 6) scale(0.8333)" fill="none" stroke="#F59E0B" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12.296 3.464 3.02 3.956"/><path d="M20.2 6 3 11l-.9-2.4c-.3-1.1.3-2.2 1.3-2.5l13.5-4c1.1-.3 2.2.3 2.5 1.3z"/><path d="M3 11h18v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="m6.18 5.276 3.1 3.899"/></g></svg>'
+MARK_ICON = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m12.296 3.464 3.02 3.956"/><path d="M20.2 6 3 11l-.9-2.4c-.3-1.1.3-2.2 1.3-2.5l13.5-4c1.1-.3 2.2.3 2.5 1.3z"/><path d="M3 11h18v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="m6.18 5.276 3.1 3.899"/></svg>'
 
 
 def _page(content: str, *, title: str = "Media operations") -> str:
@@ -73,7 +80,7 @@ def _page(content: str, *, title: str = "Media operations") -> str:
 def login_page(*, error: str | None = None) -> str:
     error_html = f'<p class="error" role="alert">{html.escape(error)}</p>' if error else ""
     return _page(
-        f"""<main class="panel login"><div class="brand"><div class="mark">C</div><div><h1>Media operations</h1>
+        f"""<main class="panel login"><div class="brand"><div class="mark">{MARK_ICON}</div><div><h1>Media operations</h1>
 <div class="subtitle">CRBL private dashboard</div></div></div>{error_html}
 <form method="post" action="/login"><label for="password" class="muted">Dashboard password</label>
 <input class="input" id="password" name="password" type="password" autocomplete="current-password" required autofocus>
@@ -123,7 +130,7 @@ def dashboard_page(
     )
     notice_html = f'<div class="notice">{html.escape(notice)}</div>' if notice else ""
     return _page(
-        f"""<main class="shell"><header class="top"><div class="brand"><div class="mark">C</div><div><h1>Media operations</h1>
+        f"""<main class="shell"><header class="top"><div class="brand"><div class="mark">{MARK_ICON}</div><div><h1>Media operations</h1>
 <div class="subtitle">Users, requests, and Plex activity</div></div></div><form method="post" action="/logout">
 <input type="hidden" name="csrf" value="{html.escape(csrf)}"><button class="btn secondary">Sign out</button></form></header>
 {notice_html}<section class="grid"><div class="kpi"><strong>{allowed}</strong><span>Allowed users</span></div>

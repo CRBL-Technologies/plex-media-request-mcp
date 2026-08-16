@@ -178,14 +178,12 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
     "search_media": {
         "description": (
             "Search Radarr and Sonarr for a movie or series. Results include poster_url "
-            "when available. On Telegram, the media adapter presents up to four poster "
-            "cards and resolves ambiguous matches with native selection buttons before the "
-            "tool returns. Never use MEDIA for a remote poster URL, repeat the candidate "
-            "list, or call clarify for the same results. A picker selection identifies media; "
-            "it does not itself request it. If the current message explicitly asks to add or "
-            "request media, call the matching request tool after selection. Otherwise make the "
-            "next request action explicit when the result is unavailable. On that follow-up, "
-            "refresh the exact prior TMDB or TVDB ID in the new turn before requesting. Answer "
+            "when available. On Telegram, the media adapter presents up to four results in one "
+            "tabbed poster card; opening a tab swaps its poster in place before the tool returns. "
+            "Never use MEDIA for a remote poster URL, repeat the candidate list, or call clarify "
+            "for the same results. Pressing Request movie is explicit request intent: call "
+            "request_movie immediately for that returned result. Choosing a series identifies it "
+            "but still requires the desired seasons. Answer "
             "only about the returned result. If in_sonarr is false, say the series is not yet "
             "managed in Sonarr rather than saying episode availability was not reported."
         ),

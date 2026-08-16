@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from hermes_media import compat, plugin
+from hermes_media import plugin
 from hermes_media.trusted import TrustError, actor_from_event, actor_scope
 from media_gateway.constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
 from media_gateway.tools import SHARED_SCHEMAS
@@ -128,7 +128,7 @@ async def test_plugin_registers_closed_inventory_and_binds_actor(
     assert gateway.calls == [(1001, "search_media", {"query": "test"})]
 
 
-async def test_search_sends_poster_album_and_returns_only_native_picker_selection(
+async def test_search_sends_tabbed_card_and_returns_only_selected_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class SearchGateway(FakeGateway):
@@ -158,15 +158,12 @@ async def test_search_sends_poster_album_and_returns_only_native_picker_selectio
     class PresentationAdapter:
         def __init__(self) -> None:
             self._media_delivery_loop = asyncio.get_running_loop()
-            self.albums: list[tuple[str, list[tuple[str, str]]]] = []
-            self.prompts: list[dict[str, Any]] = []
+            self._bot = SimpleNamespace(send_photo=self.send_photo)
+            self.card: dict[str, Any] = {}
 
-        async def send_multiple_images(self, chat_id: str, images: list[tuple[str, str]]) -> None:
-            self.albums.append((chat_id, images))
-
-        async def send_clarify(self, **values: Any) -> SimpleNamespace:
-            self.prompts.append(values)
-            return SimpleNamespace(success=True)
+        async def send_photo(self, **values: Any) -> SimpleNamespace:
+            self.card = values
+            return SimpleNamespace(message_id=42)
 
     class ClarifyGateway:
         def __init__(self) -> None:
@@ -190,6 +187,20 @@ async def test_search_sends_poster_album_and_returns_only_native_picker_selectio
     gateway = SearchGateway()
     adapter = PresentationAdapter()
     clarify = ClarifyGateway()
+
+    class Button:
+        def __init__(self, text: str, *, callback_data: str) -> None:
+            self.text = text
+            self.callback_data = callback_data
+
+    class Markup:
+        def __init__(self, rows: list[list[Button]]) -> None:
+            self.inline_keyboard = rows
+
+    telegram = ModuleType("telegram")
+    telegram.InlineKeyboardButton = Button  # type: ignore[attr-defined]
+    telegram.InlineKeyboardMarkup = Markup  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "telegram", telegram)
     monkeypatch.setattr(plugin, "_client", gateway)
     monkeypatch.setattr(plugin, "_active_adapter", adapter)
     monkeypatch.setattr(plugin, "_clarify_gateway", lambda: clarify)
@@ -198,28 +209,14 @@ async def test_search_sends_poster_album_and_returns_only_native_picker_selectio
         raw = await plugin._handler("search_media")({"query": "House"})
 
     result = json.loads(raw)
-    assert adapter.albums == [
-        (
-            "1001",
-            [
-                (
-                    "https://image.tmdb.org/one.jpg",
-                    "1 · The Last House (2026) · Movie · TMDB 11",
-                ),
-                (
-                    "https://artworks.thetvdb.com/two.jpg",
-                    "2 · House (2004) · Series · TVDB 22",
-                ),
-            ],
-        )
+    assert adapter.card["chat_id"] == 1001
+    assert adapter.card["photo"] == "https://image.tmdb.org/one.jpg"
+    rows = adapter.card["reply_markup"].inline_keyboard
+    assert [row[0].text for row in rows[:2]] == [
+        "●  🎬 The Last House · 2026",
+        "○  📺 House · 2004",
     ]
-    assert len(adapter.prompts) == 1
-    assert adapter.prompts[0]["chat_id"] == "1001"
-    assert adapter.prompts[0]["question"] == "Which result did you mean?"
-    assert adapter.prompts[0]["choices"] == [
-        "The Last House (2026) · Movie · TMDB 11",
-        "House (2004) · Series · TVDB 22",
-    ]
+    assert [button.text for button in rows[-1]] == ["+ Request movie", "Cancel"]
     assert clarify.registered[0]["session_key"] == "agent:main:telegram:dm:1001"
     assert result["results"] == [
         {
@@ -235,12 +232,37 @@ async def test_search_sends_poster_album_and_returns_only_native_picker_selectio
     assert result["telegram_presentation"]["provider_mutation_performed"] is False
     assert "request the movie" in result["telegram_presentation"]["next_action"]
     assert "candidate list" in result["telegram_presentation"]["instruction"]
-    assert "did not itself request" in result["telegram_presentation"]["instruction"]
+    assert "ask which seasons" in result["telegram_presentation"]["instruction"]
 
 
-async def test_media_picker_omits_misleading_other_button(
+async def test_media_card_switches_poster_then_requests_active_movie(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    class ClarifyGateway:
+        response = ""
+
+        @classmethod
+        def resolve_gateway_clarify(cls, _clarify_id: str, response: str) -> bool:
+            cls.response = response
+            return True
+
+    class Query:
+        def __init__(self) -> None:
+            self.data = "md:picker-1:v1"
+            self.from_user = SimpleNamespace(id=1001)
+            self.message = SimpleNamespace(chat_id=1001)
+            self.answers: list[str | None] = []
+            self.edits: list[dict[str, Any]] = []
+
+        async def answer(self, text: str | None = None) -> None:
+            self.answers.append(text)
+
+        async def edit_message_media(self, **values: Any) -> None:
+            self.edits.append(values)
+
+        async def edit_message_caption(self, **values: Any) -> None:
+            self.edits.append(values)
+
     class Button:
         def __init__(self, text: str, *, callback_data: str) -> None:
             self.text = text
@@ -250,37 +272,58 @@ async def test_media_picker_omits_misleading_other_button(
         def __init__(self, rows: list[list[Button]]) -> None:
             self.inline_keyboard = rows
 
-    class Bot:
-        def __init__(self) -> None:
-            self.values: dict[str, Any] = {}
-
-        async def send_message(self, **values: Any) -> SimpleNamespace:
+    class Media:
+        def __init__(self, **values: Any) -> None:
             self.values = values
-            return SimpleNamespace(message_id=42)
 
     telegram = ModuleType("telegram")
     telegram.InlineKeyboardButton = Button  # type: ignore[attr-defined]
     telegram.InlineKeyboardMarkup = Markup  # type: ignore[attr-defined]
-    constants = ModuleType("telegram.constants")
-    constants.ParseMode = SimpleNamespace(HTML="HTML")  # type: ignore[attr-defined]
+    telegram.InputMediaPhoto = Media  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "telegram", telegram)
-    monkeypatch.setitem(sys.modules, "telegram.constants", constants)
-    adapter = SimpleNamespace(_bot=Bot(), _clarify_state={})
-
-    response = await compat.send_numbered_picker(
-        adapter,
-        chat_id="1001",
-        question="Which result did you mean?",
-        choices=["One", "Two"],
+    monkeypatch.setattr(plugin, "_clarify_gateway", lambda: ClarifyGateway())
+    pending = plugin._PendingMediaPicker(
         clarify_id="picker-1",
-        session_key="agent:main:telegram:dm:1001",
+        choices=(
+            "House (2004) · Series · TVDB 22",
+            "The Last House (2026) · Movie · TMDB 11",
+        ),
+        candidates=(
+            {
+                "media_type": "series",
+                "tvdb_id": 22,
+                "title": "House",
+                "year": 2004,
+                "poster_url": "https://artworks.thetvdb.com/house.jpg",
+            },
+            {
+                "media_type": "movie",
+                "tmdb_id": 11,
+                "title": "The Last House",
+                "year": 2026,
+                "poster_url": "https://image.tmdb.org/last-house.jpg",
+            },
+        ),
+        actor_user_id=1001,
+        actor_chat_id=1001,
+        has_photo=True,
     )
+    plugin._set_pending_picker("session-1", pending)
+    query = Query()
 
-    assert response.success is True
-    rows = adapter._bot.values["reply_markup"].inline_keyboard
-    assert [row[0].text for row in rows] == ["1", "2"]
-    assert [row[0].callback_data for row in rows] == ["cl:picker-1:0", "cl:picker-1:1"]
-    assert adapter._clarify_state == {"picker-1": "agent:main:telegram:dm:1001"}
+    assert await plugin._handle_media_picker_callback(SimpleNamespace(callback_query=query))
+    assert pending.active_index == 1
+    media = query.edits[-1]["media"]
+    assert media.values["media"] == "https://image.tmdb.org/last-house.jpg"
+    rows = query.edits[-1]["reply_markup"].inline_keyboard
+    assert rows[1][0].text == "●  🎬 The Last House · 2026"
+    assert rows[-1][0].text == "+ Request movie"
+
+    query.data = "md:picker-1:select"
+    assert await plugin._handle_media_picker_callback(SimpleNamespace(callback_query=query))
+    assert ClarifyGateway.response == (
+        plugin.MEDIA_PICKER_REQUEST + "The Last House (2026) · Movie · TMDB 11"
+    )
 
 
 async def test_single_search_result_sends_one_poster_without_opening_picker(
@@ -487,9 +530,11 @@ async def test_unanswered_picker_expires_without_returning_a_candidate(
     class PresentationAdapter:
         def __init__(self) -> None:
             self._media_delivery_loop = asyncio.get_running_loop()
+            self._bot = SimpleNamespace(send_message=self.send_message)
 
-        async def send_clarify(self, **_values: Any) -> SimpleNamespace:
-            return SimpleNamespace(success=True)
+        @staticmethod
+        async def send_message(**_values: Any) -> SimpleNamespace:
+            return SimpleNamespace(message_id=42)
 
     class ClarifyGateway:
         timeout = 0.0
@@ -511,6 +556,19 @@ async def test_unanswered_picker_expires_without_returning_a_candidate(
         def get_clarify_timeout() -> int:
             return 600
 
+    class Button:
+        def __init__(self, text: str, *, callback_data: str) -> None:
+            self.text = text
+            self.callback_data = callback_data
+
+    class Markup:
+        def __init__(self, rows: list[list[Button]]) -> None:
+            self.inline_keyboard = rows
+
+    telegram = ModuleType("telegram")
+    telegram.InlineKeyboardButton = Button  # type: ignore[attr-defined]
+    telegram.InlineKeyboardMarkup = Markup  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "telegram", telegram)
     monkeypatch.setattr(plugin, "_client", SearchGateway())
     monkeypatch.setattr(plugin, "_active_adapter", PresentationAdapter())
     monkeypatch.setattr(plugin, "_clarify_gateway", lambda: ClarifyGateway())

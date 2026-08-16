@@ -52,19 +52,15 @@ users remain limited to seven normalized tools. No selection token is used:
 requests take the TMDB or TVDB ID returned by a current search.
 
 Search results retain the provider's public poster URL. The Hermes adapter
-presents up to four numbered poster cards through Telegram's native album
-sender. When a title is ambiguous, `search_media` directly enters Hermes'
-native `clarify` interaction, which renders compact selection buttons and
-blocks the same tool call until the user chooses an exact TMDB or TVDB result.
-Only that selected result is returned to the model, so a typed number or button
-click cannot become a second bare query. Remote poster URLs are never sent
-through Hermes' local-file `MEDIA:` convention. The media picker deliberately
-omits Hermes' generic “Other” button: an exact number, unique year, or exact
-title selects a result, while other text starts a fresh request.
-Selecting an ambiguous result only identifies the media. An original message
-that explicitly says “add” or “request” continues into the request tool; a
-title-only lookup remains read-only and returns a clear request or season
-follow-up instead of implying that selection changed Radarr or Sonarr.
+presents up to four matches in one tabbed Telegram card with the best match open
+by default. Each labeled row opens that result and swaps the card's poster and
+caption in place; no album or numbered legend is posted. A movie tab offers a
+direct Request movie action, while a series tab selects the exact TVDB result
+before asking for seasons. Only that selected result is returned to the model,
+so a typed number or button click cannot become a second bare query. Remote
+poster URLs are never sent through Hermes' local-file `MEDIA:` convention.
+An exact number, unique year, or exact title still selects a result, while
+other text supersedes the old card and starts a fresh request.
 Every title lookup, availability check, and request must refresh `search_media`
 in the current turn; conversation history is never a valid substitute for a
 current provider result. Hermes's built-in Telegram hint takes precedence over

@@ -50,10 +50,12 @@ discovered from the pinned upstream MCP. Future upstream tools are not admitted
 automatically. No selection token is used: requests take the TMDB or TVDB ID
 returned by a current search.
 
-Search results retain the provider's public poster URL. The Hermes tool
-description tells the Telegram agent to render it through Hermes' native
-`MEDIA:` delivery convention rather than exposing an inaccessible Radarr or
-Sonarr cover path.
+Search results retain the provider's public poster URL. The Hermes adapter
+presents up to four numbered poster cards through Telegram's native album
+sender. When a title is ambiguous, the tool contract directs the agent to use
+Hermes' native `clarify` interaction, which renders compact selection buttons
+and resumes the same turn with the selected TMDB or TVDB result. Remote poster
+URLs are never sent through Hermes' local-file `MEDIA:` convention.
 
 Upstream 2.3.0 lists `radarr_get_queue` in its full profile but does not register
 the tool. The gateway therefore contains one narrow read-only Radarr queue call;

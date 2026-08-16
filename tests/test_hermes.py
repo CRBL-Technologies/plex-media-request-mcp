@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import sys
 from dataclasses import dataclass
 from types import ModuleType, SimpleNamespace
@@ -10,6 +12,7 @@ import pytest
 from hermes_media import plugin
 from hermes_media.trusted import TrustError, actor_from_event, actor_scope
 from media_gateway.constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
+from media_gateway.tools import SHARED_SCHEMAS
 from media_gateway.types import Actor, Role
 
 
@@ -112,6 +115,79 @@ async def test_plugin_registers_closed_inventory_and_binds_actor(
         result = await search["handler"]({"query": "test"})
     assert result == '{"called":"search_media"}'
     assert gateway.calls == [(1001, "search_media", {"query": "test"})]
+
+
+async def test_search_sends_numbered_poster_album_and_returns_clarify_choices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SearchGateway(FakeGateway):
+        async def call(self, actor: Actor, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            self.calls.append((actor.user_id, name, arguments))
+            return {
+                "query": "House",
+                "results": [
+                    {
+                        "media_type": "movie",
+                        "tmdb_id": 11,
+                        "title": "The Last House",
+                        "year": 2026,
+                        "poster_url": "https://image.tmdb.org/one.jpg",
+                    },
+                    {
+                        "media_type": "series",
+                        "tvdb_id": 22,
+                        "title": "House",
+                        "year": 2004,
+                        "poster_url": "https://artworks.thetvdb.com/two.jpg",
+                    },
+                ],
+                "unavailable_sources": [],
+            }
+
+    class PresentationAdapter:
+        def __init__(self) -> None:
+            self._media_delivery_loop = asyncio.get_running_loop()
+            self.albums: list[tuple[str, list[tuple[str, str]]]] = []
+
+        async def send_multiple_images(self, chat_id: str, images: list[tuple[str, str]]) -> None:
+            self.albums.append((chat_id, images))
+
+    gateway = SearchGateway()
+    adapter = PresentationAdapter()
+    monkeypatch.setattr(plugin, "_client", gateway)
+    monkeypatch.setattr(plugin, "_active_adapter", adapter)
+    actor = Actor(user_id=1001, chat_id=1001)
+    with actor_scope(actor, Role.USER):
+        raw = await plugin._handler("search_media")({"query": "House"})
+
+    result = json.loads(raw)
+    assert adapter.albums == [
+        (
+            "1001",
+            [
+                (
+                    "https://image.tmdb.org/one.jpg",
+                    "1 · The Last House (2026) · Movie · TMDB 11",
+                ),
+                (
+                    "https://artworks.thetvdb.com/two.jpg",
+                    "2 · House (2004) · Series · TVDB 22",
+                ),
+            ],
+        )
+    ]
+    assert result["telegram_presentation"]["poster_cards_delivered"] is True
+    assert result["telegram_presentation"]["clarify_choices"] == [
+        "The Last House (2026) · Movie · TMDB 11",
+        "House (2004) · Series · TVDB 22",
+    ]
+    assert "MEDIA" in result["telegram_presentation"]["instruction"]
+
+
+def test_search_tool_contract_uses_native_telegram_clarify() -> None:
+    text = SHARED_SCHEMAS["search_media"]["description"]
+    assert "clarify tool" in text
+    assert "Never use MEDIA" in text
 
 
 async def test_adapter_verifies_actor_before_trusting_gateway(

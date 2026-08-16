@@ -18,9 +18,9 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from media_gateway.constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
-from media_gateway.types import Role
+from media_gateway.types import Actor, Role
 
-from .client import GatewayClient
+from .client import GatewayClient, GatewayError
 from .compat import (
     answer_media_callback,
     close_media_picker,
@@ -52,7 +52,8 @@ MEDIA_PICKER_TIMEOUT_SECONDS = 120.0
 MEDIA_PICKER_SUPERSEDED = "__crbl_media_picker_superseded__"
 MEDIA_PICKER_EXPIRED = "__crbl_media_picker_expired__"
 MEDIA_PICKER_CANCELLED = "__crbl_media_picker_cancelled__"
-MEDIA_PICKER_REQUEST = "__crbl_media_picker_request__:"
+MEDIA_PICKER_REQUESTED = "__crbl_media_picker_requested__:"
+MEDIA_PICKER_REQUEST_FAILED = "__crbl_media_picker_request_failed__:"
 PLATFORM_HINT = (
     "Telegram identity is trusted automatically; never request user IDs. "
     "For every movie or series title lookup, availability check, or request, call "
@@ -61,8 +62,9 @@ PLATFORM_HINT = (
     "ambiguous-result selection before it returns. Never repeat its candidate list or "
     "call clarify for those same candidates. If the user's current message explicitly says "
     "to add or request media, continue to request the selected result, whether it was chosen by "
-    "button or by typed reply. The Telegram media card's Request movie action is also explicit "
-    "request intent: call request_movie immediately for the returned result. Choosing a series "
+    "button or by typed reply. The Telegram media card's Request movie action performs the "
+    "request itself before the tool returns; when the result reports the request already "
+    "happened, confirm the outcome and never call request_movie for it again. Choosing a series "
     "identifies it but still requires the desired seasons. A title-only lookup remains read-only "
     "until the user presses an action or asks for the request in the same message."
 )
@@ -540,9 +542,38 @@ async def _handle_media_picker_callback(update: object, adapter: object) -> bool
     candidate = pending.candidates[active_index]
     choice = pending.choices[active_index]
     is_movie = candidate.get("media_type") == "movie"
-    response = MEDIA_PICKER_CANCELLED
-    if callback.action == "select":
-        response = f"{MEDIA_PICKER_REQUEST}{choice}" if is_movie else choice
+
+    if callback.action == "select" and is_movie:
+        # The tap is authoritative: the request runs here, on the identity the
+        # card was issued to, and the gateway re-authorizes it server-side.
+        # The model only narrates the recorded outcome afterwards.
+        await answer_media_callback(query, "Requesting…")
+        actor = Actor(user_id=pending.actor_user_id, chat_id=pending.actor_chat_id)
+        tmdb_id = candidate.get("tmdb_id")
+        try:
+            outcome = await _gateway().call(actor, "request_movie", {"tmdb_id": tmdb_id})
+            request_status = str(outcome.get("status") or "requested")
+            response = f"{MEDIA_PICKER_REQUESTED}{request_status}:{choice}"
+            note = {
+                "available": "Already on Plex ✓",
+                "awaiting_plex": "Already added — waiting for Plex to import it.",
+            }.get(request_status, "Requested ✓ — you'll get a message when it's on Plex.")
+        except (GatewayError, OSError):
+            logger.warning("Media card request_movie failed", exc_info=True)
+            response = f"{MEDIA_PICKER_REQUEST_FAILED}{choice}"
+            note = "Request failed — ask me to try again."
+        # The request already happened, so the card must show its outcome even
+        # if the waiting tool call timed out while the request was running.
+        clarify = _clarify_gateway()
+        clarify.resolve_gateway_clarify(callback.picker_id, response)
+        try:
+            status = f"{_candidate_caption(candidate)}\n\n<i>{note}</i>"
+            await close_media_picker(query, caption=status, has_photo=has_photo)
+        except Exception:
+            logger.debug("Could not close resolved media card", exc_info=True)
+        return True
+
+    response = choice if callback.action == "select" else MEDIA_PICKER_CANCELLED
     clarify = _clarify_gateway()
     if not clarify.resolve_gateway_clarify(callback.picker_id, response):
         await answer_media_callback(query, "This media card has expired.")
@@ -551,8 +582,8 @@ async def _handle_media_picker_callback(update: object, adapter: object) -> bool
         query, "Cancelled" if response == MEDIA_PICKER_CANCELLED else "Selected"
     )
     try:
-        # State only what has already happened. The request itself runs after
-        # this card closes, and its outcome arrives as a chat reply.
+        # State only what has already happened; series requests still need the
+        # seasons conversation, so the model handles them after this closes.
         if response == MEDIA_PICKER_CANCELLED:
             status = "<i>Media selection cancelled.</i>"
         else:
@@ -648,19 +679,48 @@ async def _decorate_search_result(
         return decorated
     if not isinstance(selection, str):
         selection = ""
-    request_selected = selection.startswith(MEDIA_PICKER_REQUEST)
-    if request_selected:
-        selection = selection[len(MEDIA_PICKER_REQUEST) :]
+    request_status = ""
+    request_failed = selection.startswith(MEDIA_PICKER_REQUEST_FAILED)
+    if request_failed:
+        selection = selection[len(MEDIA_PICKER_REQUEST_FAILED) :]
+    elif selection.startswith(MEDIA_PICKER_REQUESTED):
+        remainder = selection[len(MEDIA_PICKER_REQUESTED) :]
+        request_status, _, selection = remainder.partition(":")
     if selection in choices:
         selected_index = choices.index(selection)
         selected = candidates[selected_index]
         decorated["results"] = [selected]
-        if request_selected:
-            instruction = (
-                "The user pressed Request movie for this exact result. Call request_movie now "
-                "with its TMDB ID; do not ask for confirmation or repeat the candidate list."
-            )
-        elif selected.get("media_type") == "movie":
+        if request_status:
+            decorated["telegram_presentation"] = {
+                "poster_cards_delivered": delivered,
+                "poster_count": len(cards),
+                "selection_status": "requested",
+                "selected_choice": selection,
+                "request_status": request_status,
+                "provider_mutation_performed": True,
+                "instruction": (
+                    "The user's Request movie tap already performed this request through the "
+                    f"gateway; its recorded status is '{request_status}'. Confirm that outcome "
+                    "to the user (they are notified when it appears on Plex). Never call "
+                    "request_movie for this result."
+                ),
+            }
+            return decorated
+        if request_failed:
+            decorated["telegram_presentation"] = {
+                "poster_cards_delivered": delivered,
+                "poster_count": len(cards),
+                "selection_status": "request_failed",
+                "selected_choice": selection,
+                "provider_mutation_performed": False,
+                "instruction": (
+                    "The user's Request movie tap failed inside the gateway; nothing was "
+                    "requested. Tell the user it failed and that asking again will retry with "
+                    "a fresh search. Do not call request_movie in this turn."
+                ),
+            }
+            return decorated
+        if selected.get("media_type") == "movie":
             # Typed selections reach here too, so the explicit-request path
             # must stay available and the wording must not assume a series.
             instruction = (
@@ -678,7 +738,7 @@ async def _decorate_search_result(
         decorated["telegram_presentation"] = {
             "poster_cards_delivered": delivered,
             "poster_count": len(cards),
-            "selection_status": "request_selected" if request_selected else "selected",
+            "selection_status": "selected",
             "selected_choice": selection,
             "provider_mutation_performed": False,
             "next_action": "request the movie, or specify the desired series seasons",

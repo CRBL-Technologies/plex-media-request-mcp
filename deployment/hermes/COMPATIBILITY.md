@@ -20,8 +20,8 @@ Before changing the pinned digest:
    fallback when the native class is missing so the registration check can still
    detect it by identity.
 5. Verify a tab switch edits one card's poster in place, the active row changes
-   from `○` to `●`, and Request movie resolves explicit request intent without
-   posting callback text into the chat.
+   from `○` to `●`, and Request movie performs the gateway request from the
+   tap itself without posting callback text into the chat.
 6. Run Ruff, strict mypy, the complete pytest suite, both hash-locked dependency
    audits, Compose validation, and the gateway container migration smoke.
 7. Publish immutable images, deploy with a verified database backup, and check

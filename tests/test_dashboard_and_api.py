@@ -1012,3 +1012,29 @@ def test_dashboard_serves_the_brand_favicon(config: Config) -> None:
         assert '<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">' in login.text
         # Same-origin only, so the strict default-src CSP still allows it.
         assert "default-src 'self'" in login.headers["content-security-policy"]
+
+
+def test_request_table_keeps_status_on_one_line(config: Config) -> None:
+    app = create_app(config)
+    with TestClient(app) as client:
+        runtime = app.state.runtime
+        request_id = runtime.store.begin_request(
+            media_type="movie",
+            external_id=4242,
+            seasons=(),
+            title="The Boy Who Harnessed the Wind",
+            year=2019,
+            actor=Actor(user_id=1001, chat_id=1001),
+        )
+        runtime.store.complete_request(request_id, "search_started")
+        _login(client)
+
+        page = client.get("/")
+
+        assert page.status_code == 200
+        # Only the title may wrap; the status badge and the short columns stay
+        # on one line so a long title cannot push them onto two.
+        assert '<td class="nowrap"><span class="badge requested">' in page.text
+        assert "Searching for a release" in page.text
+        assert '<td class="cell-title">' in page.text
+        assert "white-space:nowrap" in client.get("/assets/app.css").text

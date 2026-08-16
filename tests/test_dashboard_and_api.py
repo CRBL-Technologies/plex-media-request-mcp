@@ -997,3 +997,18 @@ def test_request_status_shows_the_specific_provider_outcome() -> None:
 
     # An unrecognized provider status is still rendered, never blanked.
     assert status("requested", "import_pending") == "Import Pending"
+
+
+def test_dashboard_serves_the_brand_favicon(config: Config) -> None:
+    with TestClient(create_app(config)) as client:
+        response = client.get("/assets/favicon.svg")
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("image/svg+xml")
+        # The canonical CRBL mark: amber B on a dark rounded square.
+        assert "#F59E0B" in response.text
+        assert "#1C1917" in response.text
+
+        login = client.get("/login")
+        assert '<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">' in login.text
+        # Same-origin only, so the strict default-src CSP still allows it.
+        assert "default-src 'self'" in login.headers["content-security-policy"]

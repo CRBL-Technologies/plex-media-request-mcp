@@ -26,7 +26,7 @@ from starlette.routing import Route
 
 from .auth import Sessions
 from .config import Config, load_config_file
-from .dashboard import CSS, dashboard_page, login_page
+from .dashboard import CSS, FAVICON, dashboard_page, login_page
 from .notifications import Notifications
 from .password import verify_password
 from .policy import Policy
@@ -147,6 +147,10 @@ async def ready(request: Request) -> Response:
 
 async def css(_request: Request) -> Response:
     return PlainTextResponse(CSS, media_type="text/css")
+
+
+async def favicon(_request: Request) -> Response:
+    return PlainTextResponse(FAVICON, media_type="image/svg+xml")
 
 
 async def login(request: Request) -> Response:
@@ -422,6 +426,7 @@ def create_app(config: Config | None = None) -> Starlette:
             Route("/healthz", health),
             Route("/readyz", ready),
             Route("/assets/app.css", css),
+            Route("/assets/favicon.svg", favicon),
             Route("/login", login, methods=["GET", "POST"]),
             Route("/logout", logout, methods=["POST"]),
             Route("/", dashboard),

@@ -12,6 +12,7 @@ from starlette.testclient import TestClient
 from media_gateway.app import COOKIE, create_app
 from media_gateway.config import Config
 from media_gateway.constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
+from media_gateway.dashboard import _request_status
 from media_gateway.types import Actor
 from media_gateway.upstream import UpstreamError
 
@@ -976,3 +977,23 @@ async def test_telegram_network_error_does_not_expose_bot_token(
     with TestClient(app), pytest.raises(RuntimeError) as captured:
         await app.state.runtime.notifications._send(9001, "Available", "https://app.plex.tv/item")
     assert "test-token" not in str(captured.value)
+
+
+def test_request_status_shows_the_specific_provider_outcome() -> None:
+    def status(state: str, provider_status: str | None) -> str:
+        return _request_status({"state": state, "provider_status": provider_status})
+
+    # An active acquisition must say which stage it is in; collapsing these
+    # into one "Acquisition active" label is what made the old pair of
+    # columns redundant.
+    assert status("requested", "search_started") == "Searching for a release"
+    assert status("requested", "awaiting_plex") == "Waiting for Plex"
+    assert status("requested", "requested") == "Queued in Radarr/Sonarr"
+    assert status("available", "available") == "Available"
+
+    # Before the provider replies there is no outcome to show.
+    assert status("pending", None) == "Intent pending"
+    assert status("unknown", None) == "Needs reconciliation"
+
+    # An unrecognized provider status is still rendered, never blanked.
+    assert status("requested", "import_pending") == "Import Pending"

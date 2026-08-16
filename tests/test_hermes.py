@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -124,3 +126,52 @@ async def test_adapter_verifies_actor_before_trusting_gateway(
     assert await adapter.handle_message(allowed) is allowed
     with pytest.raises(PermissionError, match="not allowed"):
         await adapter.handle_message(event(7777))
+
+
+def test_platform_visibility_adds_search_only_for_media_telegram(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools_config = SimpleNamespace(
+        _get_platform_tools=lambda _config, _platform, *_args, **_kwargs: {"native"}
+    )
+    hermes_cli = ModuleType("hermes_cli")
+    hermes_cli.tools_config = tools_config  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+
+    plugin._visibility_patch()
+    resolver = tools_config._get_platform_tools
+    actor = Actor(user_id=1001, chat_id=1001)
+    with actor_scope(actor, Role.USER):
+        assert resolver({}, "telegram") == {plugin.SHARED_TOOLSET, plugin.SEARCH_TOOLSET}
+    with actor_scope(actor, Role.ADMIN):
+        assert resolver({}, "telegram") == {
+            plugin.SHARED_TOOLSET,
+            plugin.ADMIN_TOOLSET,
+            plugin.SEARCH_TOOLSET,
+        }
+    assert resolver({}, "discord") == {"native"}
+
+
+def test_web_search_guardrail_is_clamped_without_persistent_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @dataclass(frozen=True)
+    class FakeLoopCapConfig:
+        max_web_searches: int = 50
+
+        @classmethod
+        def from_mapping(cls, data: dict[str, Any] | None) -> FakeLoopCapConfig:
+            value = 50 if data is None else int(data.get("max_web_searches", 50))
+            return cls(max_web_searches=value)
+
+    agent = ModuleType("agent")
+    agent.__path__ = []  # type: ignore[attr-defined]
+    guardrails = ModuleType("agent.tool_guardrails")
+    guardrails.LoopCapConfig = FakeLoopCapConfig  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "agent", agent)
+    monkeypatch.setitem(sys.modules, "agent.tool_guardrails", guardrails)
+
+    plugin._guardrail_patch()
+    assert FakeLoopCapConfig.from_mapping({"max_web_searches": 50}).max_web_searches == 10
+    assert FakeLoopCapConfig.from_mapping({"max_web_searches": 0}).max_web_searches == 10
+    assert FakeLoopCapConfig.from_mapping({"max_web_searches": 5}).max_web_searches == 5

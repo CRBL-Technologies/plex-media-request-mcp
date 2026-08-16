@@ -31,6 +31,7 @@ jobs:
           mypy src
           pytest -q
           pip-audit -r requirements.txt --require-hashes
+          pip-audit -r deployment/hermes-requirements.txt --require-hashes
       - name: Validate Compose
         env:
           MEDIA_GATEWAY_IMAGE: ghcr.io/crbl-technologies/media-request-companion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa

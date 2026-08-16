@@ -24,7 +24,7 @@ The Portainer stack file also preserves the existing `hermes` and
 document. Those agents are outside this project; this release does not change
 their behavior or data mounts.
 
-The gateway exposes exactly seven tools to an allowed Telegram user:
+The gateway exposes exactly seven media tools to an allowed Telegram user:
 
 - `search_media`
 - `request_movie`
@@ -33,6 +33,15 @@ The gateway exposes exactly seven tools to an allowed Telegram user:
 - `download_status`
 - `browse_library`
 - `media_status`
+
+The Hermes adapter additionally exposes its native `web_search` tool through
+the search-only toolset. It uses the bundled DuckDuckGo provider for current
+movie recommendations, release dates, and viewing-order research. The image
+bakes a hash-locked provider dependency; it does not expose `web_extract`,
+browser automation, files, a shell, or arbitrary URL fetching. Hermes treats
+search results as untrusted web content. The adapter clamps the native runaway
+guardrail to at most ten web searches per response without rewriting Hermes'
+persistent configuration.
 
 Configured administrators also receive the reviewed Plex/Radarr/Sonarr tools
 discovered from the pinned upstream MCP. Future upstream tools are not admitted

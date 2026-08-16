@@ -6,6 +6,7 @@ import inspect
 import json
 import os
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import replace
 from typing import Any
 
 from media_gateway.constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
@@ -17,6 +18,8 @@ from .trusted import actor_from_event, actor_scope, current_role, require_actor
 PLATFORM = "telegram"
 SHARED_TOOLSET = "crbl-media-shared"
 ADMIN_TOOLSET = "crbl-media-admin"
+SEARCH_TOOLSET = "search"
+WEB_SEARCH_CAP = 10
 NATIVE_MODULE = "plugins.platforms.telegram.adapter"
 NATIVE_CLASS = "TelegramAdapter"
 
@@ -92,13 +95,40 @@ def _visibility_patch() -> None:
         resolved = original(config, platform, *args, **kwargs)
         if str(platform).lower() != PLATFORM:
             return resolved
-        toolsets = {SHARED_TOOLSET}
+        # Hermes' native ``search`` toolset contains only ``web_search``.
+        # Do not expose the broader ``web`` toolset: it also includes
+        # arbitrary page extraction, which is outside this bot's boundary.
+        toolsets = {SHARED_TOOLSET, SEARCH_TOOLSET}
         if current_role() is Role.ADMIN:
             toolsets.add(ADMIN_TOOLSET)
         return toolsets
 
     visible.__crbl_media__ = True  # type: ignore[attr-defined]
     tools_config._get_platform_tools = visible
+
+
+def _guardrail_patch() -> None:
+    """Clamp native web search loops without rewriting Hermes' data config."""
+
+    try:
+        from agent.tool_guardrails import LoopCapConfig  # type: ignore[import-not-found]
+    except ImportError:
+        return
+    current = LoopCapConfig.from_mapping
+    function = getattr(current, "__func__", current)
+    if getattr(function, "__crbl_media__", False):
+        return
+
+    def limited(cls: type, data: Mapping[str, Any] | None) -> object:
+        del cls
+        configured = current(data)
+        cap = configured.max_web_searches
+        if cap == 0 or cap > WEB_SEARCH_CAP:
+            return replace(configured, max_web_searches=WEB_SEARCH_CAP)
+        return configured
+
+    limited.__crbl_media__ = True  # type: ignore[attr-defined]
+    LoopCapConfig.from_mapping = classmethod(limited)
 
 
 def _handler(name: str) -> Callable[..., Awaitable[str]]:
@@ -120,6 +150,7 @@ def _configured(config: object) -> bool:
 
 
 def register(ctx: object) -> None:
+    _guardrail_patch()
     _visibility_patch()
     register_platform = getattr(ctx, "register_platform", None)
     register_tool = getattr(ctx, "register_tool", None)

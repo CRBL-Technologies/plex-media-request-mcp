@@ -389,6 +389,7 @@ async def test_recommendations_present_distinct_titles_with_three_actions(
     result = json.loads(raw)
     assert result["results"] == []
     assert result["telegram_presentation"]["selection_status"] == "search_more"
+    assert "exactly 4 different titles" in result["telegram_presentation"]["instruction"]
     assert result["telegram_presentation"]["exclude_titles"] == [
         "Arrival",
         "Ex Machina",

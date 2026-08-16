@@ -234,6 +234,9 @@ def test_recommendations_return_one_distinct_exact_match_per_title(config: Confi
             "Annihilation (2018)": [
                 {"tmdbId": 13, "title": "Annihilation", "year": 2018},
             ],
+            "Dark City (1998)": [
+                {"tmdbId": 14, "title": "Dark City", "year": 1998},
+            ],
         }
         return {"data": rows[arguments["term"]]}
 
@@ -247,7 +250,12 @@ def test_recommendations_return_one_distinct_exact_match_per_title(config: Confi
                 "actor": _actor(1001),
                 "name": "recommend_media",
                 "arguments": {
-                    "titles": ["Arrival (2016)", "Ex Machina (2014)", "Annihilation (2018)"],
+                    "titles": [
+                        "Arrival (2016)",
+                        "Ex Machina (2014)",
+                        "Annihilation (2018)",
+                        "Dark City (1998)",
+                    ],
                     "media_type": "movie",
                 },
             },
@@ -256,11 +264,12 @@ def test_recommendations_return_one_distinct_exact_match_per_title(config: Confi
     assert response.status_code == 200
     result = response.json()["result"]
     assert result["presentation"] == "recommendations"
-    assert [item["tmdb_id"] for item in result["results"]] == [11, 12, 13]
+    assert [item["tmdb_id"] for item in result["results"]] == [11, 12, 13, 14]
     assert [call[1]["term"] for call in fake.calls] == [
         "Arrival (2016)",
         "Ex Machina (2014)",
         "Annihilation (2018)",
+        "Dark City (1998)",
     ]
 
 
@@ -274,7 +283,12 @@ def test_recommendations_reject_the_same_title_with_different_years(config: Conf
                 "actor": _actor(1001),
                 "name": "recommend_media",
                 "arguments": {
-                    "titles": ["Arrival (2016)", "Arrival (2025)"],
+                    "titles": [
+                        "Arrival (2016)",
+                        "Arrival (2025)",
+                        "Ex Machina (2014)",
+                        "Dark City (1998)",
+                    ],
                     "media_type": "movie",
                 },
             },
@@ -299,7 +313,12 @@ def test_recommendations_omit_inexact_provider_matches(config: Config) -> None:
                 "actor": _actor(1001),
                 "name": "recommend_media",
                 "arguments": {
-                    "titles": ["Arrival (2016)", "Ex Machina (2014)"],
+                    "titles": [
+                        "Arrival (2016)",
+                        "Ex Machina (2014)",
+                        "Annihilation (2018)",
+                        "Dark City (1998)",
+                    ],
                     "media_type": "movie",
                 },
             },

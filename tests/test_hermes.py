@@ -130,6 +130,53 @@ async def test_plugin_registers_closed_inventory_and_binds_actor(
     assert gateway.calls == [(1001, "search_media", {"query": "test"})]
 
 
+async def test_recommendation_turn_redirects_single_title_search_before_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gateway = FakeGateway()
+    monkeypatch.setattr(plugin, "_client", gateway)
+    actor = Actor(user_id=1001, chat_id=1001)
+    with actor_scope(
+        actor,
+        Role.USER,
+        "agent:main:telegram:dm:1001",
+        turn_text="Something for tonight",
+        recommendation_turn=True,
+    ):
+        raw = await plugin._handler("search_media")({"query": "Source Code", "media_type": "movie"})
+
+    result = json.loads(raw)
+    assert result["results"] == []
+    assert result["telegram_presentation"]["selection_status"] == "recommendation_batch_required"
+    assert "exactly 4 distinct titles" in result["telegram_presentation"]["instruction"]
+    assert gateway.calls == []
+
+
+async def test_direct_title_still_uses_search_during_lingering_recommendation_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gateway = FakeGateway()
+    monkeypatch.setattr(plugin, "_client", gateway)
+    monkeypatch.setattr(
+        plugin,
+        "_recommendation_contexts",
+        {"agent:main:telegram:dm:1001": float("inf")},
+    )
+    actor = Actor(user_id=1001, chat_id=1001)
+    with actor_scope(
+        actor,
+        Role.USER,
+        "agent:main:telegram:dm:1001",
+        turn_text="Avengers",
+        recommendation_turn=True,
+    ):
+        raw = await plugin._handler("search_media")({"query": "Avengers"})
+
+    assert json.loads(raw) == {"called": "search_media"}
+    assert gateway.calls == [(1001, "search_media", {"query": "Avengers"})]
+    assert plugin._recommendation_contexts == {}
+
+
 async def test_search_sends_tabbed_card_and_returns_only_selected_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -261,6 +308,20 @@ async def test_recommendations_present_distinct_titles_with_three_actions(
                         "year": 2014,
                         "poster_url": "https://image.tmdb.org/ex-machina.jpg",
                     },
+                    {
+                        "media_type": "movie",
+                        "tmdb_id": 13,
+                        "title": "Annihilation",
+                        "year": 2018,
+                        "poster_url": "https://image.tmdb.org/annihilation.jpg",
+                    },
+                    {
+                        "media_type": "movie",
+                        "tmdb_id": 14,
+                        "title": "Dark City",
+                        "year": 1998,
+                        "poster_url": "https://image.tmdb.org/dark-city.jpg",
+                    },
                 ],
             }
 
@@ -311,7 +372,12 @@ async def test_recommendations_present_distinct_titles_with_three_actions(
     monkeypatch.setattr(plugin, "_clarify_gateway", lambda: ClarifyGateway())
     actor = Actor(user_id=1001, chat_id=1001)
     arguments = {
-        "titles": ["Arrival (2016)", "Ex Machina (2014)"],
+        "titles": [
+            "Arrival (2016)",
+            "Ex Machina (2014)",
+            "Annihilation (2018)",
+            "Dark City (1998)",
+        ],
         "media_type": "movie",
     }
     with actor_scope(actor, Role.USER, "agent:main:telegram:dm:1001"):
@@ -323,7 +389,12 @@ async def test_recommendations_present_distinct_titles_with_three_actions(
     result = json.loads(raw)
     assert result["results"] == []
     assert result["telegram_presentation"]["selection_status"] == "search_more"
-    assert result["telegram_presentation"]["exclude_titles"] == ["Arrival", "Ex Machina"]
+    assert result["telegram_presentation"]["exclude_titles"] == [
+        "Arrival",
+        "Ex Machina",
+        "Annihilation",
+        "Dark City",
+    ]
     assert gateway.calls == [(1001, "recommend_media", arguments)]
 
 
@@ -591,6 +662,12 @@ async def test_media_card_cancel_resolves_without_requesting_anything(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clarify, query_cls, _pending = _media_card_fixture(monkeypatch)
+    interrupted: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        plugin,
+        "interrupt_running_turn",
+        lambda _adapter, session_key, reason: interrupted.append((session_key, reason)) or True,
+    )
     query = query_cls(data="md:picker-1:cancel")
 
     assert await plugin._handle_media_picker_callback(SimpleNamespace(callback_query=query), None)
@@ -598,6 +675,7 @@ async def test_media_card_cancel_resolves_without_requesting_anything(
     assert query.answers[-1] == "Cancelled"
     assert query.edits[-1]["reply_markup"] is None
     assert "cancelled" in query.edits[-1]["caption"].casefold()
+    assert interrupted == [("session-1", "Telegram media picker cancelled")]
 
 
 async def test_failed_tab_switch_keeps_the_displayed_candidate_authoritative(
@@ -1053,9 +1131,11 @@ def test_search_tool_contract_owns_native_telegram_selection() -> None:
     assert "before the tool returns" in text
     assert "call clarify" in text
     assert "Never use MEDIA" in text
-    recommendation = SHARED_SCHEMAS["recommend_media"]["description"]
+    recommendation_schema = SHARED_SCHEMAS["recommend_media"]
+    recommendation = recommendation_schema["description"]
     assert "Pick, Search more, and Cancel" in recommendation
     assert "instead of calling search_media separately" in recommendation
+    assert recommendation_schema["inputSchema"]["properties"]["titles"]["minItems"] == 4
 
 
 async def test_adapter_verifies_actor_before_trusting_gateway(

@@ -16,12 +16,21 @@ from hermes_media.trusted import actor_scope, session_key_from_event
 from media_gateway.types import Actor, Role
 
 
+class RunningAgent:
+    def __init__(self) -> None:
+        self.interruptions = 0
+
+    def interrupt(self) -> None:
+        self.interruptions += 1
+
+
 class WaitingPickerAdapter(plugin.MediaTelegramAdapter):
     def __init__(self) -> None:
         self.config = SimpleNamespace(extra={})
         self._media_delivery_loop: asyncio.AbstractEventLoop | None = None
         self.card: dict[str, object] | None = None
         self._bot = SimpleNamespace(send_photo=self.send_photo, send_message=self.send_message)
+        self.gateway_runner = SimpleNamespace(_running_agents={})
         self._crbl_media_callback_handler = plugin._handle_media_picker_callback
 
     async def send_photo(self, **values: object) -> SimpleNamespace:
@@ -151,6 +160,8 @@ async def _assert_cancel_closes_card(actor: Actor, session_key: str) -> None:
 
     adapter = WaitingPickerAdapter()
     adapter._media_delivery_loop = asyncio.get_running_loop()
+    running_agent = RunningAgent()
+    adapter.gateway_runner._running_agents[session_key] = running_agent
     plugin._active_adapter = adapter  # type: ignore[assignment]
     with actor_scope(actor, Role.USER, session_key):
         pending = asyncio.create_task(
@@ -197,6 +208,7 @@ async def _assert_cancel_closes_card(actor: Actor, session_key: str) -> None:
     assert query.closed, "cancel must close the card"
     assert query.closed["reply_markup"] is None
     assert "cancelled" in str(query.closed.get("text", "")).casefold()
+    assert running_agent.interruptions == 1
 
 
 async def _assert_new_message_supersedes_card(
@@ -206,6 +218,8 @@ async def _assert_new_message_supersedes_card(
 
     adapter = WaitingPickerAdapter()
     adapter._media_delivery_loop = asyncio.get_running_loop()
+    running_agent = RunningAgent()
+    adapter.gateway_runner._running_agents[session_key] = running_agent
     plugin._active_adapter = adapter  # type: ignore[assignment]
     with actor_scope(actor, Role.USER, session_key):
         pending = asyncio.create_task(
@@ -252,6 +266,7 @@ async def _assert_new_message_supersedes_card(
     superseded = await asyncio.wait_for(pending, timeout=2)
     assert superseded["results"] == []
     assert superseded["telegram_presentation"]["selection_status"] == "superseded"
+    assert running_agent.interruptions == 1
 
 
 if __name__ == "__main__":

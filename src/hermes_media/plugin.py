@@ -26,6 +26,7 @@ from .compat import (
     close_media_picker,
     edit_media_picker,
     install_tool_visibility,
+    interrupt_running_turn,
     native_adapter,
     read_media_callback,
     send_media_picker,
@@ -52,15 +53,19 @@ MEDIA_PICKER_TIMEOUT_SECONDS = 120.0
 MEDIA_PICKER_SUPERSEDED = "__crbl_media_picker_superseded__"
 MEDIA_PICKER_EXPIRED = "__crbl_media_picker_expired__"
 MEDIA_PICKER_CANCELLED = "__crbl_media_picker_cancelled__"
+MEDIA_PICKER_MORE = "__crbl_media_picker_more__"
 MEDIA_PICKER_REQUESTED = "__crbl_media_picker_requested__:"
 MEDIA_PICKER_REQUEST_FAILED = "__crbl_media_picker_request_failed__:"
 PLATFORM_HINT = (
     "Telegram identity is trusted automatically; never request user IDs. "
-    "For every movie or series title lookup, availability check, or request, call "
+    "For every direct movie or series title lookup, availability check, or request, call "
     "search_media in the current turn before answering or changing anything. Never "
     "reuse search results from conversation history. search_media itself handles any "
     "ambiguous-result selection before it returns. Never repeat its candidate list or "
-    "call clarify for those same candidates. If the user's current message explicitly says "
+    "call clarify for those same candidates. For a recommendation request, use web_search to "
+    "choose 2-4 distinct titles, then call recommend_media exactly once with those exact titles "
+    "and years; never call search_media separately for each recommendation. If the user's "
+    "current message explicitly says "
     "to add or request media, continue to request the selected result, whether it was chosen by "
     "button or by typed reply. The Telegram media card's Request movie action performs the "
     "request itself before the tool returns; when the result reports the request already "
@@ -93,6 +98,7 @@ class _PendingMediaPicker:
     actor_chat_id: int = 0
     active_index: int = 0
     has_photo: bool = False
+    recommendation_mode: bool = False
 
 
 _pending_picker_lock = threading.Lock()
@@ -420,9 +426,11 @@ async def _select_search_result(
     choices: list[str],
     candidates: list[dict[str, Any]],
     posters: list[str | None],
+    *,
+    recommendation_mode: bool,
 ) -> str | None:
     adapter = _active_adapter
-    if adapter is None or len(choices) < 2:
+    if adapter is None or (len(choices) < 2 and not recommendation_mode):
         return choices[0] if len(choices) == 1 else None
 
     clarify = _clarify_gateway()
@@ -441,6 +449,7 @@ async def _select_search_result(
         posters=tuple(posters),
         actor_user_id=actor_user_id,
         actor_chat_id=actor_chat_id,
+        recommendation_mode=recommendation_mode,
     )
     previous = _get_pending_picker(session_key)
     if previous is not None:
@@ -460,6 +469,7 @@ async def _select_search_result(
             caption=_candidate_caption(candidate),
             active_index=0,
             active_is_movie=candidate.get("media_type") == "movie",
+            recommendation_mode=recommendation_mode,
         )
         _set_picker_photo(pending, bool(getattr(response, "has_photo", False)))
         return bool(getattr(response, "success", False))
@@ -479,6 +489,7 @@ async def _select_search_result(
         response = await asyncio.to_thread(clarify.wait_for_response, clarify_id, timeout)
         if isinstance(response, str) and response.strip():
             return response.strip()
+        interrupt_running_turn(adapter, session_key, "Telegram media picker expired")
         return MEDIA_PICKER_EXPIRED
     finally:
         _discard_pending_picker(session_key, clarify_id)
@@ -522,6 +533,7 @@ async def _handle_media_picker_callback(update: object, adapter: object) -> bool
                 caption=_candidate_caption(pending.candidates[index]),
                 active_index=index,
                 active_is_movie=pending.candidates[index].get("media_type") == "movie",
+                recommendation_mode=pending.recommendation_mode,
                 has_photo=has_photo,
             )
         except Exception:
@@ -535,7 +547,7 @@ async def _handle_media_picker_callback(update: object, adapter: object) -> bool
         await answer_media_callback(query)
         return True
 
-    if callback.action not in {"select", "cancel"}:
+    if callback.action not in {"select", "more", "cancel"}:
         await answer_media_callback(query, "Invalid media action.")
         return True
     active_index, has_photo = _read_picker_tab(pending)
@@ -543,7 +555,7 @@ async def _handle_media_picker_callback(update: object, adapter: object) -> bool
     choice = pending.choices[active_index]
     is_movie = candidate.get("media_type") == "movie"
 
-    if callback.action == "select" and is_movie:
+    if callback.action == "select" and is_movie and not pending.recommendation_mode:
         # The tap is authoritative: the request runs here, on the identity the
         # card was issued to, and the gateway re-authorizes it server-side.
         # The model only narrates the recorded outcome afterwards.
@@ -573,19 +585,30 @@ async def _handle_media_picker_callback(update: object, adapter: object) -> bool
             logger.debug("Could not close resolved media card", exc_info=True)
         return True
 
-    response = choice if callback.action == "select" else MEDIA_PICKER_CANCELLED
+    if callback.action == "more" and not pending.recommendation_mode:
+        await answer_media_callback(query, "Invalid media action.")
+        return True
+    response = {
+        "select": choice,
+        "more": MEDIA_PICKER_MORE,
+        "cancel": MEDIA_PICKER_CANCELLED,
+    }[callback.action]
     clarify = _clarify_gateway()
     if not clarify.resolve_gateway_clarify(callback.picker_id, response):
         await answer_media_callback(query, "This media card has expired.")
         return True
-    await answer_media_callback(
-        query, "Cancelled" if response == MEDIA_PICKER_CANCELLED else "Selected"
-    )
+    acknowledgement = {
+        MEDIA_PICKER_CANCELLED: "Cancelled",
+        MEDIA_PICKER_MORE: "Searching for more…",
+    }.get(response, "Selected")
+    await answer_media_callback(query, acknowledgement)
     try:
         # State only what has already happened; series requests still need the
         # seasons conversation, so the model handles them after this closes.
         if response == MEDIA_PICKER_CANCELLED:
             status = "<i>Media selection cancelled.</i>"
+        elif response == MEDIA_PICKER_MORE:
+            status = "<i>Searching for more suggestions…</i>"
         else:
             status = f"{_candidate_caption(candidate)}\n\n<i>Selected.</i>"
         await close_media_picker(query, caption=status, has_photo=has_photo)
@@ -599,12 +622,13 @@ async def _decorate_search_result(
     session_key: str,
     result: dict[str, Any],
 ) -> dict[str, Any]:
+    recommendation_mode = result.get("presentation") == "recommendations"
     cards, choices, candidates, posters = _search_presentation(result)
     if not candidates:
         return result
     decorated = dict(result)
     decorated["results"] = candidates
-    if len(candidates) == 1:
+    if len(candidates) == 1 and not recommendation_mode:
         delivered = False
         adapter = _active_adapter
         if adapter is not None and cards:
@@ -639,7 +663,13 @@ async def _decorate_search_result(
 
     actor = require_actor()
     selection = await _select_search_result(
-        actor_chat_id, actor.user_id, session_key, choices, candidates, posters
+        actor_chat_id,
+        actor.user_id,
+        session_key,
+        choices,
+        candidates,
+        posters,
+        recommendation_mode=recommendation_mode,
     )
     # The card is delivered before any selection can occur, so every terminal
     # status below except "unavailable" implies it reached the user.
@@ -675,6 +705,20 @@ async def _decorate_search_result(
             "poster_count": len(cards),
             "selection_status": "cancelled",
             "instruction": "The user cancelled the media card. End without another response.",
+        }
+        return decorated
+    if selection == MEDIA_PICKER_MORE:
+        decorated["results"] = []
+        decorated["telegram_presentation"] = {
+            "poster_cards_delivered": delivered,
+            "poster_count": len(cards),
+            "selection_status": "search_more",
+            "exclude_titles": [candidate.get("title") for candidate in candidates],
+            "instruction": (
+                "The user explicitly chose Search more. Research 2-4 different titles that "
+                "were not in this batch, then call recommend_media exactly once to present "
+                "the next recommendation card."
+            ),
         }
         return decorated
     if not isinstance(selection, str):
@@ -720,7 +764,12 @@ async def _decorate_search_result(
                 ),
             }
             return decorated
-        if selected.get("media_type") == "movie":
+        if recommendation_mode:
+            instruction = (
+                "The user picked this exact recommendation. Answer only about this title and "
+                "offer to request it if unavailable; do not request it unless the user asked."
+            )
+        elif selected.get("media_type") == "movie":
             # Typed selections reach here too, so the explicit-request path
             # must stay available and the wording must not assume a series.
             instruction = (
@@ -799,7 +848,7 @@ def _handler(name: str) -> Callable[..., Coroutine[Any, Any, str]]:
         del runtime
         actor = require_actor()
         result = await _gateway().call(actor, name, dict(arguments))
-        if name == "search_media" and isinstance(result.get("results"), list):
+        if name in {"search_media", "recommend_media"} and isinstance(result.get("results"), list):
             result = await _decorate_search_result(
                 actor.chat_id,
                 require_session_key(),

@@ -1,8 +1,9 @@
-"""Seven stable shared tools plus a closed administrator proxy."""
+"""Stable shared tools plus a closed administrator proxy."""
 
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -44,6 +45,13 @@ def _short_text(value: object, name: str, *, minimum: int = 1, maximum: int = 12
     if not minimum <= len(result) <= maximum:
         raise ToolError(f"{name} has an invalid length")
     return result
+
+
+def _recommendation_target(value: str) -> tuple[str, int | None]:
+    match = re.fullmatch(r"\s*(.*?)\s*(?:\((\d{4})\))?\s*", value)
+    title = " ".join((match.group(1) if match else value).casefold().split())
+    year = int(match.group(2)) if match and match.group(2) else None
+    return title, year
 
 
 def _rows(value: object) -> list[dict[str, Any]]:
@@ -199,6 +207,30 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
             "additionalProperties": False,
         },
     },
+    "recommend_media": {
+        "description": (
+            "Present one exact Radarr/Sonarr match for each of 2-4 distinct titles after "
+            "recommendation research. Use this once for discovery requests instead of calling "
+            "search_media separately for every title. Include a year in each title when known. "
+            "On Telegram this creates one recommendation card with Pick, Search more, and "
+            "Cancel actions. Do not use it for a direct title lookup."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "titles": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 2, "maxLength": 120},
+                    "minItems": 2,
+                    "maxItems": 4,
+                    "uniqueItems": True,
+                },
+                "media_type": {"type": "string", "enum": ["movie", "series", "all"]},
+            },
+            "required": ["titles", "media_type"],
+            "additionalProperties": False,
+        },
+    },
     "request_movie": {
         "description": "Request one movie by its TMDB ID from a current search result.",
         "inputSchema": {
@@ -306,15 +338,9 @@ class ToolService:
             return {"result": await self.upstream.call(name, _object(arguments))}
         raise ToolError("tool is not available for this user")
 
-    async def _search_media(self, arguments: object, _actor: Actor, _role: Role) -> dict[str, Any]:
-        args = _exact(arguments, {"query", "media_type", "limit"})
-        query = _short_text(args.get("query"), "query", minimum=2)
-        media_type = args.get("media_type", "all")
-        if media_type not in {"all", "movie", "series"}:
-            raise ToolError("media_type must be all, movie, or series")
-        limit = args.get("limit", 8)
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10:
-            raise ToolError("limit must be between 1 and 10")
+    async def _search_candidates(
+        self, query: str, media_type: str, limit: int
+    ) -> tuple[list[dict[str, Any]], list[str]]:
         calls: list[tuple[str, Any]] = []
         if media_type in {"all", "movie"}:
             calls.append(
@@ -344,9 +370,84 @@ class ToolService:
                 [candidate for item in _rows(value) if (candidate := mapper(item)) is not None]
             )
         results = _interleave(groups, limit)
+        return results, errors
+
+    async def _search_media(self, arguments: object, _actor: Actor, _role: Role) -> dict[str, Any]:
+        args = _exact(arguments, {"query", "media_type", "limit"})
+        query = _short_text(args.get("query"), "query", minimum=2)
+        media_type = args.get("media_type", "all")
+        if media_type not in {"all", "movie", "series"}:
+            raise ToolError("media_type must be all, movie, or series")
+        limit = args.get("limit", 8)
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10:
+            raise ToolError("limit must be between 1 and 10")
+        results, errors = await self._search_candidates(query, media_type, limit)
         if not results and errors:
             raise UpstreamError("media search is temporarily unavailable")
         return {"query": query, "results": results, "unavailable_sources": errors}
+
+    @staticmethod
+    def _recommendation_choice(
+        query: str,
+        candidates: list[dict[str, Any]],
+        seen: set[tuple[str, int]],
+    ) -> dict[str, Any] | None:
+        wanted_title, wanted_year = _recommendation_target(query)
+
+        def identity(candidate: dict[str, Any]) -> tuple[str, int] | None:
+            media_type = candidate.get("media_type")
+            external_id = candidate.get("tmdb_id" if media_type == "movie" else "tvdb_id")
+            if media_type not in {"movie", "series"} or not isinstance(external_id, int):
+                return None
+            return media_type, external_id
+
+        def exact_match(candidate: dict[str, Any]) -> bool:
+            title = " ".join(str(candidate.get("title") or "").casefold().split())
+            return title == wanted_title and (
+                wanted_year is None or candidate.get("year") == wanted_year
+            )
+
+        for candidate in candidates:
+            key = identity(candidate)
+            if exact_match(candidate) and key is not None and key not in seen:
+                seen.add(key)
+                return candidate
+        return None
+
+    async def _recommend_media(
+        self, arguments: object, _actor: Actor, _role: Role
+    ) -> dict[str, Any]:
+        args = _exact(arguments, {"titles", "media_type"})
+        raw_titles = args.get("titles")
+        if not isinstance(raw_titles, list) or not 2 <= len(raw_titles) <= 4:
+            raise ToolError("titles must contain between 2 and 4 items")
+        titles = [_short_text(item, "title", minimum=2) for item in raw_titles]
+        if len({_recommendation_target(title)[0] for title in titles}) != len(titles):
+            raise ToolError("titles must be distinct")
+        media_type = args.get("media_type")
+        if media_type not in {"all", "movie", "series"}:
+            raise ToolError("media_type must be all, movie, or series")
+
+        searches = await asyncio.gather(
+            *(self._search_candidates(title, media_type, 5) for title in titles)
+        )
+        results: list[dict[str, Any]] = []
+        errors: set[str] = set()
+        seen: set[tuple[str, int]] = set()
+        for title, (candidates, unavailable) in zip(titles, searches, strict=True):
+            errors.update(unavailable)
+            choice = self._recommendation_choice(title, candidates, seen)
+            if choice is not None:
+                results.append(choice)
+        if not results and errors:
+            raise UpstreamError("media recommendation lookup is temporarily unavailable")
+        return {
+            "query": "recommendations",
+            "requested_titles": titles,
+            "results": results,
+            "unavailable_sources": sorted(errors),
+            "presentation": "recommendations",
+        }
 
     async def _request_movie(self, arguments: object, actor: Actor, _role: Role) -> dict[str, Any]:
         args = _exact(arguments, {"tmdb_id"})

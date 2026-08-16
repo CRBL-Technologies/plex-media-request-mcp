@@ -11,6 +11,7 @@ UPSTREAM_IMAGE: Final = (
 
 SHARED_TOOLS: Final = (
     "search_media",
+    "recommend_media",
     "request_movie",
     "request_series",
     "request_status",

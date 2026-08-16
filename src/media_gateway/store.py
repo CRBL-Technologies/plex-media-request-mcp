@@ -431,6 +431,13 @@ class Store:
                 (external_id, event_key),
             )
 
+    def set_media_plex_url(self, event_key: str, plex_url: str) -> None:
+        with self._db() as db:
+            db.execute(
+                "UPDATE media_events SET plex_url=? WHERE event_key=?",
+                (plex_url, event_key),
+            )
+
     def pending_media_events(self, before: int, limit: int = 200) -> list[dict[str, Any]]:
         with self._db() as db:
             rows = db.execute(

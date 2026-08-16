@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import re
 import time
 from collections import defaultdict
 from contextlib import suppress
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 
@@ -21,6 +22,8 @@ from .types import Actor
 from .upstream import Upstream
 
 LOGGER = logging.getLogger(__name__)
+PLEX_METADATA_MATCH_URL = "https://metadata.provider.plex.tv/library/metadata/matches"
+PLEX_SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
 def _positive(value: object) -> int | None:
@@ -53,6 +56,48 @@ def _guide_id(value: object, provider: str) -> int | None:
     if not value.startswith(prefix):
         return None
     return _positive(value.removeprefix(prefix).split("?", 1)[0])
+
+
+def _valid_slug(value: object) -> str | None:
+    if not isinstance(value, str) or len(value) > 200 or PLEX_SLUG.fullmatch(value) is None:
+        return None
+    return value
+
+
+def _metadata_slug(metadata: dict[str, Any], kind: str) -> str | None:
+    key = {"movie": "slug", "show": "slug", "season": "parentSlug", "episode": "grandparentSlug"}[
+        kind
+    ]
+    return _valid_slug(metadata.get(key))
+
+
+def _watch_slug(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    parsed = urlsplit(value)
+    parts = [part for part in parsed.path.split("/") if part]
+    if parsed.scheme != "https" or parsed.hostname != "watch.plex.tv" or len(parts) < 2:
+        return None
+    if parts[0] not in {"movie", "show"}:
+        return None
+    return _valid_slug(parts[1])
+
+
+def _watch_url(
+    *,
+    media_type: str,
+    slug: str,
+    season_number: object = None,
+    episode_number: object = None,
+) -> str:
+    if media_type == "movie":
+        return f"https://watch.plex.tv/movie/{slug}"
+    result = f"https://watch.plex.tv/show/{slug}"
+    if isinstance(season_number, int) and season_number > 0:
+        result += f"/season/{season_number}"
+        if isinstance(episode_number, int) and episode_number > 0:
+            result += f"/episode/{episode_number}"
+    return result
 
 
 class Notifications:
@@ -108,11 +153,20 @@ class Notifications:
             season = _positive(metadata.get("parentIndex"))
             episode = _positive(metadata.get("index"))
         title = str(metadata.get("title") or "Untitled")[:300]
-        encoded_key = quote(f"/library/metadata/{rating_key}", safe="")
-        url = (
-            "https://app.plex.tv/desktop/#!/server/"
-            f"{quote(self.config.plex_machine_id, safe='')}/details?key={encoded_key}"
-        )
+        slug = _metadata_slug(metadata, kind)
+        if slug is not None:
+            url = _watch_url(
+                media_type="movie" if kind == "movie" else "series",
+                slug=slug,
+                season_number=season,
+                episode_number=episode,
+            )
+        else:
+            encoded_key = quote(f"/library/metadata/{rating_key}", safe="")
+            url = (
+                "https://app.plex.tv/desktop/#!/server/"
+                f"{quote(self.config.plex_machine_id, safe='')}/details?key={encoded_key}"
+            )
         return self.store.add_media_event(
             event_key=f"{kind}:{rating_key}",
             media_type="movie" if kind == "movie" else "series",
@@ -221,6 +275,7 @@ class Notifications:
 
     async def _enrich(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         ready: list[dict[str, Any]] = []
+        resolved_slugs: dict[tuple[str, int], str | None] = {}
         for event in events:
             if event.get("external_id") is None:
                 is_series = event.get("media_type") == "series"
@@ -255,8 +310,57 @@ class Notifications:
                     # the notification even though Plex omits it from the
                     # top-level webhook payload.
                     event["season_number"] = next(iter(requested))
+            slug = _watch_slug(event.get("plex_url"))
+            external_id = event.get("external_id")
+            media_type = str(event.get("media_type") or "")
+            if slug is None and isinstance(external_id, int) and media_type in {"movie", "series"}:
+                key = media_type, external_id
+                if key not in resolved_slugs:
+                    resolved_slugs[key] = await self._lookup_plex_slug(media_type, external_id)
+                slug = resolved_slugs[key]
+            if slug is not None and media_type in {"movie", "series"}:
+                plex_url = _watch_url(
+                    media_type=media_type,
+                    slug=slug,
+                    season_number=event.get("season_number"),
+                    episode_number=event.get("episode_number"),
+                )
+                if event.get("plex_url") != plex_url:
+                    event["plex_url"] = plex_url
+                    self.store.set_media_plex_url(str(event["event_key"]), plex_url)
             ready.append(event)
         return ready
+
+    async def _lookup_plex_slug(self, media_type: str, external_id: int) -> str | None:
+        try:
+            token = read_dotenv(self.config.upstream_token_file, {"PLEX_API_KEY"}).get(
+                "PLEX_API_KEY"
+            )
+        except (OSError, ValueError):
+            return None
+        if not token:
+            return None
+        provider = "tmdb" if media_type == "movie" else "tvdb"
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                response = await client.get(
+                    PLEX_METADATA_MATCH_URL,
+                    params={
+                        "guid": f"{provider}://{external_id}",
+                        "type": 1 if media_type == "movie" else 2,
+                    },
+                    headers={"X-Plex-Token": token, "Accept": "application/json"},
+                )
+        except httpx.HTTPError:
+            return None
+        if response.is_error:
+            return None
+        try:
+            value = response.json()
+        except ValueError:
+            return None
+        candidates = self._metadata_objects(value) if isinstance(value, dict) else []
+        return _valid_slug(candidates[0].get("slug")) if candidates else None
 
     async def _deliver_batch(self, batch: list[dict[str, Any]]) -> None:
         first = batch[0]

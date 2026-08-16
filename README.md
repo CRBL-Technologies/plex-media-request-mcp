@@ -23,9 +23,10 @@ The Portainer definition owns only those three media services. General Hermes
 and accountant agents use a separate stack and release lifecycle while sharing
 the external `media` network where required.
 
-The gateway exposes exactly seven media tools to an allowed Telegram user:
+The gateway exposes exactly eight media tools to an allowed Telegram user:
 
 - `search_media`
+- `recommend_media`
 - `request_movie`
 - `request_series`
 - `request_status`
@@ -48,7 +49,7 @@ Configured administrators also receive the reviewed Plex/Radarr/Sonarr tools
 discovered from the pinned upstream MCP. Future upstream tools are not admitted
 automatically. Retaining that broad operations surface in the same bot is a
 deliberate product decision: only explicit administrators see it, while regular
-users remain limited to seven normalized tools. No selection token is used:
+users remain limited to eight normalized tools. No selection token is used:
 requests take the TMDB or TVDB ID returned by a current search.
 
 Search results retain the provider's public poster URL. The Hermes adapter
@@ -63,6 +64,10 @@ so a typed number or button click cannot become a second bare query. Remote
 poster URLs are never sent through Hermes' local-file `MEDIA:` convention.
 An exact number, unique year, or exact title still selects a result, while
 other text supersedes the old card and starts a fresh request.
+Recommendation research uses `recommend_media` once with two to four distinct
+titles instead of opening one ambiguity picker per suggestion. Its card offers
+Pick, Search more, and Cancel. Search more explicitly asks Hermes for a fresh,
+different batch; silence never advances recommendation research.
 Every title lookup, availability check, and request must refresh `search_media`
 in the current turn; conversation history is never a valid substitute for a
 current provider result. Hermes's built-in Telegram hint takes precedence over
@@ -77,8 +82,9 @@ all other provider operations go through upstream MCP.
 The picker is interruptible. A reply containing a result number, a unique
 result year, or an exact title selects it. Any other normal message cancels the
 old picker and continues as a fresh request; unanswered media pickers expire
-after two minutes. This prevents a new title search from waiting behind an
-abandoned selection prompt.
+after two minutes and interrupt their exact Hermes turn without queuing a new
+message. This prevents a new title search from waiting behind an abandoned
+selection prompt or silently continuing into another search.
 
 ## Notifications
 
@@ -89,6 +95,12 @@ matching movie or requested season appears in Plex. A season batch waits until
 the latest event has been quiet for the configured delay, so a bulk import
 sends one message while weekly episodes remain individual messages. Each
 message contains an `Open in Plex` button.
+When Plex supplies its catalog slug, that button uses a `watch.plex.tv` universal
+link so supported mobile clients open the Plex app; the browser remains the
+fallback. Missing slugs are resolved against Plex's fixed metadata endpoint
+with the existing read-only-mounted Plex credential, never a user-controlled
+URL or a second secret copy. The server-specific Plex Web URL remains the
+fallback when resolution is unavailable.
 
 Webhook events and delivery receipts are durable and deduplicated in SQLite.
 Unresolved Plex provider IDs remain retryable, and terminal operational data is

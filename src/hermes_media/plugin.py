@@ -23,6 +23,14 @@ ADMIN_TOOLSET = "crbl-media-admin"
 SEARCH_TOOLSET = "search"
 WEB_SEARCH_CAP = 10
 SEARCH_PRESENTATION_LIMIT = 4
+PLATFORM_HINT = (
+    "Telegram identity is trusted automatically; never request user IDs. "
+    "For every movie or series title lookup, availability check, or request, call "
+    "search_media in the current turn before answering or changing anything. Never "
+    "reuse search results from conversation history. When search_media returns "
+    "telegram_presentation and the user must choose among multiple matches, call the "
+    "clarify tool with the exact clarify_choices."
+)
 NATIVE_MODULE = "plugins.platforms.telegram.adapter"
 NATIVE_CLASS = "TelegramAdapter"
 logger = logging.getLogger(__name__)
@@ -302,7 +310,7 @@ def register(ctx: object) -> None:
         emoji="✈️",
         max_message_length=4096,
         allow_update_command=True,
-        platform_hint="Telegram identity is trusted automatically; never request user IDs.",
+        platform_hint=PLATFORM_HINT,
     )
     schemas = _gateway().schemas()
     names: set[str] = set()

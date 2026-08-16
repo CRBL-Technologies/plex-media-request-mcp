@@ -265,6 +265,18 @@ def validate_search_guardrail(config: Mapping[str, Any]) -> None:
         )
 
 
+def validate_platform_hint(config: Mapping[str, Any]) -> None:
+    """Require the CRBL guidance in Hermes' effective Telegram override."""
+
+    hints = config.get("platform_hints")
+    telegram = hints.get(PLATFORM) if isinstance(hints, Mapping) else None
+    append = telegram.get("append") if isinstance(telegram, Mapping) else None
+    if append != PLATFORM_HINT:
+        raise RuntimeError(
+            "Hermes config must append the CRBL media guidance at platform_hints.telegram.append"
+        )
+
+
 def _handler(name: str) -> Callable[..., Awaitable[str]]:
     async def call(arguments: Mapping[str, Any], **runtime: Any) -> str:
         del runtime

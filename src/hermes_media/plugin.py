@@ -6,7 +6,6 @@ import inspect
 import json
 import os
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import replace
 from typing import Any
 
 from media_gateway.constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
@@ -107,28 +106,17 @@ def _visibility_patch() -> None:
     tools_config._get_platform_tools = visible
 
 
-def _guardrail_patch() -> None:
-    """Clamp native web search loops without rewriting Hermes' data config."""
+def validate_search_guardrail(config: Mapping[str, Any]) -> None:
+    """Require the native agent and startup verifier to share one search cap."""
 
-    try:
-        from agent.tool_guardrails import LoopCapConfig  # type: ignore[import-not-found]
-    except ImportError:
-        return
-    current = LoopCapConfig.from_mapping
-    function = getattr(current, "__func__", current)
-    if getattr(function, "__crbl_media__", False):
-        return
-
-    def limited(cls: type, data: Mapping[str, Any] | None) -> object:
-        del cls
-        configured = current(data)
-        cap = configured.max_web_searches
-        if cap == 0 or cap > WEB_SEARCH_CAP:
-            return replace(configured, max_web_searches=WEB_SEARCH_CAP)
-        return configured
-
-    limited.__crbl_media__ = True  # type: ignore[attr-defined]
-    LoopCapConfig.from_mapping = classmethod(limited)
+    guardrails = config.get("tool_loop_guardrails")
+    loop_caps = guardrails.get("loop_caps") if isinstance(guardrails, Mapping) else None
+    cap = loop_caps.get("max_web_searches") if isinstance(loop_caps, Mapping) else None
+    if cap != WEB_SEARCH_CAP:
+        raise RuntimeError(
+            "Hermes config must set "
+            f"tool_loop_guardrails.loop_caps.max_web_searches to {WEB_SEARCH_CAP}"
+        )
 
 
 def _handler(name: str) -> Callable[..., Awaitable[str]]:
@@ -150,7 +138,6 @@ def _configured(config: object) -> bool:
 
 
 def register(ctx: object) -> None:
-    _guardrail_patch()
     _visibility_patch()
     register_platform = getattr(ctx, "register_platform", None)
     register_tool = getattr(ctx, "register_tool", None)

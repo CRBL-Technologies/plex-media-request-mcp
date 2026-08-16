@@ -109,7 +109,10 @@ jobs:
           }
           trap cleanup EXIT
           smoke="$RUNNER_TEMP/hermes-adapter-smoke"
-          mkdir -p "$smoke"
+          mkdir -p "$smoke/data"
+          chmod 0777 "$smoke/data"
+          cp "$GITHUB_WORKSPACE/tests/hermes_config_smoke.yaml" "$smoke/data/config.yaml"
+          chmod 0666 "$smoke/data/config.yaml"
           printf '%064d\n' 0 > "$smoke/gateway.key"
           docker network create "$network" >/dev/null
           docker run --detach --rm --name "$stub" --network "$network" --network-alias gateway \
@@ -119,7 +122,7 @@ jobs:
             python:3.12-slim@sha256:dd29372629eeba2dd003fd9e9d35a5b8236c44727875a0364254b5127af88e65 \
             python /app/stub.py >/dev/null
           docker run --rm --network "$network" \
-            --tmpfs /opt/data:rw,nosuid,nodev,size=64m \
+            -v "$smoke/data:/opt/data" \
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=128m \
             --tmpfs /run:rw,exec,nosuid,nodev,size=64m \
             -e HERMES_UID=1000 \

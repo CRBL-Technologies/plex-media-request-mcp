@@ -108,6 +108,11 @@ async def test_plugin_registers_closed_inventory_and_binds_actor(
     context = FakeContext()
     plugin.register(context)
     assert len(context.platforms) == 1
+    platform_hint = context.platforms[0]["platform_hint"]
+    assert platform_hint == plugin.PLATFORM_HINT
+    assert "search_media in the current turn" in platform_hint
+    assert "Never reuse search results from conversation history" in platform_hint
+    assert "clarify tool with the exact clarify_choices" in platform_hint
     assert {item["name"] for item in context.tools} == set(SHARED_TOOLS) | ADMIN_UPSTREAM_TOOLS
     search = next(item for item in context.tools if item["name"] == "search_media")
     actor = Actor(user_id=1001, chat_id=1001)

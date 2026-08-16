@@ -8,15 +8,29 @@ import time
 from pathlib import Path
 
 import httpx
+from media_gateway.constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
 
 url = os.environ["CRBL_MEDIA_GATEWAY_URL"].rstrip("/") + "/api/schema"
 token = Path(os.environ["CRBL_MEDIA_GATEWAY_TOKEN_FILE"]).read_text().strip()
+expected = {name: "shared" for name in SHARED_TOOLS}
+expected.update({name: "admin" for name in ADMIN_UPSTREAM_TOOLS})
 for _ in range(30):
     try:
         response = httpx.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=5)
         response.raise_for_status()
         tools = response.json().get("tools")
-        if isinstance(tools, list) and len(tools) == 71:
+        manifest = (
+            {
+                item.get("name"): item.get("scope")
+                for item in tools
+                if isinstance(item, dict)
+                and isinstance(item.get("name"), str)
+                and item.get("scope") in {"shared", "admin"}
+            }
+            if isinstance(tools, list)
+            else {}
+        )
+        if manifest == expected and len(tools) == len(expected):
             sys.exit(0)
     except Exception:
         pass
@@ -25,47 +39,22 @@ raise SystemExit("CRBL media gateway contract is unavailable")
 PY
 
 /opt/hermes/.venv/bin/python - <<'PY'
-from types import SimpleNamespace
-
-from gateway.platform_registry import platform_registry
-from agent.prompt_builder import PLATFORM_HINTS
-from agent.system_prompt import _resolve_platform_hint
-from agent.web_search_registry import get_active_extract_provider, get_active_search_provider
 from hermes_cli.config import load_config_readonly
-from hermes_cli import tools_config
 from hermes_cli.plugins import PluginManager
+from hermes_media.compat import verify_pinned_runtime
 from hermes_media.plugin import PLATFORM_HINT, validate_platform_hint, validate_search_guardrail
 from media_gateway.constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
-from toolsets import TOOLSETS
 
 manager = PluginManager()
 manager.discover_and_load()
-entry = platform_registry.get("telegram")
-if entry is None or entry.plugin_name != "crbl-media":
-    raise SystemExit("CRBL Telegram adapter did not replace the native entry")
 expected = set(SHARED_TOOLS) | ADMIN_UPSTREAM_TOOLS
-missing = expected - manager._plugin_tool_names
-if missing:
-    raise SystemExit(f"CRBL media plugin did not register {sorted(missing)[0]}")
-resolver = getattr(tools_config, "_get_platform_tools", None)
-if not getattr(resolver, "__crbl_media__", False):
-    raise SystemExit("CRBL role-aware tool resolver is not active")
-search_tools = TOOLSETS.get("search", {}).get("tools")
-if search_tools != ["web_search"]:
-    raise SystemExit("Hermes search-only toolset contract changed")
-provider = get_active_search_provider()
-if provider is None or provider.name != "ddgs" or not provider.is_available():
-    raise SystemExit("DuckDuckGo search provider is unavailable")
-if get_active_extract_provider() is not None:
-    raise SystemExit("CRBL media bot must not enable web extraction")
 config = load_config_readonly()
 validate_search_guardrail(config)
 validate_platform_hint(config)
-effective_hint = _resolve_platform_hint(
-    SimpleNamespace(_platform_hint_overrides=config["platform_hints"]),
-    "telegram",
-    PLATFORM_HINTS["telegram"],
+verify_pinned_runtime(
+    manager=manager,
+    config=config,
+    expected_tools=expected,
+    platform_hint=PLATFORM_HINT,
 )
-if PLATFORM_HINT not in effective_hint:
-    raise SystemExit("CRBL media guidance is absent from the effective Telegram prompt")
 PY

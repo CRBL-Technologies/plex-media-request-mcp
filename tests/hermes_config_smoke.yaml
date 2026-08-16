@@ -2,7 +2,7 @@ _config_version: 33
 platform_hints:
   telegram:
     append: >-
-      Telegram identity is trusted automatically; never request user IDs. For every movie or series title lookup, availability check, or request, call search_media in the current turn before answering or changing anything. Never reuse search results from conversation history. search_media itself handles any ambiguous-result selection before it returns. Never repeat its candidate list or call clarify for those same candidates; answer only about its returned result.
+      Telegram identity is trusted automatically; never request user IDs. For every movie or series title lookup, availability check, or request, call search_media in the current turn before answering or changing anything. Never reuse search results from conversation history. search_media itself handles any ambiguous-result selection before it returns. Never repeat its candidate list or call clarify for those same candidates. If the user's current message explicitly says to add or request media, continue to request the selected result. A title-only lookup is read-only: never claim the selection requested anything, and when it is unavailable offer a clear next action (reply 'request' for a movie, or provide seasons for a series). If the user takes that action, refresh the exact prior TMDB or TVDB ID with search_media in the new turn before calling the request tool.
 tool_loop_guardrails:
   loop_caps:
     max_web_searches: 10

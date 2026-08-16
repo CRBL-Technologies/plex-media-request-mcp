@@ -181,9 +181,13 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
             "when available. On Telegram, the media adapter presents up to four poster "
             "cards and resolves ambiguous matches with native selection buttons before the "
             "tool returns. Never use MEDIA for a remote poster URL, repeat the candidate "
-            "list, or call clarify for the same results. Answer only about the returned "
-            "result. If in_sonarr is false, say the series is not yet managed in Sonarr "
-            "rather than saying episode availability was not reported."
+            "list, or call clarify for the same results. A picker selection identifies media; "
+            "it does not itself request it. If the current message explicitly asks to add or "
+            "request media, call the matching request tool after selection. Otherwise make the "
+            "next request action explicit when the result is unavailable. On that follow-up, "
+            "refresh the exact prior TMDB or TVDB ID in the new turn before requesting. Answer "
+            "only about the returned result. If in_sonarr is false, say the series is not yet "
+            "managed in Sonarr rather than saying episode availability was not reported."
         ),
         "inputSchema": {
             "type": "object",
@@ -365,31 +369,7 @@ class ToolService:
             visible_in_plex = await self._movie_in_plex(tmdb_id, candidate["title"])
         except UpstreamError:
             visible_in_plex = False
-        if visible_in_plex:
-            action = "available"
-        elif isinstance(existing_id, int) and existing_id > 0:
-            if candidate["downloaded"]:
-                action = "awaiting_plex"
-            else:
-                await self.upstream.call("radarr_search_movie_releases", {"id": existing_id})
-                action = "search_started"
-        else:
-            await self.upstream.call(
-                "radarr_add_movie",
-                {
-                    "tmdbId": tmdb_id,
-                    "title": candidate["title"],
-                    "year": candidate["year"],
-                    "qualityProfileId": self.config.radarr_profile_id,
-                    "rootFolderPath": self.config.radarr_root,
-                    "minimumAvailability": "released",
-                    "monitored": True,
-                    "searchForMovie": True,
-                    "tags": list(self.config.radarr_tags),
-                },
-            )
-            action = "requested"
-        request_id = self.store.record_request(
+        request_id = self.store.begin_request(
             media_type="movie",
             external_id=tmdb_id,
             seasons=(),
@@ -397,8 +377,17 @@ class ToolService:
             year=candidate["year"],
             actor=actor,
         )
-        if action == "available":
-            self.store.mark_movie_available(tmdb_id)
+        try:
+            action = await self._fulfill_movie_request(
+                tmdb_id=tmdb_id,
+                candidate=candidate,
+                existing_id=existing_id,
+                visible_in_plex=visible_in_plex,
+            )
+        except Exception:
+            self.store.mark_request_unknown(request_id)
+            raise
+        self.store.complete_request(request_id, action)
         return {
             "request_id": request_id,
             "status": action,
@@ -408,6 +397,37 @@ class ToolService:
                 "year": candidate["year"],
             },
         }
+
+    async def _fulfill_movie_request(
+        self,
+        *,
+        tmdb_id: int,
+        candidate: dict[str, Any],
+        existing_id: object,
+        visible_in_plex: bool,
+    ) -> str:
+        if visible_in_plex:
+            return "available"
+        if isinstance(existing_id, int) and existing_id > 0:
+            if candidate["downloaded"]:
+                return "awaiting_plex"
+            await self.upstream.call("radarr_search_movie_releases", {"id": existing_id})
+            return "search_started"
+        await self.upstream.call(
+            "radarr_add_movie",
+            {
+                "tmdbId": tmdb_id,
+                "title": candidate["title"],
+                "year": candidate["year"],
+                "qualityProfileId": self.config.radarr_profile_id,
+                "rootFolderPath": self.config.radarr_root,
+                "minimumAvailability": "released",
+                "monitored": True,
+                "searchForMovie": True,
+                "tags": list(self.config.radarr_tags),
+            },
+        )
+        return "requested"
 
     async def _movie_in_plex(self, tmdb_id: int, title: str) -> bool:
         raw = await self.upstream.call(
@@ -470,6 +490,49 @@ class ToolService:
         if known_seasons and missing:
             raise ToolError(f"season {min(missing)} does not exist for this series")
         existing_id = source.get("id")
+        request_id = self.store.begin_request(
+            media_type="series",
+            external_id=tvdb_id,
+            seasons=seasons,
+            title=candidate["title"],
+            year=candidate["year"],
+            actor=actor,
+            options={"anime": anime},
+        )
+        try:
+            action = await self._fulfill_series_request(
+                tvdb_id=tvdb_id,
+                seasons=seasons,
+                anime=anime,
+                candidate=candidate,
+                existing_id=existing_id,
+                known_seasons=known_seasons,
+            )
+        except Exception:
+            self.store.mark_request_unknown(request_id)
+            raise
+        self.store.complete_request(request_id, action)
+        return {
+            "request_id": request_id,
+            "status": action,
+            "series": {
+                "tvdb_id": tvdb_id,
+                "title": candidate["title"],
+                "year": candidate["year"],
+                "seasons": list(seasons),
+            },
+        }
+
+    async def _fulfill_series_request(
+        self,
+        *,
+        tvdb_id: int,
+        seasons: tuple[int, ...],
+        anime: bool,
+        candidate: dict[str, Any],
+        existing_id: object,
+        known_seasons: set[int],
+    ) -> str:
         if isinstance(existing_id, int) and existing_id > 0:
             current = _record(
                 await self.upstream.call("sonarr_get_series_by_id", {"id": existing_id})
@@ -518,7 +581,6 @@ class ToolService:
                 await self.upstream.call(
                     "sonarr_search_season", {"seriesId": existing_id, "seasonNumber": season}
                 )
-            action = "monitoring_updated"
         else:
             season_options = [
                 {"seasonNumber": number, "monitored": number in seasons}
@@ -543,25 +605,93 @@ class ToolService:
                     "searchForMissingEpisodes": True,
                 },
             )
-            action = "requested"
-        request_id = self.store.record_request(
-            media_type="series",
-            external_id=tvdb_id,
-            seasons=seasons,
-            title=candidate["title"],
-            year=candidate["year"],
-            actor=actor,
+            return "requested"
+        return "monitoring_updated"
+
+    async def reconcile_pending_requests(
+        self, *, updated_before: int | None = None
+    ) -> dict[str, int]:
+        """Repair request intents left pending or unknown by an interrupted operation."""
+
+        return await self.reconcile_request_intents(
+            self.store.pending_request_intents(updated_before=updated_before)
         )
-        return {
-            "request_id": request_id,
-            "status": action,
-            "series": {
-                "tvdb_id": tvdb_id,
-                "title": candidate["title"],
-                "year": candidate["year"],
-                "seasons": list(seasons),
-            },
-        }
+
+    async def reconcile_request_intents(self, intents: list[dict[str, Any]]) -> dict[str, int]:
+        """Repair an immutable snapshot of pending or unknown request intents."""
+
+        repaired = 0
+        unresolved = 0
+        for intent in intents:
+            request_id = int(intent["id"])
+            try:
+                if intent["media_type"] == "movie":
+                    status = await self._reconcile_movie_intent(intent)
+                else:
+                    status = await self._reconcile_series_intent(intent)
+            except Exception:
+                self.store.mark_request_unknown(request_id)
+                unresolved += 1
+                continue
+            self.store.complete_request(request_id, status, record_activity=False)
+            repaired += 1
+        return {"repaired": repaired, "unresolved": unresolved}
+
+    async def _reconcile_movie_intent(self, intent: dict[str, Any]) -> str:
+        tmdb_id = int(intent["external_id"])
+        lookup = await self.upstream.call(
+            "radarr_search_movie", {"term": f"tmdb:{tmdb_id}", "limit": 10}
+        )
+        source = next(
+            (item for item in _rows(lookup) if _first(item, "tmdbId", "tmdb_id") == tmdb_id),
+            None,
+        )
+        if source is None:
+            raise ToolError("TMDB ID was not found while reconciling")
+        candidate = _movie_candidate(source)
+        if candidate is None or candidate["year"] is None:
+            raise ToolError("Radarr returned incomplete movie metadata while reconciling")
+        try:
+            visible = await self._movie_in_plex(tmdb_id, candidate["title"])
+        except UpstreamError:
+            visible = False
+        return await self._fulfill_movie_request(
+            tmdb_id=tmdb_id,
+            candidate=candidate,
+            existing_id=source.get("id"),
+            visible_in_plex=visible,
+        )
+
+    async def _reconcile_series_intent(self, intent: dict[str, Any]) -> str:
+        tvdb_id = int(intent["external_id"])
+        seasons = tuple(int(item) for item in intent["seasons"])
+        anime = intent["options"].get("anime", False)
+        if not isinstance(anime, bool):
+            raise ToolError("stored series options are invalid")
+        lookup = await self.upstream.call(
+            "sonarr_search_series", {"term": f"tvdb:{tvdb_id}", "limit": 10}
+        )
+        source = next(
+            (item for item in _rows(lookup) if _first(item, "tvdbId", "tvdb_id") == tvdb_id),
+            None,
+        )
+        if source is None:
+            raise ToolError("TVDB ID was not found while reconciling")
+        candidate = _series_candidate(source)
+        if candidate is None:
+            raise ToolError("Sonarr returned incomplete series metadata while reconciling")
+        known_seasons = set(candidate["seasons"])
+        missing = set(seasons) - known_seasons
+        if known_seasons and missing:
+            raise ToolError("stored series season is unavailable while reconciling")
+        return await self._fulfill_series_request(
+            tvdb_id=tvdb_id,
+            seasons=seasons,
+            anime=anime,
+            candidate=candidate,
+            existing_id=source.get("id"),
+            known_seasons=known_seasons,
+        )
 
     async def _request_status(self, arguments: object, actor: Actor, role: Role) -> dict[str, Any]:
         _exact(arguments, set())

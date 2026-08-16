@@ -9,7 +9,7 @@ from gateway.platforms.base import Platform
 from gateway.session import SessionSource
 from tools import clarify_gateway
 
-from hermes_media import plugin
+from hermes_media import compat, plugin
 from hermes_media.trusted import session_key_from_event
 from media_gateway.types import Actor, Role
 
@@ -42,8 +42,31 @@ class WaitingPickerAdapter(plugin.MediaTelegramAdapter):
 
 
 async def main() -> None:
-    native_adapter = plugin._native_adapter()
+    native_adapter = plugin._NativeAdapter
     assert callable(getattr(native_adapter, "send_clarify", None))
+
+    class Bot:
+        def __init__(self) -> None:
+            self.values: dict[str, object] = {}
+
+        async def send_message(self, **values: object) -> SimpleNamespace:
+            self.values = values
+            return SimpleNamespace(message_id=42)
+
+    bot = Bot()
+    native_ui = SimpleNamespace(_bot=bot, _clarify_state={})
+    picker = await compat.send_numbered_picker(
+        native_ui,
+        chat_id="1001",
+        question="Which result did you mean?",
+        choices=["One", "Two"],
+        clarify_id="native-ui",
+        session_key="agent:main:telegram:dm:1001",
+    )
+    assert picker.success is True
+    markup = bot.values["reply_markup"]
+    labels = [row[0].text for row in markup.inline_keyboard]
+    assert labels == ["1", "2"]
 
     actor = Actor(user_id=1001, chat_id=1001)
     source = SessionSource(

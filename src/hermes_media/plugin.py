@@ -20,6 +20,12 @@ from media_gateway.constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
 from media_gateway.types import Role
 
 from .client import GatewayClient
+from .compat import (
+    discard_native_clarify,
+    install_tool_visibility,
+    native_adapter,
+    send_numbered_picker,
+)
 from .trusted import (
     actor_from_event,
     actor_scope,
@@ -44,10 +50,13 @@ PLATFORM_HINT = (
     "search_media in the current turn before answering or changing anything. Never "
     "reuse search results from conversation history. search_media itself handles any "
     "ambiguous-result selection before it returns. Never repeat its candidate list or "
-    "call clarify for those same candidates; answer only about its returned result."
+    "call clarify for those same candidates. If the user's current message explicitly says "
+    "to add or request media, continue to request the selected result. A title-only lookup is "
+    "read-only: never claim the selection requested anything, and when it is unavailable offer "
+    "a clear next action (reply 'request' for a movie, or provide seasons for a series). If the "
+    "user takes that action, refresh the exact prior TMDB or TVDB ID with search_media in the "
+    "new turn before calling the request tool."
 )
-NATIVE_MODULE = "plugins.platforms.telegram.adapter"
-NATIVE_CLASS = "TelegramAdapter"
 logger = logging.getLogger(__name__)
 
 
@@ -59,16 +68,7 @@ class _FallbackAdapter:
         return event
 
 
-def _native_adapter() -> type:
-    try:
-        module = __import__(NATIVE_MODULE, fromlist=[NATIVE_CLASS])
-        candidate = getattr(module, NATIVE_CLASS)
-        return candidate if inspect.isclass(candidate) else _FallbackAdapter
-    except (ImportError, AttributeError):
-        return _FallbackAdapter
-
-
-_NativeAdapter = _native_adapter()
+_NativeAdapter = native_adapter(_FallbackAdapter)
 _client: GatewayClient | None = None
 
 
@@ -163,10 +163,7 @@ def _discard_pending_picker(session_key: str, clarify_id: str) -> None:
         current = _pending_pickers.get(session_key)
         if current is not None and current.clarify_id == clarify_id:
             _pending_pickers.pop(session_key, None)
-    adapter = _active_adapter
-    native_state = getattr(adapter, "_clarify_state", None)
-    if isinstance(native_state, dict):
-        native_state.pop(clarify_id, None)
+    discard_native_clarify(_active_adapter, clarify_id)
 
 
 def _picker_choice(text: str, choices: tuple[str, ...]) -> str | None:
@@ -378,13 +375,13 @@ async def _select_search_result(
     _set_pending_picker(session_key, pending)
 
     async def deliver() -> bool:
-        response = await send_clarify(
+        response = await send_numbered_picker(
+            adapter,
             chat_id=str(actor_chat_id),
             question="Which result did you mean?",
             choices=choices,
             clarify_id=clarify_id,
             session_key=session_key,
-            metadata=None,
         )
         return bool(getattr(response, "success", False))
 
@@ -428,7 +425,14 @@ async def _decorate_search_result(
             "poster_cards_delivered": delivered,
             "poster_count": len(cards),
             "selection_status": "single_result",
-            "instruction": "Answer only about the single returned result.",
+            "provider_mutation_performed": False,
+            "next_action": "request the movie, or specify the desired series seasons",
+            "instruction": (
+                "Answer only about this result. If the current user message explicitly asks "
+                "to add or request it, call the matching request tool now. Otherwise this is a "
+                "read-only lookup: never imply it was requested, and if unavailable offer a "
+                "clear next action ('request' for a movie, or the desired seasons for a series)."
+            ),
         }
         return decorated
 
@@ -465,9 +469,14 @@ async def _decorate_search_result(
             "poster_count": len(cards),
             "selection_status": "selected",
             "selected_choice": selection,
+            "provider_mutation_performed": False,
+            "next_action": "request the movie, or specify the desired series seasons",
             "instruction": (
-                "The user selected this exact result in Telegram. Answer only about the "
-                "single returned result; do not repeat the candidate list or search again."
+                "The user selected this exact result in Telegram; that selection did not itself "
+                "request anything. If the current user message explicitly asks to add or request "
+                "media, call the matching request tool now. Otherwise answer only about this "
+                "result and, if unavailable, offer a clear next action ('request' for a movie, "
+                "or the desired seasons for a series). Do not repeat the candidate list."
             ),
         }
         return decorated
@@ -486,28 +495,13 @@ async def _decorate_search_result(
 
 
 def _visibility_patch() -> None:
-    try:
-        from hermes_cli import tools_config  # type: ignore[import-not-found]
-    except ImportError:
-        return
-    original = getattr(tools_config, "_get_platform_tools", None)
-    if not callable(original) or getattr(original, "__crbl_media__", False):
-        return
-
-    def visible(config: dict[str, Any], platform: str, *args: Any, **kwargs: Any) -> object:
-        resolved = original(config, platform, *args, **kwargs)
-        if str(platform).lower() != PLATFORM:
-            return resolved
-        # Hermes' native ``search`` toolset contains only ``web_search``.
-        # Do not expose the broader ``web`` toolset: it also includes
-        # arbitrary page extraction, which is outside this bot's boundary.
-        toolsets = {SHARED_TOOLSET, SEARCH_TOOLSET}
-        if current_role() is Role.ADMIN:
-            toolsets.add(ADMIN_TOOLSET)
-        return toolsets
-
-    visible.__crbl_media__ = True  # type: ignore[attr-defined]
-    tools_config._get_platform_tools = visible
+    install_tool_visibility(
+        current_role=current_role,
+        admin_role=Role.ADMIN,
+        shared_toolset=SHARED_TOOLSET,
+        admin_toolset=ADMIN_TOOLSET,
+        search_toolset=SEARCH_TOOLSET,
+    )
 
 
 def validate_search_guardrail(config: Mapping[str, Any]) -> None:
@@ -572,7 +566,7 @@ def register(ctx: object) -> None:
         name=PLATFORM,
         label="Telegram (CRBL media policy)",
         adapter_factory=_adapter,
-        check_fn=lambda: _native_adapter() is not _FallbackAdapter,
+        check_fn=lambda: _NativeAdapter is not _FallbackAdapter,
         validate_config=_configured,
         is_connected=_configured,
         required_env=["TELEGRAM_BOT_TOKEN"],

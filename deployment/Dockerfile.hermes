@@ -10,6 +10,13 @@ ENV S6_BEHAVIOUR_IF_STAGE2_FAILS=2 \
     PYTHONPATH=/app/src:/opt/hermes
 WORKDIR /opt/hermes
 
+COPY deployment/hermes-requirements.txt /tmp/crbl-hermes-requirements.txt
+RUN cd /tmp \
+    && uv pip install --python /opt/hermes/.venv/bin/python --no-deps --require-hashes \
+      -r /tmp/crbl-hermes-requirements.txt \
+    && uv pip check --python /opt/hermes/.venv/bin/python \
+    && /opt/hermes/.venv/bin/python -c 'import ddgs'
+
 COPY src /app/src
 COPY deployment/hermes/plugin /opt/hermes/plugins/platforms/zzzz-crbl-media
 COPY --chmod=0755 deployment/hermes/03-crbl-media /etc/cont-init.d/03-crbl-media

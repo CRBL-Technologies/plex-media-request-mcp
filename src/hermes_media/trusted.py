@@ -57,15 +57,48 @@ def _text(value: object) -> str | None:
 
 _ACTOR: ContextVar[Actor | None] = ContextVar("crbl_media_actor", default=None)
 _ROLE: ContextVar[Role | None] = ContextVar("crbl_media_role", default=None)
+_SESSION_KEY: ContextVar[str | None] = ContextVar("crbl_media_session_key", default=None)
+
+
+def session_key_from_event(
+    event: object,
+    actor: Actor,
+    *,
+    group_sessions_per_user: bool = True,
+    thread_sessions_per_user: bool = False,
+) -> str:
+    """Build Hermes' canonical session key from the trusted native source."""
+
+    source = _get(event, "source")
+    if source is None:
+        raise TrustError("native Telegram session source is unavailable")
+    try:
+        from gateway.session import build_session_key  # type: ignore[import-not-found]
+    except ImportError:
+        # Hermes is intentionally absent from the standalone unit-test image.
+        return f"agent:main:telegram:dm:{actor.chat_id}"
+    try:
+        session_key = build_session_key(
+            source,
+            group_sessions_per_user=group_sessions_per_user,
+            thread_sessions_per_user=thread_sessions_per_user,
+        )
+    except Exception as exc:
+        raise TrustError("native Telegram session is invalid") from exc
+    if not isinstance(session_key, str) or not session_key:
+        raise TrustError("native Telegram session key is invalid")
+    return session_key
 
 
 @contextmanager
-def actor_scope(actor: Actor, role: Role) -> Iterator[None]:
+def actor_scope(actor: Actor, role: Role, session_key: str | None = None) -> Iterator[None]:
     actor_token = _ACTOR.set(actor)
     role_token = _ROLE.set(role)
+    session_token = _SESSION_KEY.set(session_key or f"agent:main:telegram:dm:{actor.chat_id}")
     try:
         yield
     finally:
+        _SESSION_KEY.reset(session_token)
         _ROLE.reset(role_token)
         _ACTOR.reset(actor_token)
 
@@ -75,6 +108,13 @@ def require_actor() -> Actor:
     if actor is None:
         raise TrustError("no trusted Telegram actor is active")
     return actor
+
+
+def require_session_key() -> str:
+    session_key = _SESSION_KEY.get()
+    if session_key is None:
+        raise TrustError("no trusted Telegram session is active")
+    return session_key
 
 
 def current_role() -> Role | None:

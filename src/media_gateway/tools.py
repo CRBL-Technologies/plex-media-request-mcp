@@ -179,11 +179,11 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
         "description": (
             "Search Radarr and Sonarr for a movie or series. Results include poster_url "
             "when available. On Telegram, the media adapter presents up to four poster "
-            "cards and returns telegram_presentation instructions. Never use MEDIA for a "
-            "remote poster URL. When the user needs to disambiguate multiple matches, use "
-            "the clarify tool with the exact returned clarify_choices so Telegram renders "
-            "selection buttons. If in_sonarr is false, say the series is not yet managed "
-            "in Sonarr rather than saying episode availability was not reported."
+            "cards and resolves ambiguous matches with native selection buttons before the "
+            "tool returns. Never use MEDIA for a remote poster URL, repeat the candidate "
+            "list, or call clarify for the same results. Answer only about the returned "
+            "result. If in_sonarr is false, say the series is not yet managed in Sonarr "
+            "rather than saying episode availability was not reported."
         ),
         "inputSchema": {
             "type": "object",

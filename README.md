@@ -52,10 +52,12 @@ returned by a current search.
 
 Search results retain the provider's public poster URL. The Hermes adapter
 presents up to four numbered poster cards through Telegram's native album
-sender. When a title is ambiguous, the tool contract directs the agent to use
-Hermes' native `clarify` interaction, which renders compact selection buttons
-and resumes the same turn with the selected TMDB or TVDB result. Remote poster
-URLs are never sent through Hermes' local-file `MEDIA:` convention.
+sender. When a title is ambiguous, `search_media` directly enters Hermes'
+native `clarify` interaction, which renders compact selection buttons and
+blocks the same tool call until the user chooses an exact TMDB or TVDB result.
+Only that selected result is returned to the model, so a typed number or button
+click cannot become a second bare query. Remote poster URLs are never sent
+through Hermes' local-file `MEDIA:` convention.
 Every title lookup, availability check, and request must refresh `search_media`
 in the current turn; conversation history is never a valid substitute for a
 current provider result. Hermes's built-in Telegram hint takes precedence over

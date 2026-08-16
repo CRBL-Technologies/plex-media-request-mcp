@@ -7,7 +7,9 @@ import inspect
 import json
 import logging
 import os
-from collections.abc import Awaitable, Callable, Mapping
+import uuid
+from collections.abc import Callable, Coroutine, Mapping
+from concurrent.futures import Future
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -15,7 +17,14 @@ from media_gateway.constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
 from media_gateway.types import Role
 
 from .client import GatewayClient
-from .trusted import actor_from_event, actor_scope, current_role, require_actor
+from .trusted import (
+    actor_from_event,
+    actor_scope,
+    current_role,
+    require_actor,
+    require_session_key,
+    session_key_from_event,
+)
 
 PLATFORM = "telegram"
 SHARED_TOOLSET = "crbl-media-shared"
@@ -27,9 +36,9 @@ PLATFORM_HINT = (
     "Telegram identity is trusted automatically; never request user IDs. "
     "For every movie or series title lookup, availability check, or request, call "
     "search_media in the current turn before answering or changing anything. Never "
-    "reuse search results from conversation history. When search_media returns "
-    "telegram_presentation and the user must choose among multiple matches, call the "
-    "clarify tool with the exact clarify_choices."
+    "reuse search results from conversation history. search_media itself handles any "
+    "ambiguous-result selection before it returns. Never repeat its candidate list or "
+    "call clarify for those same candidates; answer only about its returned result."
 )
 NATIVE_MODULE = "plugins.platforms.telegram.adapter"
 NATIVE_CLASS = "TelegramAdapter"
@@ -91,10 +100,18 @@ class MediaTelegramAdapter(_NativeAdapter):  # type: ignore[misc, valid-type]
     async def handle_message(self, event: object) -> object:
         self._media_delivery_loop = asyncio.get_running_loop()
         actor = actor_from_event(event)
+        extra = getattr(self.config, "extra", None)
+        extra = extra if isinstance(extra, Mapping) else {}
+        session_key = session_key_from_event(
+            event,
+            actor,
+            group_sessions_per_user=bool(extra.get("group_sessions_per_user", True)),
+            thread_sessions_per_user=bool(extra.get("thread_sessions_per_user", False)),
+        )
         role = await _gateway().observe(actor)
         if role is Role.BLOCKED:
             raise PermissionError("Telegram user is not allowed")
-        with actor_scope(actor, role):
+        with actor_scope(actor, role, session_key):
             result = super().handle_message(event)
             return await result if inspect.isawaitable(result) else result
 
@@ -144,30 +161,55 @@ def _safe_poster_url(value: object) -> str | None:
         return None
 
 
-def _search_presentation(result: Mapping[str, Any]) -> tuple[list[tuple[str, str]], list[str]]:
+def _search_presentation(
+    result: Mapping[str, Any],
+) -> tuple[list[tuple[str, str]], list[str], list[dict[str, Any]]]:
     rows = result.get("results")
     if not isinstance(rows, list):
-        return [], []
+        return [], [], []
     cards: list[tuple[str, str]] = []
     choices: list[str] = []
-    for index, candidate in enumerate(rows[:SEARCH_PRESENTATION_LIMIT], 1):
+    candidates: list[dict[str, Any]] = []
+    for candidate in rows:
+        if len(choices) == SEARCH_PRESENTATION_LIMIT:
+            break
         label = _candidate_label(candidate)
         if label is None:
             continue
+        index = len(choices) + 1
         choices.append(label)
+        candidates.append(dict(candidate))
         if isinstance(candidate, Mapping):
             poster_url = _safe_poster_url(candidate.get("poster_url"))
             if poster_url is not None:
                 cards.append((poster_url, f"{index} · {label}"))
-    return cards, choices
+    return cards, choices, candidates
+
+
+async def _on_adapter_loop(
+    call: Callable[[], Coroutine[Any, Any, Any]],
+    *,
+    timeout: float = 30,
+) -> Any:
+    adapter = _active_adapter
+    if adapter is None:
+        return None
+    target_loop = adapter._media_delivery_loop
+    if target_loop is None or target_loop.is_closed():
+        return None
+    if asyncio.get_running_loop() is target_loop:
+        return await call()
+    future: Future[Any] = asyncio.run_coroutine_threadsafe(call(), target_loop)
+    try:
+        return await asyncio.wait_for(asyncio.wrap_future(future), timeout=timeout)
+    except TimeoutError:
+        future.cancel()
+        raise
 
 
 async def _deliver_search_cards(actor_chat_id: int, cards: list[tuple[str, str]]) -> bool:
     adapter = _active_adapter
     if adapter is None or not cards:
-        return False
-    target_loop = adapter._media_delivery_loop
-    if target_loop is None or target_loop.is_closed():
         return False
 
     async def deliver() -> bool:
@@ -187,41 +229,113 @@ async def _deliver_search_cards(actor_chat_id: int, cards: list[tuple[str, str]]
         await send_multiple(chat_id=str(actor_chat_id), images=cards)
         return True
 
-    current_loop = asyncio.get_running_loop()
-    if current_loop is target_loop:
-        return await deliver()
-    future = asyncio.run_coroutine_threadsafe(deliver(), target_loop)
     try:
-        return await asyncio.wait_for(asyncio.wrap_future(future), timeout=30)
+        return bool(await _on_adapter_loop(deliver))
     except TimeoutError:
-        future.cancel()
         logger.warning("Telegram poster album delivery timed out")
         return False
 
 
-async def _decorate_search_result(actor_chat_id: int, result: dict[str, Any]) -> dict[str, Any]:
-    cards, choices = _search_presentation(result)
+def _clarify_gateway() -> Any:
+    from tools import clarify_gateway  # type: ignore[import-not-found]
+
+    return clarify_gateway
+
+
+async def _select_search_result(
+    actor_chat_id: int,
+    session_key: str,
+    choices: list[str],
+) -> str | None:
+    adapter = _active_adapter
+    send_clarify = getattr(adapter, "send_clarify", None)
+    if adapter is None or not callable(send_clarify) or len(choices) < 2:
+        return choices[0] if len(choices) == 1 else None
+
+    clarify = _clarify_gateway()
+    clarify_id = uuid.uuid4().hex[:10]
+    clarify.register(
+        clarify_id=clarify_id,
+        session_key=session_key,
+        question="Which result did you mean?",
+        choices=choices,
+        multi_select=False,
+    )
+
+    async def deliver() -> bool:
+        response = await send_clarify(
+            chat_id=str(actor_chat_id),
+            question="Which result did you mean?",
+            choices=choices,
+            clarify_id=clarify_id,
+            session_key=session_key,
+            metadata=None,
+        )
+        return bool(getattr(response, "success", False))
+
+    try:
+        delivered = bool(await _on_adapter_loop(deliver, timeout=15))
+    except Exception:
+        logger.warning("Telegram media picker delivery failed", exc_info=True)
+        delivered = False
+    if not delivered:
+        clarify.resolve_gateway_clarify(clarify_id, "")
+        await asyncio.to_thread(clarify.wait_for_response, clarify_id, 0.01)
+        return None
+
+    timeout = float(clarify.get_clarify_timeout())
+    response = await asyncio.to_thread(clarify.wait_for_response, clarify_id, timeout)
+    return response.strip() if isinstance(response, str) and response.strip() else None
+
+
+async def _decorate_search_result(
+    actor_chat_id: int,
+    session_key: str,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    cards, choices, candidates = _search_presentation(result)
     try:
         delivered = await _deliver_search_cards(actor_chat_id, cards)
     except Exception:
         logger.warning("Telegram poster album delivery failed", exc_info=True)
         delivered = False
-    if not choices:
+    if not candidates:
         return result
     decorated = dict(result)
+    decorated["results"] = candidates
+    if len(candidates) == 1:
+        decorated["telegram_presentation"] = {
+            "poster_cards_delivered": delivered,
+            "poster_count": len(cards),
+            "selection_status": "single_result",
+            "instruction": "Answer only about the single returned result.",
+        }
+        return decorated
+
+    selection = await _select_search_result(actor_chat_id, session_key, choices)
+    if selection in choices:
+        selected_index = choices.index(selection)
+        decorated["results"] = [candidates[selected_index]]
+        decorated["telegram_presentation"] = {
+            "poster_cards_delivered": delivered,
+            "poster_count": len(cards),
+            "selection_status": "selected",
+            "selected_choice": selection,
+            "instruction": (
+                "The user selected this exact result in Telegram. Answer only about the "
+                "single returned result; do not repeat the candidate list or search again."
+            ),
+        }
+        return decorated
+
+    decorated["results"] = []
     decorated["telegram_presentation"] = {
         "poster_cards_delivered": delivered,
         "poster_count": len(cards),
-        "clarify_choices": choices,
+        "selection_status": "unavailable",
         "instruction": (
-            "Poster cards were delivered separately; do not repeat poster URLs or emit MEDIA tags. "
-            "If the user's intent requires choosing among multiple matches, call the clarify tool "
-            "now with the exact clarify_choices and a short question. Otherwise answer normally."
-            if delivered
-            else (
-                "Poster delivery was unavailable. Answer normally and never emit MEDIA with "
-                "a remote URL."
-            )
+            "The result picker could not obtain a selection. Do not request anything, do not "
+            "guess a candidate, and do not repeat the stale candidate list."
         ),
     }
     return decorated
@@ -277,13 +391,17 @@ def validate_platform_hint(config: Mapping[str, Any]) -> None:
         )
 
 
-def _handler(name: str) -> Callable[..., Awaitable[str]]:
+def _handler(name: str) -> Callable[..., Coroutine[Any, Any, str]]:
     async def call(arguments: Mapping[str, Any], **runtime: Any) -> str:
         del runtime
         actor = require_actor()
         result = await _gateway().call(actor, name, dict(arguments))
         if name == "search_media" and isinstance(result.get("results"), list):
-            result = await _decorate_search_result(actor.chat_id, result)
+            result = await _decorate_search_result(
+                actor.chat_id,
+                require_session_key(),
+                result,
+            )
         return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
 
     return call

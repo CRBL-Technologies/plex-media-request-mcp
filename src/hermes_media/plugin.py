@@ -795,7 +795,7 @@ async def _decorate_search_result(
             "selection_status": "search_more",
             "exclude_titles": [candidate.get("title") for candidate in candidates],
             "instruction": (
-                "The user explicitly chose Search more. Research 2-4 different titles that "
+                "The user explicitly chose Search more. Research exactly 4 different titles that "
                 "were not in this batch, then call recommend_media exactly once to present "
                 "the next recommendation card."
             ),

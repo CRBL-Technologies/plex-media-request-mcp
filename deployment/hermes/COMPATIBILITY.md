@@ -15,7 +15,10 @@ Before changing the pinned digest:
    resolver, effective platform hint, and search-only provider boundary.
 4. Verify the native adapter still exposes `_handle_callback_query`; CRBL `md:`
    media-card callbacks must be intercepted before all other callbacks delegate
-   unchanged to that native handler.
+   unchanged to that native handler. `verify_pinned_runtime` now fails closed on
+   this contract at container start, and `native_adapter()` returns the bare
+   fallback when the native class is missing so the registration check can still
+   detect it by identity.
 5. Verify a tab switch edits one card's poster in place, the active row changes
    from `○` to `●`, and Request movie resolves explicit request intent without
    posting callback text into the chat.

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import importlib.metadata
 import inspect
+import logging
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
@@ -12,35 +14,84 @@ PINNED_HERMES_RELEASE = "v2026.8.3"
 PINNED_HERMES_PACKAGE_VERSION = "0.20.0"
 NATIVE_MODULE = "plugins.platforms.telegram.adapter"
 NATIVE_CLASS = "TelegramAdapter"
+NATIVE_CALLBACK_METHOD = "_handle_callback_query"
+MEDIA_CALLBACK_PREFIX = "md"
+
+logger = logging.getLogger(__name__)
 
 
 def native_adapter(fallback: type) -> type:
+    """Subclass the native adapter, or return ``fallback`` itself when absent.
+
+    Returning the bare fallback matters: the plugin's registration check is
+    ``native_adapter(...) is not _FallbackAdapter``. Wrapping the fallback in a
+    subclass would make that identity test pass and register a Telegram bot
+    whose ``handle_message`` only echoes, so a missing native adapter has to
+    stay detectable by identity.
+    """
+
     try:
         module = __import__(NATIVE_MODULE, fromlist=[NATIVE_CLASS])
         candidate = getattr(module, NATIVE_CLASS)
-        base = candidate if inspect.isclass(candidate) else fallback
     except (ImportError, AttributeError):
-        base = fallback
+        return fallback
+    if not inspect.isclass(candidate):
+        return fallback
 
-    class CompatibleAdapter(base):  # type: ignore[valid-type, misc]
+    class CompatibleAdapter(candidate):  # type: ignore[valid-type, misc]
         async def _handle_callback_query(self, update: object, context: object) -> None:
             media_handler = getattr(self, "_crbl_media_callback_handler", None)
-            if callable(media_handler) and await media_handler(update):
+            if callable(media_handler) and await media_handler(update, self):
                 return
             native = getattr(super(), "_handle_callback_query", None)
             if callable(native):
                 await native(update, context)
 
-    CompatibleAdapter.__name__ = getattr(base, "__name__", "CompatibleTelegramAdapter")
+    CompatibleAdapter.__name__ = getattr(candidate, "__name__", "CompatibleTelegramAdapter")
     return CompatibleAdapter
 
 
-def discard_native_clarify(adapter: object | None, clarify_id: str) -> None:
-    """Remove one picker from Hermes' private Telegram clarify registry."""
+@dataclass(frozen=True)
+class MediaCallback:
+    """One decoded ``md:`` card tap, with identity taken from Telegram itself."""
 
-    state = getattr(adapter, "_clarify_state", None)
-    if isinstance(state, dict):
-        state.pop(clarify_id, None)
+    query: Any
+    picker_id: str
+    action: str
+    caller_id: object
+    chat_id: object
+
+
+def read_media_callback(update: object) -> MediaCallback | None:
+    """Decode a CRBL media-card callback, or return None to defer to Hermes."""
+
+    query = getattr(update, "callback_query", None)
+    if query is None:
+        return None
+    data = getattr(query, "data", None)
+    if not isinstance(data, str) or not data.startswith(f"{MEDIA_CALLBACK_PREFIX}:"):
+        return None
+    parts = data.split(":", 2)
+    picker_id, action = (parts[1], parts[2]) if len(parts) == 3 else ("", "")
+    return MediaCallback(
+        query=query,
+        picker_id=picker_id,
+        action=action,
+        caller_id=getattr(getattr(query, "from_user", None), "id", None),
+        chat_id=getattr(getattr(query, "message", None), "chat_id", None),
+    )
+
+
+async def answer_media_callback(query: Any, text: str | None = None) -> None:
+    """Acknowledge a tap. A stale query must never escape the handler."""
+
+    try:
+        if text is None:
+            await query.answer()
+        else:
+            await query.answer(text=text)
+    except Exception:
+        logger.debug("Could not answer Telegram callback query", exc_info=True)
 
 
 def install_tool_visibility(
@@ -86,7 +137,7 @@ def _media_picker_markup(
         [
             InlineKeyboardButton(
                 f"{'●' if index == active_index else '○'}  {label}",
-                callback_data=f"md:{picker_id}:v{index}",
+                callback_data=f"{MEDIA_CALLBACK_PREFIX}:{picker_id}:v{index}",
             )
         ]
         for index, label in enumerate(labels)
@@ -94,8 +145,12 @@ def _media_picker_markup(
     action = "+ Request movie" if active_is_movie else "✓ Choose series"
     rows.append(
         [
-            InlineKeyboardButton(action, callback_data=f"md:{picker_id}:select"),
-            InlineKeyboardButton("Cancel", callback_data=f"md:{picker_id}:cancel"),
+            InlineKeyboardButton(
+                action, callback_data=f"{MEDIA_CALLBACK_PREFIX}:{picker_id}:select"
+            ),
+            InlineKeyboardButton(
+                "Cancel", callback_data=f"{MEDIA_CALLBACK_PREFIX}:{picker_id}:cancel"
+            ),
         ]
     )
     return InlineKeyboardMarkup(rows)
@@ -230,6 +285,14 @@ def verify_pinned_runtime(
 
     if importlib.metadata.version("hermes-agent") != PINNED_HERMES_PACKAGE_VERSION:
         raise RuntimeError("pinned Hermes package version changed")
+    native = native_adapter(SimpleNamespace)
+    if native is SimpleNamespace:
+        raise RuntimeError("native Hermes Telegram adapter is unavailable")
+    if not callable(getattr(native.__base__, NATIVE_CALLBACK_METHOD, None)):
+        raise RuntimeError(
+            f"native Telegram adapter no longer exposes {NATIVE_CALLBACK_METHOD}; "
+            "CRBL media card taps would be silently ignored"
+        )
     provider = get_active_search_provider()
     if provider is None or provider.name != "ddgs" or not provider.is_available():
         raise RuntimeError("DuckDuckGo search provider is unavailable")

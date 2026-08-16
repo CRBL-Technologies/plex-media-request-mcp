@@ -304,14 +304,19 @@ async def test_media_card_switches_poster_then_requests_active_movie(
                 "poster_url": "https://image.tmdb.org/last-house.jpg",
             },
         ),
+        posters=(
+            "https://artworks.thetvdb.com/house.jpg",
+            "https://image.tmdb.org/last-house.jpg",
+        ),
         actor_user_id=1001,
         actor_chat_id=1001,
         has_photo=True,
     )
+    monkeypatch.setattr(plugin, "_pending_pickers", {})
     plugin._set_pending_picker("session-1", pending)
     query = Query()
 
-    assert await plugin._handle_media_picker_callback(SimpleNamespace(callback_query=query))
+    assert await plugin._handle_media_picker_callback(SimpleNamespace(callback_query=query), None)
     assert pending.active_index == 1
     media = query.edits[-1]["media"]
     assert media.values["media"] == "https://image.tmdb.org/last-house.jpg"
@@ -320,10 +325,153 @@ async def test_media_card_switches_poster_then_requests_active_movie(
     assert rows[-1][0].text == "+ Request movie"
 
     query.data = "md:picker-1:select"
-    assert await plugin._handle_media_picker_callback(SimpleNamespace(callback_query=query))
+    assert await plugin._handle_media_picker_callback(SimpleNamespace(callback_query=query), None)
     assert ClarifyGateway.response == (
         plugin.MEDIA_PICKER_REQUEST + "The Last House (2026) · Movie · TMDB 11"
     )
+
+
+def _media_card_fixture(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Any, Any]:
+    """One delivered two-tab card: a series tab open, a movie tab closed."""
+
+    class ClarifyGateway:
+        response: str | None = None
+        resolvable = True
+
+        @classmethod
+        def resolve_gateway_clarify(cls, _clarify_id: str, response: str) -> bool:
+            if not cls.resolvable:
+                return False
+            cls.response = response
+            return True
+
+    class Query:
+        def __init__(self, *, data: str, user_id: int = 1001, chat_id: int = 1001) -> None:
+            self.data = data
+            self.from_user = SimpleNamespace(id=user_id)
+            self.message = SimpleNamespace(chat_id=chat_id)
+            self.answers: list[str | None] = []
+            self.edits: list[dict[str, Any]] = []
+            self.fail_edit = False
+
+        async def answer(self, text: str | None = None) -> None:
+            self.answers.append(text)
+
+        async def edit_message_media(self, **values: Any) -> None:
+            if self.fail_edit:
+                raise RuntimeError("telegram rejected the media edit")
+            self.edits.append(values)
+
+        async def edit_message_caption(self, **values: Any) -> None:
+            self.edits.append(values)
+
+    class Button:
+        def __init__(self, text: str, *, callback_data: str) -> None:
+            self.text = text
+            self.callback_data = callback_data
+
+    class Markup:
+        def __init__(self, rows: list[list[Button]]) -> None:
+            self.inline_keyboard = rows
+
+    class Media:
+        def __init__(self, **values: Any) -> None:
+            self.values = values
+
+    telegram = ModuleType("telegram")
+    telegram.InlineKeyboardButton = Button  # type: ignore[attr-defined]
+    telegram.InlineKeyboardMarkup = Markup  # type: ignore[attr-defined]
+    telegram.InputMediaPhoto = Media  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "telegram", telegram)
+    monkeypatch.setattr(plugin, "_clarify_gateway", lambda: ClarifyGateway())
+    monkeypatch.setattr(plugin, "_pending_pickers", {})
+    pending = plugin._PendingMediaPicker(
+        clarify_id="picker-1",
+        choices=(
+            "House (2004) · Series · TVDB 22",
+            "The Last House (2026) · Movie · TMDB 11",
+        ),
+        candidates=(
+            {"media_type": "series", "tvdb_id": 22, "title": "House", "year": 2004},
+            {"media_type": "movie", "tmdb_id": 11, "title": "The Last House", "year": 2026},
+        ),
+        posters=("https://artworks.thetvdb.com/house.jpg", "https://image.tmdb.org/last.jpg"),
+        actor_user_id=1001,
+        actor_chat_id=1001,
+        has_photo=True,
+    )
+    plugin._set_pending_picker("session-1", pending)
+    return ClarifyGateway, Query, pending
+
+
+async def test_media_card_rejects_taps_from_another_telegram_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clarify, query_cls, pending = _media_card_fixture(monkeypatch)
+    intruder = query_cls(data="md:picker-1:select", user_id=2002)
+
+    assert await plugin._handle_media_picker_callback(
+        SimpleNamespace(callback_query=intruder), None
+    )
+    assert clarify.response is None
+    assert intruder.edits == []
+    assert "another request" in (intruder.answers[-1] or "")
+    assert pending.active_index == 0
+
+
+async def test_media_card_cancel_resolves_without_requesting_anything(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clarify, query_cls, _pending = _media_card_fixture(monkeypatch)
+    query = query_cls(data="md:picker-1:cancel")
+
+    assert await plugin._handle_media_picker_callback(SimpleNamespace(callback_query=query), None)
+    assert clarify.response == plugin.MEDIA_PICKER_CANCELLED
+    assert query.answers[-1] == "Cancelled"
+    assert query.edits[-1]["reply_markup"] is None
+    assert "cancelled" in query.edits[-1]["caption"].casefold()
+
+
+async def test_failed_tab_switch_keeps_the_displayed_candidate_authoritative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clarify, query_cls, pending = _media_card_fixture(monkeypatch)
+    query = query_cls(data="md:picker-1:v1")
+    query.fail_edit = True
+
+    assert await plugin._handle_media_picker_callback(SimpleNamespace(callback_query=query), None)
+    assert pending.active_index == 0
+
+    query.data = "md:picker-1:select"
+    assert await plugin._handle_media_picker_callback(SimpleNamespace(callback_query=query), None)
+    # The card still displayed the series tab, so the series must be what
+    # resolves - never the movie the user never saw opened.
+    assert clarify.response == "House (2004) · Series · TVDB 22"
+
+
+async def test_expired_media_card_tap_is_reported_and_requests_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clarify, query_cls, _pending = _media_card_fixture(monkeypatch)
+    clarify.resolvable = False
+    query = query_cls(data="md:picker-1:select")
+
+    assert await plugin._handle_media_picker_callback(SimpleNamespace(callback_query=query), None)
+    assert clarify.response is None
+    assert "expired" in (query.answers[-1] or "")
+
+
+def test_media_caption_stays_within_the_telegram_limit_after_escaping() -> None:
+    caption = plugin._candidate_caption(
+        {
+            "media_type": "movie",
+            "title": "A&B <Title> " * 40,
+            "year": 2026,
+            "overview": "<&>" * 400,
+        }
+    )
+    assert len(caption) <= 1024
+    assert "<b>" in caption
 
 
 async def test_single_search_result_sends_one_poster_without_opening_picker(
@@ -584,7 +732,7 @@ async def test_unanswered_picker_expires_without_returning_a_candidate(
 
 
 def test_search_presentation_keeps_card_numbers_aligned_after_invalid_rows() -> None:
-    cards, choices, candidates = plugin._search_presentation(
+    cards, choices, candidates, posters = plugin._search_presentation(
         {
             "results": [
                 {"media_type": "movie", "title": "Missing ID"},
@@ -601,6 +749,10 @@ def test_search_presentation_keeps_card_numbers_aligned_after_invalid_rows() -> 
     assert choices == ["House (2024) · Movie · TMDB 22"]
     assert cards == [("https://image.tmdb.org/house.jpg", "1 · House (2024) · Movie · TMDB 22")]
     assert candidates[0]["tmdb_id"] == 22
+    # posters stay index-aligned with candidates; cards keep only artwork rows,
+    # so a tab must never read its poster out of cards.
+    assert posters == ["https://image.tmdb.org/house.jpg"]
+    assert len(posters) == len(candidates)
 
 
 def test_search_tool_contract_owns_native_telegram_selection() -> None:

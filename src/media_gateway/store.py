@@ -10,50 +10,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from .migrations import migrate
 from .types import Actor, Page, Role
-
-SCHEMA_VERSION = 1
-TABLE_COLUMNS = {
-    "users": {
-        "user_id",
-        "chat_id",
-        "username",
-        "first_name",
-        "last_name",
-        "first_seen",
-        "last_seen",
-        "last_blocked",
-    },
-    "activity": {"id", "occurred_at", "kind", "user_id", "label"},
-    "requests": {
-        "id",
-        "media_type",
-        "external_id",
-        "seasons",
-        "title",
-        "year",
-        "user_id",
-        "chat_id",
-        "state",
-        "created_at",
-        "fulfilled_at",
-    },
-    "media_events": {
-        "event_key",
-        "media_type",
-        "external_id",
-        "rating_key",
-        "title",
-        "show_title",
-        "season_number",
-        "episode_number",
-        "parent_rating_key",
-        "plex_url",
-        "observed_at",
-        "notified_at",
-    },
-    "deliveries": {"event_key", "chat_id", "delivered_at"},
-}
 
 
 class Store:
@@ -78,117 +36,7 @@ class Store:
 
     def _migrate(self) -> None:
         with self._db() as db:
-            version = int(db.execute("PRAGMA user_version").fetchone()[0])
-            if version not in {0, SCHEMA_VERSION}:
-                raise RuntimeError(f"unsupported gateway database version: {version}")
-            existing = {
-                str(row["name"])
-                for row in db.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-                )
-            }
-            if version == 0 and existing & TABLE_COLUMNS.keys():
-                raise RuntimeError("gateway database has an unversioned incompatible schema")
-            db.executescript(
-                """
-                PRAGMA journal_mode=WAL;
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id INTEGER PRIMARY KEY,
-                    chat_id INTEGER NOT NULL,
-                    username TEXT,
-                    first_name TEXT,
-                    last_name TEXT,
-                    first_seen INTEGER NOT NULL,
-                    last_seen INTEGER NOT NULL,
-                    last_blocked INTEGER
-                );
-                CREATE TABLE IF NOT EXISTS activity (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    occurred_at INTEGER NOT NULL,
-                    kind TEXT NOT NULL,
-                    user_id INTEGER,
-                    label TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS activity_recent
-                    ON activity(occurred_at DESC);
-                CREATE TABLE IF NOT EXISTS requests (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    media_type TEXT NOT NULL CHECK(media_type IN ('movie','series')),
-                    external_id INTEGER NOT NULL,
-                    seasons TEXT NOT NULL DEFAULT '[]',
-                    title TEXT NOT NULL,
-                    year INTEGER,
-                    user_id INTEGER NOT NULL,
-                    chat_id INTEGER NOT NULL,
-                    state TEXT NOT NULL DEFAULT 'requested',
-                    created_at INTEGER NOT NULL,
-                    fulfilled_at INTEGER,
-                    UNIQUE(media_type, external_id, seasons, user_id)
-                );
-                CREATE INDEX IF NOT EXISTS requests_external
-                    ON requests(media_type, external_id, state);
-                CREATE TABLE IF NOT EXISTS media_events (
-                    event_key TEXT PRIMARY KEY,
-                    media_type TEXT NOT NULL,
-                    external_id INTEGER,
-                    rating_key TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    show_title TEXT,
-                    season_number INTEGER,
-                    episode_number INTEGER,
-                    parent_rating_key TEXT,
-                    plex_url TEXT NOT NULL,
-                    observed_at INTEGER NOT NULL,
-                    notified_at INTEGER
-                );
-                CREATE TABLE IF NOT EXISTS deliveries (
-                    event_key TEXT NOT NULL,
-                    chat_id INTEGER NOT NULL,
-                    delivered_at INTEGER NOT NULL,
-                    PRIMARY KEY(event_key, chat_id)
-                );
-                """
-            )
-            # The first clean-gateway release recorded one activity row for
-            # every allowed message. Keep last_seen in users, but remove that
-            # dashboard noise. Rebuild Plex rows from their durable media
-            # events so the activity detail includes the hierarchy. This data
-            # cleanup deliberately keeps schema version 1 rollback-compatible.
-            db.execute("DELETE FROM activity WHERE kind IN ('seen', 'available')")
-            events = db.execute(
-                """SELECT media_type, title, show_title, season_number,
-                          episode_number, observed_at
-                FROM media_events ORDER BY observed_at, event_key"""
-            ).fetchall()
-            db.executemany(
-                """INSERT INTO activity(occurred_at, kind, user_id, label)
-                VALUES (?, 'available', NULL, ?)""",
-                (
-                    (
-                        int(event["observed_at"]),
-                        self._media_activity_label(
-                            media_type=str(event["media_type"]),
-                            title=str(event["title"]),
-                            show_title=(
-                                str(event["show_title"])
-                                if event["show_title"] is not None
-                                else None
-                            ),
-                            season_number=event["season_number"],
-                            episode_number=event["episode_number"],
-                        ),
-                    )
-                    for event in events
-                ),
-            )
-            db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-            for table, expected in TABLE_COLUMNS.items():
-                columns = {
-                    str(row["name"])
-                    for row in db.execute(f'PRAGMA table_info("{table}")').fetchall()
-                }
-                if columns != expected:
-                    raise RuntimeError(f"gateway database table is incompatible: {table}")
+            migrate(db)
 
     def prune(self, now: int | None = None) -> None:
         """Remove terminal operational data after the agreed 60-day window."""
@@ -209,7 +57,7 @@ class Store:
             )
             db.execute(
                 """DELETE FROM users WHERE last_seen < ? AND user_id NOT IN
-                (SELECT user_id FROM requests WHERE state='requested')""",
+                (SELECT user_id FROM requests WHERE state IN ('pending','requested','unknown'))""",
                 (cutoff,),
             )
 
@@ -322,7 +170,7 @@ class Store:
     def recent_activity(self, limit: int = 50) -> list[dict[str, Any]]:
         return self.activity_page(1, limit).items
 
-    def record_request(
+    def begin_request(
         self,
         *,
         media_type: str,
@@ -331,25 +179,38 @@ class Store:
         title: str,
         year: int | None,
         actor: Actor,
+        options: dict[str, Any] | None = None,
     ) -> int:
         encoded = json.dumps(sorted(set(seasons)), separators=(",", ":"))
+        encoded_options = json.dumps(options or {}, sort_keys=True, separators=(",", ":"))
         now = int(time.time())
         with self._db() as db:
             db.execute(
                 """
                 INSERT INTO requests(
                     media_type, external_id, seasons, title, year,
-                    user_id, chat_id, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    user_id, options, state, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
                 ON CONFLICT(media_type, external_id, seasons, user_id) DO UPDATE SET
-                    chat_id=excluded.chat_id,
                     title=excluded.title,
                     year=excluded.year,
-                    state='requested',
-                    created_at=excluded.created_at,
+                    options=excluded.options,
+                    state='pending',
+                    provider_status=NULL,
+                    updated_at=excluded.updated_at,
                     fulfilled_at=NULL
                 """,
-                (media_type, external_id, encoded, title, year, actor.user_id, actor.chat_id, now),
+                (
+                    media_type,
+                    external_id,
+                    encoded,
+                    title,
+                    year,
+                    actor.user_id,
+                    encoded_options,
+                    now,
+                    now,
+                ),
             )
             row = db.execute(
                 """SELECT id FROM requests
@@ -360,10 +221,87 @@ class Store:
                 raise RuntimeError("request row was not persisted")
             request_id = int(row["id"])
             db.execute(
-                "INSERT INTO activity(occurred_at, kind, user_id, label) VALUES (?, ?, ?, ?)",
-                (now, "request", actor.user_id, f"Requested {title}"),
+                """INSERT OR IGNORE INTO request_destinations(request_id, chat_id, created_at)
+                VALUES (?, ?, ?)""",
+                (request_id, actor.chat_id, now),
             )
             return request_id
+
+    def complete_request(
+        self, request_id: int, provider_status: str, *, record_activity: bool = True
+    ) -> None:
+        if not provider_status or len(provider_status) > 64:
+            raise ValueError("provider status is invalid")
+        now = int(time.time())
+        state = "available" if provider_status == "available" else "requested"
+        with self._db() as db:
+            row = db.execute(
+                "SELECT title, user_id FROM requests WHERE id=?", (request_id,)
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("request intent is missing")
+            db.execute(
+                """UPDATE requests SET state=?, provider_status=?, updated_at=?, fulfilled_at=?
+                WHERE id=?""",
+                (
+                    state,
+                    provider_status,
+                    now,
+                    now if state == "available" else None,
+                    request_id,
+                ),
+            )
+            if record_activity:
+                db.execute(
+                    """INSERT INTO activity(occurred_at, kind, user_id, label)
+                    VALUES (?, 'request', ?, ?)""",
+                    (now, int(row["user_id"]), f"Requested {row['title']}"),
+                )
+
+    def mark_request_unknown(self, request_id: int) -> None:
+        with self._db() as db:
+            cursor = db.execute(
+                """UPDATE requests SET state='unknown', provider_status=NULL, updated_at=?
+                WHERE id=?""",
+                (int(time.time()), request_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("request intent is missing")
+
+    def record_request(
+        self,
+        *,
+        media_type: str,
+        external_id: int,
+        seasons: tuple[int, ...],
+        title: str,
+        year: int | None,
+        actor: Actor,
+    ) -> int:
+        """Compatibility helper for tests and trusted one-shot data setup."""
+
+        request_id = self.begin_request(
+            media_type=media_type,
+            external_id=external_id,
+            seasons=seasons,
+            title=title,
+            year=year,
+            actor=actor,
+        )
+        self.complete_request(request_id, "requested")
+        return request_id
+
+    def pending_request_intents(
+        self, limit: int = 100, *, updated_before: int | None = None
+    ) -> list[dict[str, Any]]:
+        cutoff = updated_before if updated_before is not None else 2**63 - 1
+        with self._db() as db:
+            rows = db.execute(
+                """SELECT * FROM requests WHERE state IN ('pending','unknown')
+                    AND updated_at <= ? ORDER BY updated_at, id LIMIT ?""",
+                (cutoff, min(max(limit, 1), 500)),
+            ).fetchall()
+        return [self._request_row(row, destinations=[]) for row in rows]
 
     def requests_for(self, user_id: int, *, all_users: bool = False) -> list[dict[str, Any]]:
         query = "SELECT * FROM requests"
@@ -374,22 +312,44 @@ class Store:
         query += " ORDER BY id DESC LIMIT 100"
         with self._db() as db:
             rows = db.execute(query, parameters).fetchall()
-        result: list[dict[str, Any]] = []
+            destinations = self._destinations(db, [int(row["id"]) for row in rows])
+        return [
+            self._request_row(row, destinations=destinations.get(int(row["id"]), []))
+            for row in rows
+        ]
+
+    @staticmethod
+    def _request_row(row: sqlite3.Row, *, destinations: list[int]) -> dict[str, Any]:
+        return {
+            "id": int(row["id"]),
+            "media_type": row["media_type"],
+            "external_id": int(row["external_id"]),
+            "seasons": json.loads(row["seasons"]),
+            "title": row["title"],
+            "year": row["year"],
+            "user_id": int(row["user_id"]),
+            "options": json.loads(row["options"]),
+            "state": row["state"],
+            "provider_status": row["provider_status"],
+            "destinations": destinations,
+            "created_at": int(row["created_at"]),
+            "updated_at": int(row["updated_at"]),
+            "fulfilled_at": row["fulfilled_at"],
+        }
+
+    @staticmethod
+    def _destinations(database: sqlite3.Connection, request_ids: list[int]) -> dict[int, list[int]]:
+        if not request_ids:
+            return {}
+        placeholders = ",".join("?" for _ in request_ids)
+        rows = database.execute(
+            f"""SELECT request_id, chat_id FROM request_destinations
+            WHERE request_id IN ({placeholders}) ORDER BY created_at, chat_id""",
+            request_ids,
+        ).fetchall()
+        result: dict[int, list[int]] = {}
         for row in rows:
-            result.append(
-                {
-                    "id": int(row["id"]),
-                    "media_type": row["media_type"],
-                    "external_id": int(row["external_id"]),
-                    "seasons": json.loads(row["seasons"]),
-                    "title": row["title"],
-                    "year": row["year"],
-                    "user_id": int(row["user_id"]),
-                    "state": row["state"],
-                    "created_at": int(row["created_at"]),
-                    "fulfilled_at": row["fulfilled_at"],
-                }
-            )
+            result.setdefault(int(row["request_id"]), []).append(int(row["chat_id"]))
         return result
 
     def add_media_event(
@@ -488,8 +448,11 @@ class Store:
             return set()
         with self._db() as db:
             rows = db.execute(
-                """SELECT user_id, chat_id, seasons FROM requests
-                WHERE media_type=? AND external_id=? AND state='requested'""",
+                """SELECT requests.user_id, request_destinations.chat_id, requests.seasons
+                FROM requests JOIN request_destinations
+                    ON request_destinations.request_id=requests.id
+                WHERE requests.media_type=? AND requests.external_id=?
+                    AND requests.state IN ('pending','requested','unknown')""",
                 (media_type, external_id),
             ).fetchall()
         destinations: set[tuple[int, int]] = set()
@@ -505,7 +468,8 @@ class Store:
         with self._db() as db:
             rows = db.execute(
                 """SELECT seasons FROM requests
-                WHERE media_type='series' AND external_id=? AND state='requested'""",
+                WHERE media_type='series' AND external_id=?
+                    AND state IN ('pending','requested','unknown')""",
                 (external_id,),
             ).fetchall()
         result: set[int] = set()
@@ -519,9 +483,11 @@ class Store:
         now = int(time.time())
         with self._db() as db:
             db.execute(
-                """UPDATE requests SET state='available', fulfilled_at=?
-                WHERE media_type='movie' AND external_id=? AND state='requested'""",
-                (now, external_id),
+                """UPDATE requests SET state='available', provider_status='available',
+                    updated_at=?, fulfilled_at=?
+                WHERE media_type='movie' AND external_id=?
+                    AND state IN ('pending','requested','unknown')""",
+                (now, now, external_id),
             )
 
     def delivered(self, event_keys: Iterable[str], chat_id: int) -> bool:
@@ -569,6 +535,7 @@ class Store:
                 ORDER BY requests.created_at DESC, requests.id DESC LIMIT ? OFFSET ?""",
                 (min(max(page_size, 1), 100), offset),
             ).fetchall()
+            destinations = self._destinations(db, [int(row["id"]) for row in rows])
         items = [
             {
                 "id": int(row["id"]),
@@ -582,7 +549,10 @@ class Store:
                 "name": " ".join(part for part in (row["first_name"], row["last_name"]) if part)
                 or None,
                 "state": row["state"],
+                "provider_status": row["provider_status"],
+                "destinations": destinations.get(int(row["id"]), []),
                 "created_at": int(row["created_at"]),
+                "updated_at": int(row["updated_at"]),
             }
             for row in rows
         ]

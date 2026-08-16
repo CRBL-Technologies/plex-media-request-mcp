@@ -1,4 +1,4 @@
-"""Minimal 71-tool gateway contract used by the Hermes image smoke test."""
+"""Exact gateway name-and-scope contract used by the Hermes image smoke test."""
 
 from __future__ import annotations
 

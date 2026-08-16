@@ -19,10 +19,9 @@ The media subsystem has three services:
    and the LAN/Tailscale dashboard;
 3. `hermes-media`: the pinned Hermes image plus a thin Telegram identity adapter.
 
-The Portainer stack file also preserves the existing `hermes` and
-`hermes-accountant` services because a stack update replaces the full Compose
-document. Those agents are outside this project; this release does not change
-their behavior or data mounts.
+The Portainer definition owns only those three media services. General Hermes
+and accountant agents use a separate stack and release lifecycle while sharing
+the external `media` network where required.
 
 The gateway exposes exactly seven media tools to an allowed Telegram user:
 
@@ -47,8 +46,10 @@ agent and release verifier always read the same setting.
 
 Configured administrators also receive the reviewed Plex/Radarr/Sonarr tools
 discovered from the pinned upstream MCP. Future upstream tools are not admitted
-automatically. No selection token is used: requests take the TMDB or TVDB ID
-returned by a current search.
+automatically. Retaining that broad operations surface in the same bot is a
+deliberate product decision: only explicit administrators see it, while regular
+users remain limited to seven normalized tools. No selection token is used:
+requests take the TMDB or TVDB ID returned by a current search.
 
 Search results retain the provider's public poster URL. The Hermes adapter
 presents up to four numbered poster cards through Telegram's native album
@@ -57,7 +58,13 @@ native `clarify` interaction, which renders compact selection buttons and
 blocks the same tool call until the user chooses an exact TMDB or TVDB result.
 Only that selected result is returned to the model, so a typed number or button
 click cannot become a second bare query. Remote poster URLs are never sent
-through Hermes' local-file `MEDIA:` convention.
+through Hermes' local-file `MEDIA:` convention. The media picker deliberately
+omits Hermes' generic “Other” button: an exact number, unique year, or exact
+title selects a result, while other text starts a fresh request.
+Selecting an ambiguous result only identifies the media. An original message
+that explicitly says “add” or “request” continues into the request tool; a
+title-only lookup remains read-only and returns a clear request or season
+follow-up instead of implying that selection changed Radarr or Sonarr.
 Every title lookup, availability check, and request must refresh `search_media`
 in the current turn; conversation history is never a valid substitute for a
 current provider result. Hermes's built-in Telegram hint takes precedence over
@@ -87,7 +94,11 @@ message contains an `Open in Plex` button.
 
 Webhook events and delivery receipts are durable and deduplicated in SQLite.
 Unresolved Plex provider IDs remain retryable, and terminal operational data is
-pruned after 60 days.
+pruned after 60 days. Acquisition intent and every Telegram destination are
+committed before Radarr or Sonarr is mutated. Provider outcomes are recorded
+afterward; interrupted or unknown operations are reconciled idempotently at
+gateway startup. A repeat request by one user from another chat therefore adds
+a destination instead of overwriting the first.
 
 ## Authorization
 
@@ -112,31 +123,6 @@ Requester delivery rechecks the current allowlist. Removing a user preserves
 their historical request for audit but immediately prevents later Telegram
 notifications.
 
-## Legacy request recovery
-
-The explicit `media-legacy-import` command reads the preserved pre-rewrite
-database as an immutable SQLite source. It imports only still-pending requests,
-is idempotent against the gateway's request key, and requires a new verified
-SQLite backup before `--apply`.
-
-Rows with numeric requester IDs retain them. A row that retained only a
-Telegram username fans out to every distinct historical user/chat pair recorded
-for that exact username, preserving requests that intentionally notified more
-than one user. Rows with no recoverable requester identity remain untouched in
-the source backup and are reported as unresolved; they are never guessed or
-assigned to an administrator.
-
-```bash
-# Aggregate dry run; no titles or requester identities are printed.
-python -m media_gateway.legacy --database /opt/data/state/gateway.sqlite3 \
-  --legacy /opt/data/state/pre-rewrite.sqlite3
-
-# Apply only after reviewing the dry run.
-python -m media_gateway.legacy --database /opt/data/state/gateway.sqlite3 \
-  --legacy /opt/data/state/pre-rewrite.sqlite3 --apply \
-  --backup /opt/data/state/gateway.before-legacy-import.sqlite3
-```
-
 ## Deployment
 
 Copy the examples in `deployment/` and provide only host paths and immutable
@@ -158,9 +144,10 @@ tool_loop_guardrails:
 
 This is a native Hermes setting, not a second CRBL configuration source.
 
-The gateway database is schema-versioned and fails closed on an incompatible
-database. The current schema remains rollback-compatible with the first clean
-gateway release.
+The gateway database advances through numbered, transactional migrations and
+fails closed on an incompatible schema. Deployment takes and verifies a SQLite
+backup before any schema-changing release. The one-time legacy importer was
+retired after its production recovery was completed and verified.
 
 ## Development
 

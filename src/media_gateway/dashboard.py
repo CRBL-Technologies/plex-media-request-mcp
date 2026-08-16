@@ -29,7 +29,8 @@ tr:last-child td{border-bottom:0}.mono{font-family:"JetBrains Mono",ui-monospace
 .badge{display:inline-flex;padding:3px 8px;border-radius:999px;font-weight:700;font-size:12px;border:1px solid}
 .admin{color:#92400e;background:#fffbeb;border-color:#fcd34d}.user{color:#166534;background:#f0fdf4;border-color:#bbf7d0}
 .blocked{color:#991b1b;background:#fef2f2;border-color:#fecaca}
-.available,.requested{color:#166534;background:#f0fdf4;border-color:#bbf7d0}.request{color:#92400e;background:#fffbeb;border-color:#fcd34d}
+.available,.requested{color:#166534;background:#f0fdf4;border-color:#bbf7d0}.pending{color:#92400e;background:#fffbeb;border-color:#fcd34d}
+.unknown{color:#991b1b;background:#fef2f2;border-color:#fecaca}.request{color:#92400e;background:#fffbeb;border-color:#fcd34d}
 .policy{color:#1e40af;background:#eff6ff;border-color:#bfdbfe}
 .btn{border:1px solid var(--action);background:var(--action);color:#fff;border-radius:8px;padding:8px 12px;font-weight:700;cursor:pointer}
 .btn:hover{background:var(--action-hover)}.btn.secondary{background:#fff;
@@ -101,10 +102,12 @@ def dashboard_page(
             f"<td>{html.escape(str(item['media_type']).title())}</td>"
             f"<td>{html.escape(', '.join('S' + str(s) for s in item['seasons']) or '—')}</td>"
             f'<td>{_requester(item)}</td><td><span class="badge {html.escape(str(item["state"]))}">'
-            f"{html.escape(str(item['state']).title())}</span></td><td>{_time(item['created_at'])}</td></tr>"
+            f"{html.escape(_request_state(str(item['state'])))}</span></td>"
+            f"<td>{html.escape(str(item['provider_status'] or 'Pending reconciliation').replace('_', ' ').title())}</td>"
+            f"<td>{len(item['destinations'])}</td><td>{_time(item['created_at'])}</td></tr>"
             for item in requests.items
         )
-        or '<tr><td colspan="6" class="empty">No bot requests recorded yet.</td></tr>'
+        or '<tr><td colspan="8" class="empty">No bot requests recorded yet.</td></tr>'
     )
     notice_html = f'<div class="notice">{html.escape(notice)}</div>' if notice else ""
     return _page(
@@ -118,11 +121,20 @@ def dashboard_page(
 placeholder="Telegram user ID" required><button class="btn">Allow user</button></form></div><div class="table-wrap"><table>
 <thead><tr><th>User</th><th>Telegram ID</th><th>Role</th><th>Last seen</th><th>Last blocked</th><th></th></tr></thead>
 <tbody>{user_rows}</tbody></table></div></section><section class="panel" id="requests"><div class="panel-head"><h2>Requests</h2></div>
-<div class="table-wrap"><table><thead><tr><th>Title</th><th>Type</th><th>Seasons</th><th>User ID</th><th>Status</th><th>Requested</th></tr></thead>
+<div class="table-wrap"><table><thead><tr><th>Title</th><th>Type</th><th>Seasons</th><th>Requester</th><th>Intent</th><th>Provider outcome</th><th>Destinations</th><th>Created</th></tr></thead>
 <tbody>{request_rows}</tbody></table></div>{_pager(requests, section="requests", other=activity)}</section><section class="panel" id="activity"><div class="panel-head"><h2>Activity</h2></div>
 <div class="table-wrap"><table><thead><tr><th>Time</th><th>Event</th><th>User ID</th><th>Detail</th></tr></thead>
 <tbody>{activity_rows}</tbody></table></div>{_pager(activity, section="activity", other=requests)}</section></main>"""
     )
+
+
+def _request_state(value: str) -> str:
+    return {
+        "pending": "Intent pending",
+        "requested": "Acquisition active",
+        "available": "Available",
+        "unknown": "Needs reconciliation",
+    }.get(value, value.title())
 
 
 def _requester(item: dict[str, Any]) -> str:

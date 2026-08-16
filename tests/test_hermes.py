@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from hermes_media import plugin
+from hermes_media import compat, plugin
 from hermes_media.trusted import TrustError, actor_from_event, actor_scope
 from media_gateway.constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
 from media_gateway.tools import SHARED_SCHEMAS
@@ -232,7 +232,55 @@ async def test_search_sends_poster_album_and_returns_only_native_picker_selectio
     ]
     assert result["telegram_presentation"]["poster_cards_delivered"] is True
     assert result["telegram_presentation"]["selection_status"] == "selected"
+    assert result["telegram_presentation"]["provider_mutation_performed"] is False
+    assert "request the movie" in result["telegram_presentation"]["next_action"]
     assert "candidate list" in result["telegram_presentation"]["instruction"]
+    assert "did not itself request" in result["telegram_presentation"]["instruction"]
+
+
+async def test_media_picker_omits_misleading_other_button(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Button:
+        def __init__(self, text: str, *, callback_data: str) -> None:
+            self.text = text
+            self.callback_data = callback_data
+
+    class Markup:
+        def __init__(self, rows: list[list[Button]]) -> None:
+            self.inline_keyboard = rows
+
+    class Bot:
+        def __init__(self) -> None:
+            self.values: dict[str, Any] = {}
+
+        async def send_message(self, **values: Any) -> SimpleNamespace:
+            self.values = values
+            return SimpleNamespace(message_id=42)
+
+    telegram = ModuleType("telegram")
+    telegram.InlineKeyboardButton = Button  # type: ignore[attr-defined]
+    telegram.InlineKeyboardMarkup = Markup  # type: ignore[attr-defined]
+    constants = ModuleType("telegram.constants")
+    constants.ParseMode = SimpleNamespace(HTML="HTML")  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "telegram", telegram)
+    monkeypatch.setitem(sys.modules, "telegram.constants", constants)
+    adapter = SimpleNamespace(_bot=Bot(), _clarify_state={})
+
+    response = await compat.send_numbered_picker(
+        adapter,
+        chat_id="1001",
+        question="Which result did you mean?",
+        choices=["One", "Two"],
+        clarify_id="picker-1",
+        session_key="agent:main:telegram:dm:1001",
+    )
+
+    assert response.success is True
+    rows = adapter._bot.values["reply_markup"].inline_keyboard
+    assert [row[0].text for row in rows] == ["1", "2"]
+    assert [row[0].callback_data for row in rows] == ["cl:picker-1:0", "cl:picker-1:1"]
+    assert adapter._clarify_state == {"picker-1": "agent:main:telegram:dm:1001"}
 
 
 async def test_single_search_result_sends_one_poster_without_opening_picker(

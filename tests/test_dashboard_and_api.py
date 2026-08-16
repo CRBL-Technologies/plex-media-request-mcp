@@ -11,7 +11,7 @@ from starlette.testclient import TestClient
 
 from media_gateway.app import COOKIE, create_app
 from media_gateway.config import Config
-from media_gateway.constants import ADMIN_UPSTREAM_TOOLS
+from media_gateway.constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
 from media_gateway.types import Actor
 from media_gateway.upstream import UpstreamError
 
@@ -297,6 +297,84 @@ def test_downloaded_movie_not_in_plex_remains_pending(config: Config) -> None:
         assert app.state.runtime.store.requests_for(1001)[0]["state"] == "requested"
 
 
+async def test_movie_intent_is_durable_before_mutation_and_reconciles(config: Config) -> None:
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["radarr_search_movie"] = {
+        "data": [{"tmdbId": 123, "title": "A Movie", "year": 2026, "hasFile": False}]
+    }
+    with TestClient(app) as client:
+        runtime = app.state.runtime
+        runtime.tools.upstream = fake
+
+        def fail_add(_arguments: dict[str, Any]) -> object:
+            intent = runtime.store.requests_for(1001)[0]
+            assert intent["state"] == "pending"
+            assert intent["destinations"] == [1001]
+            raise UpstreamError("interrupted after provider call")
+
+        fake.responses["radarr_add_movie"] = fail_add
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "request_movie",
+                "arguments": {"tmdb_id": 123},
+            },
+        )
+        assert response.status_code == 502
+        assert runtime.store.requests_for(1001)[0]["state"] == "unknown"
+
+        fake.responses["radarr_search_movie"] = {
+            "data": [{"id": 77, "tmdbId": 123, "title": "A Movie", "year": 2026, "hasFile": False}]
+        }
+        report = await runtime.tools.reconcile_pending_requests()
+
+        assert report == {"repaired": 1, "unresolved": 0}
+        repaired = runtime.store.requests_for(1001)[0]
+        assert repaired["state"] == "requested"
+        assert repaired["provider_status"] == "search_started"
+        assert ("radarr_search_movie_releases", {"id": 77}) in fake.calls
+
+
+def test_series_intent_is_durable_when_provider_mutation_fails(config: Config) -> None:
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["sonarr_search_series"] = {
+        "data": [
+            {
+                "tvdbId": 411959,
+                "title": "3 Body Problem",
+                "year": 2024,
+                "seasons": [{"seasonNumber": 1}],
+            }
+        ]
+    }
+
+    def fail_add(_arguments: dict[str, Any]) -> object:
+        raise UpstreamError("interrupted Sonarr operation")
+
+    fake.responses["sonarr_add_series"] = fail_add
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "request_series",
+                "arguments": {"tvdb_id": 411959, "seasons": [1], "anime": False},
+            },
+        )
+
+        assert response.status_code == 502
+        intent = app.state.runtime.store.requests_for(1001)[0]
+        assert intent["state"] == "unknown"
+        assert intent["options"] == {"anime": False}
+        assert intent["destinations"] == [1001]
+
+
 def test_download_status_includes_both_queues_for_regular_users(config: Config) -> None:
     app = create_app(config)
     fake = FakeUpstream()
@@ -363,8 +441,10 @@ def test_schema_endpoint_requires_every_pinned_admin_tool(config: Config) -> Non
         response = client.get("/api/schema", headers=_headers())
         assert response.status_code == 200
         tools = response.json()["tools"]
-        assert len(tools) == 71
-        assert {item["scope"] for item in tools} == {"shared", "admin"}
+        expected = {name: "shared" for name in SHARED_TOOLS}
+        expected.update({name: "admin" for name in ADMIN_UPSTREAM_TOOLS})
+        assert {item["name"]: item["scope"] for item in tools} == expected
+        assert len(tools) == len(expected)
         assert "future_tool" not in {item["name"] for item in tools}
 
 

@@ -1,57 +1,6 @@
+name: hermes-media
+
 services:
-  # These two existing agents share the Portainer stack but are not part of the
-  # media subsystem. Keep their runtime definition stable during media deploys.
-  hermes:
-    image: nousresearch/hermes-agent:v2026.8.3
-    container_name: hermes
-    command: gateway run
-    restart: unless-stopped
-    environment:
-      HERMES_UID: "1000"
-      HERMES_GID: "1000"
-    volumes:
-      - /volume2/docker/hermes/data:/opt/data
-      - /home/antoine/Downloads:/opt/data/downloads
-      - /volume2/docker/hermes-media/data:/opt/media-bot-data
-      - /volume2/docker/hermes-accountant/data:/opt/accountant-data:ro
-      - /volume2/docker/hotio:/opt/hotio-data
-    networks: [media]
-    healthcheck:
-      test: [CMD, pgrep, -f, "^/opt/hermes/.venv/bin/python3 /opt/hermes/.venv/bin/hermes gateway run --replace$"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 60s
-    logging:
-      driver: json-file
-      options:
-        max-size: 10m
-        max-file: "3"
-
-  hermes-accountant:
-    image: nousresearch/hermes-agent:v2026.8.3
-    container_name: hermes-accountant
-    command: gateway run
-    restart: unless-stopped
-    environment:
-      HERMES_UID: "1000"
-      HERMES_GID: "1000"
-    volumes:
-      - /volume2/docker/hermes-accountant/data:/opt/data
-      - /home/antoine/Documents:/opt/data/documents
-    networks: [media]
-    healthcheck:
-      test: [CMD, pgrep, -f, "^/opt/hermes/.venv/bin/python3 /opt/hermes/.venv/bin/hermes gateway run --replace$"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 60s
-    logging:
-      driver: json-file
-      options:
-        max-size: 10m
-        max-file: "3"
-
   media-server-mcp:
     image: ghcr.io/wyattjoh/media-server-mcp@sha256:f83620da1d008ef18df3324b15e44854572ea41b528eff585033e4054b438377
     restart: unless-stopped

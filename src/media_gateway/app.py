@@ -6,6 +6,7 @@ import asyncio
 import hmac
 import json
 import logging
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from typing import Any
@@ -54,6 +55,39 @@ class Runtime:
         self.password_hash = read_secret(config.dashboard_password_hash_file)
         self.gateway_token = read_secret(config.gateway_token_file, minimum=32)
         self.plex_token = read_secret(config.plex_webhook_token_file, minimum=32)
+
+
+async def _reconcile_loop(
+    runtime: Runtime,
+    stop: asyncio.Event,
+    startup_intents: list[dict[str, Any]],
+) -> None:
+    try:
+        report = await runtime.tools.reconcile_request_intents(startup_intents)
+        if report["unresolved"]:
+            LOGGER.warning(
+                "request reconciliation left %d startup intent(s) unresolved",
+                report["unresolved"],
+            )
+    except Exception:
+        LOGGER.exception("startup request reconciliation failed")
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=60)
+            continue
+        except TimeoutError:
+            pass
+        try:
+            report = await runtime.tools.reconcile_pending_requests(
+                updated_before=int(time.time()) - 300
+            )
+            if report["unresolved"]:
+                LOGGER.warning(
+                    "request reconciliation left %d stale intent(s) unresolved",
+                    report["unresolved"],
+                )
+        except Exception:
+            LOGGER.exception("request reconciliation failed")
 
 
 def _runtime(request: Request) -> Runtime:
@@ -366,13 +400,22 @@ def create_app(config: Config | None = None) -> Starlette:
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
         runtime = Runtime(configured)
         runtime.store.prune()
+        startup_intents = runtime.store.pending_request_intents()
         app.state.runtime = runtime
         worker = asyncio.create_task(runtime.notifications.run())
+        reconcile_stop = asyncio.Event()
+        reconcile_worker = asyncio.create_task(
+            _reconcile_loop(runtime, reconcile_stop, startup_intents)
+        )
         try:
             yield
         finally:
             runtime.notifications.stop()
+            reconcile_stop.set()
             await worker
+            reconcile_worker.cancel()
+            with suppress(asyncio.CancelledError):
+                await reconcile_worker
 
     app = Starlette(
         routes=[

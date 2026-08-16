@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
+import logging
 import os
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
+from urllib.parse import urlsplit
 
 from media_gateway.constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
 from media_gateway.types import Role
@@ -19,8 +22,10 @@ SHARED_TOOLSET = "crbl-media-shared"
 ADMIN_TOOLSET = "crbl-media-admin"
 SEARCH_TOOLSET = "search"
 WEB_SEARCH_CAP = 10
+SEARCH_PRESENTATION_LIMIT = 4
 NATIVE_MODULE = "plugins.platforms.telegram.adapter"
 NATIVE_CLASS = "TelegramAdapter"
+logger = logging.getLogger(__name__)
 
 
 class _FallbackAdapter:
@@ -52,6 +57,10 @@ def _gateway() -> GatewayClient:
 
 
 class MediaTelegramAdapter(_NativeAdapter):  # type: ignore[misc, valid-type]
+    def __init__(self, config: object) -> None:
+        super().__init__(config)
+        self._media_delivery_loop: asyncio.AbstractEventLoop | None = None
+
     @property
     def authorization_is_upstream(self) -> bool:
         """Report the gateway's authenticated actor decision to Hermes."""
@@ -72,6 +81,7 @@ class MediaTelegramAdapter(_NativeAdapter):  # type: ignore[misc, valid-type]
         return True
 
     async def handle_message(self, event: object) -> object:
+        self._media_delivery_loop = asyncio.get_running_loop()
         actor = actor_from_event(event)
         role = await _gateway().observe(actor)
         if role is Role.BLOCKED:
@@ -79,6 +89,134 @@ class MediaTelegramAdapter(_NativeAdapter):  # type: ignore[misc, valid-type]
         with actor_scope(actor, role):
             result = super().handle_message(event)
             return await result if inspect.isawaitable(result) else result
+
+
+_active_adapter: MediaTelegramAdapter | None = None
+
+
+def _candidate_label(candidate: object) -> str | None:
+    if not isinstance(candidate, Mapping):
+        return None
+    title = candidate.get("title")
+    media_type = candidate.get("media_type")
+    if not isinstance(title, str) or not title.strip() or media_type not in {"movie", "series"}:
+        return None
+    clean_title = " ".join(title.split())[:160]
+    year = candidate.get("year")
+    year_text = f" ({year})" if isinstance(year, int) and not isinstance(year, bool) else ""
+    if media_type == "movie":
+        external_id = candidate.get("tmdb_id")
+        if isinstance(external_id, bool) or not isinstance(external_id, int) or external_id <= 0:
+            return None
+        return f"{clean_title}{year_text} · Movie · TMDB {external_id}"
+    external_id = candidate.get("tvdb_id")
+    if isinstance(external_id, bool) or not isinstance(external_id, int) or external_id <= 0:
+        return None
+    return f"{clean_title}{year_text} · Series · TVDB {external_id}"
+
+
+def _safe_poster_url(value: object) -> str | None:
+    if not isinstance(value, str) or len(value) > 2048:
+        return None
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
+    try:
+        from tools.url_safety import is_safe_url  # type: ignore[import-not-found]
+    except ImportError:
+        return value
+    try:
+        return value if is_safe_url(value) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _search_presentation(result: Mapping[str, Any]) -> tuple[list[tuple[str, str]], list[str]]:
+    rows = result.get("results")
+    if not isinstance(rows, list):
+        return [], []
+    cards: list[tuple[str, str]] = []
+    choices: list[str] = []
+    for index, candidate in enumerate(rows[:SEARCH_PRESENTATION_LIMIT], 1):
+        label = _candidate_label(candidate)
+        if label is None:
+            continue
+        choices.append(label)
+        if isinstance(candidate, Mapping):
+            poster_url = _safe_poster_url(candidate.get("poster_url"))
+            if poster_url is not None:
+                cards.append((poster_url, f"{index} · {label}"))
+    return cards, choices
+
+
+async def _deliver_search_cards(actor_chat_id: int, cards: list[tuple[str, str]]) -> bool:
+    adapter = _active_adapter
+    if adapter is None or not cards:
+        return False
+    target_loop = adapter._media_delivery_loop
+    if target_loop is None or target_loop.is_closed():
+        return False
+
+    async def deliver() -> bool:
+        if len(cards) == 1:
+            send_image = getattr(adapter, "send_image", None)
+            if not callable(send_image):
+                return False
+            response = await send_image(
+                chat_id=str(actor_chat_id),
+                image_url=cards[0][0],
+                caption=cards[0][1],
+            )
+            return bool(getattr(response, "success", False))
+        send_multiple = getattr(adapter, "send_multiple_images", None)
+        if not callable(send_multiple):
+            return False
+        await send_multiple(chat_id=str(actor_chat_id), images=cards)
+        return True
+
+    current_loop = asyncio.get_running_loop()
+    if current_loop is target_loop:
+        return await deliver()
+    future = asyncio.run_coroutine_threadsafe(deliver(), target_loop)
+    try:
+        return await asyncio.wait_for(asyncio.wrap_future(future), timeout=30)
+    except TimeoutError:
+        future.cancel()
+        logger.warning("Telegram poster album delivery timed out")
+        return False
+
+
+async def _decorate_search_result(actor_chat_id: int, result: dict[str, Any]) -> dict[str, Any]:
+    cards, choices = _search_presentation(result)
+    try:
+        delivered = await _deliver_search_cards(actor_chat_id, cards)
+    except Exception:
+        logger.warning("Telegram poster album delivery failed", exc_info=True)
+        delivered = False
+    if not choices:
+        return result
+    decorated = dict(result)
+    decorated["telegram_presentation"] = {
+        "poster_cards_delivered": delivered,
+        "poster_count": len(cards),
+        "clarify_choices": choices,
+        "instruction": (
+            "Poster cards were delivered separately; do not repeat poster URLs or emit MEDIA tags. "
+            "If the user's intent requires choosing among multiple matches, call the clarify tool "
+            "now with the exact clarify_choices and a short question. Otherwise answer normally."
+            if delivered
+            else (
+                "Poster delivery was unavailable. Answer normally and never emit MEDIA with "
+                "a remote URL."
+            )
+        ),
+    }
+    return decorated
 
 
 def _visibility_patch() -> None:
@@ -122,14 +260,19 @@ def validate_search_guardrail(config: Mapping[str, Any]) -> None:
 def _handler(name: str) -> Callable[..., Awaitable[str]]:
     async def call(arguments: Mapping[str, Any], **runtime: Any) -> str:
         del runtime
-        result = await _gateway().call(require_actor(), name, dict(arguments))
+        actor = require_actor()
+        result = await _gateway().call(actor, name, dict(arguments))
+        if name == "search_media" and isinstance(result.get("results"), list):
+            result = await _decorate_search_result(actor.chat_id, result)
         return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
 
     return call
 
 
 def _adapter(config: object) -> MediaTelegramAdapter:
-    return MediaTelegramAdapter(config)
+    global _active_adapter
+    _active_adapter = MediaTelegramAdapter(config)
+    return _active_adapter
 
 
 def _configured(config: object) -> bool:

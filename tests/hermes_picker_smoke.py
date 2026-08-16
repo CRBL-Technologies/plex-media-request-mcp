@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from typing import ClassVar
 
 from gateway.platforms.base import Platform
 from gateway.session import SessionSource
@@ -158,19 +159,27 @@ async def _assert_cancel_closes_card(actor: Actor, session_key: str) -> None:
         data = adapter.card["reply_markup"].inline_keyboard[-1][1].callback_data
         from_user = SimpleNamespace(id=actor.user_id)
         message = SimpleNamespace(chat_id=actor.chat_id)
+        closed: ClassVar[dict[str, object]] = {}
 
         async def answer(self, **_values: object) -> None:
             return None
 
+        # These candidates carry no artwork, so the card is a text message and
+        # closes through edit_message_text; keep both paths recorded.
         async def edit_message_caption(self, **values: object) -> None:
-            self.caption_values = values
+            self.closed = values
+
+        async def edit_message_text(self, **values: object) -> None:
+            self.closed = values
 
     query = CancelQuery()
     await adapter._handle_callback_query(SimpleNamespace(callback_query=query), None)
     cancelled = await asyncio.wait_for(pending, timeout=2)
     assert cancelled["results"] == []
     assert cancelled["telegram_presentation"]["selection_status"] == "cancelled"
-    assert query.caption_values["reply_markup"] is None
+    assert query.closed, "cancel must close the card"
+    assert query.closed["reply_markup"] is None
+    assert "cancelled" in str(query.closed.get("text", "")).casefold()
 
 
 async def _assert_new_message_supersedes_card(

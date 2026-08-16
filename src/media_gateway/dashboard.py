@@ -102,12 +102,11 @@ def dashboard_page(
             f"<td>{html.escape(str(item['media_type']).title())}</td>"
             f"<td>{html.escape(', '.join('S' + str(s) for s in item['seasons']) or '—')}</td>"
             f'<td>{_requester(item)}</td><td><span class="badge {html.escape(str(item["state"]))}">'
-            f"{html.escape(_request_state(str(item['state'])))}</span></td>"
-            f"<td>{html.escape(str(item['provider_status'] or 'Pending reconciliation').replace('_', ' ').title())}</td>"
+            f"{html.escape(_request_status(item))}</span></td>"
             f"<td>{len(item['destinations'])}</td><td>{_time(item['created_at'])}</td></tr>"
             for item in requests.items
         )
-        or '<tr><td colspan="8" class="empty">No bot requests recorded yet.</td></tr>'
+        or '<tr><td colspan="7" class="empty">No bot requests recorded yet.</td></tr>'
     )
     notice_html = f'<div class="notice">{html.escape(notice)}</div>' if notice else ""
     return _page(
@@ -121,20 +120,32 @@ def dashboard_page(
 placeholder="Telegram user ID" required><button class="btn">Allow user</button></form></div><div class="table-wrap"><table>
 <thead><tr><th>User</th><th>Telegram ID</th><th>Role</th><th>Last seen</th><th>Last blocked</th><th></th></tr></thead>
 <tbody>{user_rows}</tbody></table></div></section><section class="panel" id="requests"><div class="panel-head"><h2>Requests</h2></div>
-<div class="table-wrap"><table><thead><tr><th>Title</th><th>Type</th><th>Seasons</th><th>Requester</th><th>Intent</th><th>Provider outcome</th><th>Destinations</th><th>Created</th></tr></thead>
+<div class="table-wrap"><table><thead><tr><th>Title</th><th>Type</th><th>Seasons</th><th>Requester</th><th>Status</th><th>Destinations</th><th>Created</th></tr></thead>
 <tbody>{request_rows}</tbody></table></div>{_pager(requests, section="requests", other=activity)}</section><section class="panel" id="activity"><div class="panel-head"><h2>Activity</h2></div>
 <div class="table-wrap"><table><thead><tr><th>Time</th><th>Event</th><th>User ID</th><th>Detail</th></tr></thead>
 <tbody>{activity_rows}</tbody></table></div>{_pager(activity, section="activity", other=requests)}</section></main>"""
     )
 
 
-def _request_state(value: str) -> str:
+def _request_status(item: dict[str, Any]) -> str:
+    """One status per request.
+
+    ``state`` is derived from ``provider_status`` ("available" or otherwise),
+    so showing both said the same thing twice while hiding the distinction the
+    operator actually needs: whether an active acquisition is still hunting a
+    release or already waiting on a Plex scan.
+    """
+
+    state = str(item["state"])
+    if state in {"pending", "unknown"}:
+        return {"pending": "Intent pending", "unknown": "Needs reconciliation"}[state]
+    provider_status = str(item.get("provider_status") or "")
     return {
-        "pending": "Intent pending",
-        "requested": "Acquisition active",
         "available": "Available",
-        "unknown": "Needs reconciliation",
-    }.get(value, value.title())
+        "awaiting_plex": "Waiting for Plex",
+        "search_started": "Searching for a release",
+        "requested": "Queued in Radarr/Sonarr",
+    }.get(provider_status, provider_status.replace("_", " ").title() or state.title())
 
 
 def _requester(item: dict[str, Any]) -> str:

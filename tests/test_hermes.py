@@ -120,6 +120,7 @@ async def test_plugin_registers_closed_inventory_and_binds_actor(
     assert "search_media in the current turn" in platform_hint
     assert "Never reuse search results from conversation history" in platform_hint
     assert "search_media itself handles any ambiguous-result selection" in platform_hint
+    assert "call recommend_media exactly once" in platform_hint
     assert {item["name"] for item in context.tools} == set(SHARED_TOOLS) | ADMIN_UPSTREAM_TOOLS
     search = next(item for item in context.tools if item["name"] == "search_media")
     actor = Actor(user_id=1001, chat_id=1001)
@@ -234,6 +235,157 @@ async def test_search_sends_tabbed_card_and_returns_only_selected_result(
     assert "request the movie" in result["telegram_presentation"]["next_action"]
     assert "candidate list" in result["telegram_presentation"]["instruction"]
     assert "ask which seasons" in result["telegram_presentation"]["instruction"]
+
+
+async def test_recommendations_present_distinct_titles_with_three_actions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RecommendationGateway(FakeGateway):
+        async def call(self, actor: Actor, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            self.calls.append((actor.user_id, name, arguments))
+            return {
+                "query": "recommendations",
+                "presentation": "recommendations",
+                "results": [
+                    {
+                        "media_type": "movie",
+                        "tmdb_id": 11,
+                        "title": "Arrival",
+                        "year": 2016,
+                        "poster_url": "https://image.tmdb.org/arrival.jpg",
+                    },
+                    {
+                        "media_type": "movie",
+                        "tmdb_id": 12,
+                        "title": "Ex Machina",
+                        "year": 2014,
+                        "poster_url": "https://image.tmdb.org/ex-machina.jpg",
+                    },
+                ],
+            }
+
+    class PresentationAdapter:
+        def __init__(self) -> None:
+            self._media_delivery_loop = asyncio.get_running_loop()
+            self._bot = SimpleNamespace(send_photo=self.send_photo)
+            self.card: dict[str, Any] = {}
+
+        async def send_photo(self, **values: Any) -> SimpleNamespace:
+            self.card = values
+            return SimpleNamespace(message_id=42)
+
+    class ClarifyGateway:
+        @staticmethod
+        def register(**_values: Any) -> None:
+            return None
+
+        @staticmethod
+        def get_clarify_timeout() -> int:
+            return 60
+
+        @staticmethod
+        def wait_for_response(_clarify_id: str, _timeout: float) -> str:
+            return plugin.MEDIA_PICKER_MORE
+
+        @staticmethod
+        def resolve_gateway_clarify(_clarify_id: str, _response: str) -> bool:
+            return True
+
+    class Button:
+        def __init__(self, text: str, *, callback_data: str) -> None:
+            self.text = text
+            self.callback_data = callback_data
+
+    class Markup:
+        def __init__(self, rows: list[list[Button]]) -> None:
+            self.inline_keyboard = rows
+
+    telegram = ModuleType("telegram")
+    telegram.InlineKeyboardButton = Button  # type: ignore[attr-defined]
+    telegram.InlineKeyboardMarkup = Markup  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "telegram", telegram)
+    gateway = RecommendationGateway()
+    adapter = PresentationAdapter()
+    monkeypatch.setattr(plugin, "_client", gateway)
+    monkeypatch.setattr(plugin, "_active_adapter", adapter)
+    monkeypatch.setattr(plugin, "_clarify_gateway", lambda: ClarifyGateway())
+    actor = Actor(user_id=1001, chat_id=1001)
+    arguments = {
+        "titles": ["Arrival (2016)", "Ex Machina (2014)"],
+        "media_type": "movie",
+    }
+    with actor_scope(actor, Role.USER, "agent:main:telegram:dm:1001"):
+        raw = await plugin._handler("recommend_media")(arguments)
+
+    rows = adapter.card["reply_markup"].inline_keyboard
+    assert [button.text for button in rows[-2]] == ["✓ Pick", "↻ Search more"]
+    assert [button.text for button in rows[-1]] == ["Cancel"]
+    result = json.loads(raw)
+    assert result["results"] == []
+    assert result["telegram_presentation"]["selection_status"] == "search_more"
+    assert result["telegram_presentation"]["exclude_titles"] == ["Arrival", "Ex Machina"]
+    assert gateway.calls == [(1001, "recommend_media", arguments)]
+
+
+async def test_recommendation_pick_and_search_more_are_explicit_actions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ClarifyGateway:
+        response = ""
+
+        @classmethod
+        def resolve_gateway_clarify(cls, _clarify_id: str, response: str) -> bool:
+            cls.response = response
+            return True
+
+    class Query:
+        data = "md:recommend-1:select"
+        from_user = SimpleNamespace(id=1001)
+        message = SimpleNamespace(chat_id=1001)
+
+        def __init__(self) -> None:
+            self.answers: list[str | None] = []
+            self.edits: list[dict[str, Any]] = []
+
+        async def answer(self, text: str | None = None) -> None:
+            self.answers.append(text)
+
+        async def edit_message_caption(self, **values: Any) -> None:
+            self.edits.append(values)
+
+    class NoRequestGateway:
+        async def call(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("Pick must not request a recommendation")
+
+    choice = "Arrival (2016) · Movie · TMDB 11"
+    pending = plugin._PendingMediaPicker(
+        clarify_id="recommend-1",
+        choices=(choice,),
+        candidates=({"media_type": "movie", "tmdb_id": 11, "title": "Arrival", "year": 2016},),
+        posters=("https://image.tmdb.org/arrival.jpg",),
+        actor_user_id=1001,
+        actor_chat_id=1001,
+        has_photo=True,
+        recommendation_mode=True,
+    )
+    monkeypatch.setattr(plugin, "_pending_pickers", {})
+    plugin._set_pending_picker("agent:main:telegram:dm:1001", pending)
+    monkeypatch.setattr(plugin, "_clarify_gateway", lambda: ClarifyGateway())
+    monkeypatch.setattr(plugin, "_gateway", lambda: NoRequestGateway())
+    query = Query()
+
+    assert await plugin._handle_media_picker_callback(SimpleNamespace(callback_query=query), None)
+    assert ClarifyGateway.response == choice
+    assert query.answers == ["Selected"]
+    assert query.edits[-1]["reply_markup"] is None
+
+    query = Query()
+    query.data = "md:recommend-1:more"
+    ClarifyGateway.response = ""
+    assert await plugin._handle_media_picker_callback(SimpleNamespace(callback_query=query), None)
+    assert ClarifyGateway.response == plugin.MEDIA_PICKER_MORE
+    assert query.answers == ["Searching for more…"]
+    assert "Searching for more suggestions" in query.edits[-1]["caption"]
 
 
 async def test_media_card_switches_poster_then_requests_active_movie(
@@ -771,10 +923,22 @@ async def test_unanswered_picker_expires_without_returning_a_candidate(
                 ],
             }
 
+    class RunningAgent:
+        def __init__(self) -> None:
+            self.interruptions = 0
+
+        def interrupt(self) -> None:
+            self.interruptions += 1
+
+    running_agent = RunningAgent()
+
     class PresentationAdapter:
         def __init__(self) -> None:
             self._media_delivery_loop = asyncio.get_running_loop()
             self._bot = SimpleNamespace(send_message=self.send_message)
+            self.gateway_runner = SimpleNamespace(
+                _running_agents={"agent:main:telegram:dm:1001": running_agent}
+            )
 
         @staticmethod
         async def send_message(**_values: Any) -> SimpleNamespace:
@@ -825,6 +989,39 @@ async def test_unanswered_picker_expires_without_returning_a_candidate(
     assert result["results"] == []
     assert result["telegram_presentation"]["selection_status"] == "expired"
     assert "without a user-facing response" in result["telegram_presentation"]["instruction"]
+    assert running_agent.interruptions == 1
+
+
+def test_turn_interrupt_uses_exact_session_without_queuing_a_message() -> None:
+    class RunningAgent:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        def interrupt(self, *arguments: object) -> None:
+            self.calls.append(arguments)
+
+    current = RunningAgent()
+    other = RunningAgent()
+    adapter = SimpleNamespace(
+        gateway_runner=SimpleNamespace(
+            _running_agents={
+                "agent:main:telegram:dm:1001": current,
+                "agent:main:telegram:dm:2002": other,
+            }
+        )
+    )
+
+    assert plugin.interrupt_running_turn(adapter, "agent:main:telegram:dm:1001", "picker expired")
+    # An argument would become Hermes' next queued message and restart the turn.
+    assert current.calls == [()]
+    assert other.calls == []
+
+
+def test_turn_interrupt_fails_closed_without_the_owning_agent() -> None:
+    adapter = SimpleNamespace(gateway_runner=SimpleNamespace(_running_agents={}))
+    assert not plugin.interrupt_running_turn(
+        adapter, "agent:main:telegram:dm:1001", "picker expired"
+    )
 
 
 def test_search_presentation_keeps_card_numbers_aligned_after_invalid_rows() -> None:
@@ -856,6 +1053,9 @@ def test_search_tool_contract_owns_native_telegram_selection() -> None:
     assert "before the tool returns" in text
     assert "call clarify" in text
     assert "Never use MEDIA" in text
+    recommendation = SHARED_SCHEMAS["recommend_media"]["description"]
+    assert "Pick, Search more, and Cancel" in recommendation
+    assert "instead of calling search_media separately" in recommendation
 
 
 async def test_adapter_verifies_actor_before_trusting_gateway(

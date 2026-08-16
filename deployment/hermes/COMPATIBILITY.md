@@ -22,7 +22,10 @@ Before changing the pinned digest:
 5. Verify a tab switch edits one card's poster in place, the active row changes
    from `○` to `●`, and Request movie performs the gateway request from the
    tap itself without posting callback text into the chat.
-6. Run Ruff, strict mypy, the complete pytest suite, both hash-locked dependency
+6. Verify an unanswered media picker interrupts its exact active Hermes session
+   with no queued interrupt message. The interrupted turn must end without a
+   follow-up API call or another unsolicited search card.
+7. Run Ruff, strict mypy, the complete pytest suite, both hash-locked dependency
    audits, Compose validation, and the gateway container migration smoke.
-7. Publish immutable images, deploy with a verified database backup, and check
+8. Publish immutable images, deploy with a verified database backup, and check
    that Plex and unrelated agent containers retain their IDs.

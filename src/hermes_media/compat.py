@@ -125,8 +125,46 @@ def install_tool_visibility(
     tools_config._get_platform_tools = visible
 
 
+def interrupt_running_turn(adapter: object, session_key: str, reason: str) -> bool:
+    """Interrupt the exact pinned-Hermes turn that owns an expired picker.
+
+    A gateway clarify timeout normally returns an empty tool result to the
+    model, which lets the same research turn continue. Media pickers are a
+    terminal handoff to the user instead: once one expires, the agent must stop
+    and wait for a new message. Keep this private Hermes traversal in the
+    compatibility module so a pin upgrade has one explicit migration seam.
+    """
+
+    runner = getattr(adapter, "gateway_runner", None)
+    running_agents = getattr(runner, "_running_agents", None)
+    get_running = getattr(running_agents, "get", None)
+    if not callable(get_running):
+        logger.error("Hermes gateway runner does not expose its running-agent map")
+        return False
+    agent = get_running(session_key)
+    interrupt = getattr(agent, "interrupt", None)
+    if not callable(interrupt):
+        logger.error("Hermes running agent is unavailable for session %s", session_key)
+        return False
+    try:
+        # No interrupt message is intentional. Hermes treats a non-control
+        # message as the next queued user turn, which would restart the model
+        # loop and recreate the exact unsolicited-search bug this closes.
+        interrupt()
+    except Exception:
+        logger.exception("Could not interrupt expired media-picker turn: %s", reason)
+        return False
+    logger.info("Interrupted Hermes turn for session %s: %s", session_key, reason)
+    return True
+
+
 def _media_picker_markup(
-    *, picker_id: str, labels: Sequence[str], active_index: int, active_is_movie: bool
+    *,
+    picker_id: str,
+    labels: Sequence[str],
+    active_index: int,
+    active_is_movie: bool,
+    recommendation_mode: bool,
 ) -> object:
     from telegram import (  # type: ignore[import-not-found]
         InlineKeyboardButton,
@@ -142,17 +180,36 @@ def _media_picker_markup(
         ]
         for index, label in enumerate(labels)
     ]
-    action = "+ Request movie" if active_is_movie else "✓ Choose series"
-    rows.append(
-        [
-            InlineKeyboardButton(
-                action, callback_data=f"{MEDIA_CALLBACK_PREFIX}:{picker_id}:select"
-            ),
-            InlineKeyboardButton(
-                "Cancel", callback_data=f"{MEDIA_CALLBACK_PREFIX}:{picker_id}:cancel"
-            ),
-        ]
-    )
+    if recommendation_mode:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "✓ Pick", callback_data=f"{MEDIA_CALLBACK_PREFIX}:{picker_id}:select"
+                ),
+                InlineKeyboardButton(
+                    "↻ Search more", callback_data=f"{MEDIA_CALLBACK_PREFIX}:{picker_id}:more"
+                ),
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "Cancel", callback_data=f"{MEDIA_CALLBACK_PREFIX}:{picker_id}:cancel"
+                )
+            ]
+        )
+    else:
+        action = "+ Request movie" if active_is_movie else "✓ Choose series"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    action, callback_data=f"{MEDIA_CALLBACK_PREFIX}:{picker_id}:select"
+                ),
+                InlineKeyboardButton(
+                    "Cancel", callback_data=f"{MEDIA_CALLBACK_PREFIX}:{picker_id}:cancel"
+                ),
+            ]
+        )
     return InlineKeyboardMarkup(rows)
 
 
@@ -166,6 +223,7 @@ async def send_media_picker(
     caption: str,
     active_index: int,
     active_is_movie: bool,
+    recommendation_mode: bool,
 ) -> object:
     """Send one tabbed media card through the pinned Telegram bot."""
 
@@ -177,6 +235,7 @@ async def send_media_picker(
         labels=labels,
         active_index=active_index,
         active_is_movie=active_is_movie,
+        recommendation_mode=recommendation_mode,
     )
     if poster_url is not None:
         message = await bot.send_photo(
@@ -207,6 +266,7 @@ async def edit_media_picker(
     caption: str,
     active_index: int,
     active_is_movie: bool,
+    recommendation_mode: bool,
     has_photo: bool,
 ) -> bool:
     """Swap the active tab in place; return whether the message now has a photo."""
@@ -216,6 +276,7 @@ async def edit_media_picker(
         labels=labels,
         active_index=active_index,
         active_is_movie=active_is_movie,
+        recommendation_mode=recommendation_mode,
     )
     if has_photo and poster_url is not None:
         from telegram import InputMediaPhoto
@@ -304,6 +365,20 @@ def verify_pinned_runtime(
     registered = getattr(manager, "_plugin_tool_names", None)
     if not isinstance(registered, set) or not expected_tools <= registered:
         raise RuntimeError("CRBL media plugin tool manifest is incomplete")
+
+    # Importing gateway.run can activate Hermes' lazy Telegram platform. Do it
+    # only after platform_registry.get() above has loaded CRBL through this
+    # manager, or the verifier observes another manager's tool inventory.
+    from gateway.platforms.base import BasePlatformAdapter  # type: ignore[import-not-found]
+    from gateway.run import GatewayRunner  # type: ignore[import-not-found]
+    from run_agent import AIAgent  # type: ignore[import-not-found]
+
+    if not hasattr(BasePlatformAdapter, "gateway_runner"):
+        raise RuntimeError("native platform adapter no longer exposes its gateway runner")
+    if not isinstance(getattr(GatewayRunner, "_running_agents", None), property):
+        raise RuntimeError("Hermes gateway runner no longer exposes its active-turn map")
+    if not callable(getattr(AIAgent, "interrupt", None)):
+        raise RuntimeError("Hermes agent no longer exposes turn interruption")
     resolver = getattr(tools_config, "_get_platform_tools", None)
     if not getattr(resolver, "__crbl_media__", False):
         raise RuntimeError("CRBL role-aware tool resolver is not active")

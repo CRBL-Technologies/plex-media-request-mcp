@@ -158,7 +158,7 @@ def test_roles_and_no_selection_token(config: Config) -> None:
         app.state.runtime.tools.upstream = fake
         user_tools = client.post("/api/tools", headers=_headers(), json=_actor(1001)).json()
         assert user_tools["role"] == "user"
-        assert len(user_tools["tools"]) == 7
+        assert len(user_tools["tools"]) == len(SHARED_TOOLS)
         assert "radarr_get_movies" not in {tool["name"] for tool in user_tools["tools"]}
         admin_tools = client.post("/api/tools", headers=_headers(), json=_actor(9001)).json()
         assert "radarr_get_movies" in {tool["name"] for tool in admin_tools["tools"]}
@@ -215,6 +215,98 @@ def test_mixed_search_keeps_movie_and_series_results(config: Config) -> None:
             "movie",
             "series",
         ]
+
+
+def test_recommendations_return_one_distinct_exact_match_per_title(config: Config) -> None:
+    app = create_app(config)
+    fake = FakeUpstream()
+
+    def movies(arguments: dict[str, Any]) -> dict[str, Any]:
+        rows = {
+            "Arrival (2016)": [
+                {"tmdbId": 10, "title": "Arrival", "year": 2025},
+                {"tmdbId": 11, "title": "Arrival", "year": 2016},
+            ],
+            "Ex Machina (2014)": [
+                {"tmdbId": 12, "title": "Ex Machina", "year": 2014},
+                {"tmdbId": 120, "title": "Ex Machina: Extra", "year": 2015},
+            ],
+            "Annihilation (2018)": [
+                {"tmdbId": 13, "title": "Annihilation", "year": 2018},
+            ],
+        }
+        return {"data": rows[arguments["term"]]}
+
+    fake.responses["radarr_search_movie"] = movies
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "recommend_media",
+                "arguments": {
+                    "titles": ["Arrival (2016)", "Ex Machina (2014)", "Annihilation (2018)"],
+                    "media_type": "movie",
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["presentation"] == "recommendations"
+    assert [item["tmdb_id"] for item in result["results"]] == [11, 12, 13]
+    assert [call[1]["term"] for call in fake.calls] == [
+        "Arrival (2016)",
+        "Ex Machina (2014)",
+        "Annihilation (2018)",
+    ]
+
+
+def test_recommendations_reject_the_same_title_with_different_years(config: Config) -> None:
+    app = create_app(config)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "recommend_media",
+                "arguments": {
+                    "titles": ["Arrival (2016)", "Arrival (2025)"],
+                    "media_type": "movie",
+                },
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "titles must be distinct"
+
+
+def test_recommendations_omit_inexact_provider_matches(config: Config) -> None:
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["radarr_search_movie"] = {
+        "data": [{"tmdbId": 10, "title": "Arrival: The Journey", "year": 2016}]
+    }
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "recommend_media",
+                "arguments": {
+                    "titles": ["Arrival (2016)", "Ex Machina (2014)"],
+                    "media_type": "movie",
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["result"]["results"] == []
 
 
 def test_existing_missing_movie_starts_a_search(config: Config) -> None:
@@ -558,6 +650,7 @@ def test_plex_webhook_requires_capability_and_deduplicates(config: Config) -> No
             "type": "movie",
             "ratingKey": "42",
             "title": "A Movie",
+            "slug": "a-movie",
             "Guid": [{"id": "tmdb://123"}],
         },
     }
@@ -568,6 +661,8 @@ def test_plex_webhook_requires_capability_and_deduplicates(config: Config) -> No
         second = client.post(f"/plex?token={token}", json=payload)
         assert first.json() == {"accepted": True}
         assert second.json() == {"accepted": False}
+        event = app.state.runtime.store.pending_media_events(int(time.time()) + 10)[0]
+        assert event["plex_url"] == "https://watch.plex.tv/movie/a-movie"
 
 
 def test_plex_webhook_accepts_existing_capability_path(config: Config) -> None:
@@ -595,6 +690,7 @@ def test_plex_webhook_accepts_new_show(config: Config) -> None:
             "type": "show",
             "ratingKey": "10537",
             "title": "3 Body Problem",
+            "slug": "3-body-problem",
             "Guid": [{"id": "tvdb://411959"}],
         },
     }
@@ -606,6 +702,7 @@ def test_plex_webhook_accepts_new_show(config: Config) -> None:
         assert event["media_type"] == "series"
         assert event["external_id"] == 411959
         assert event["show_title"] == "3 Body Problem"
+        assert event["plex_url"] == "https://watch.plex.tv/show/3-body-problem"
 
 
 def test_plex_webhook_maps_season_parent_fields(config: Config) -> None:
@@ -620,6 +717,7 @@ def test_plex_webhook_maps_season_parent_fields(config: Config) -> None:
             "parentRatingKey": "10537",
             "parentTitle": "3 Body Problem",
             "parentGuid": "tvdb://411959",
+            "parentSlug": "3-body-problem",
         },
     }
     token = "plex-hook-secret-with-at-least-32-bytes"
@@ -631,6 +729,31 @@ def test_plex_webhook_maps_season_parent_fields(config: Config) -> None:
         assert event["parent_rating_key"] == "10537"
         assert event["show_title"] == "3 Body Problem"
         assert event["season_number"] == 1
+        assert event["plex_url"] == "https://watch.plex.tv/show/3-body-problem/season/1"
+
+
+def test_plex_webhook_links_an_episode_to_the_mobile_app_route(config: Config) -> None:
+    app = create_app(config)
+    payload = {
+        "event": "library.new",
+        "Metadata": {
+            "type": "episode",
+            "ratingKey": "10539",
+            "title": "Countdown",
+            "index": 2,
+            "parentIndex": 1,
+            "grandparentRatingKey": "10537",
+            "grandparentTitle": "3 Body Problem",
+            "grandparentGuid": "tvdb://411959",
+            "grandparentSlug": "3-body-problem",
+        },
+    }
+    token = "plex-hook-secret-with-at-least-32-bytes"
+    with TestClient(app) as client:
+        response = client.post(f"/private/plex/{token}", json=payload)
+        assert response.json() == {"accepted": True}
+        event = app.state.runtime.store.pending_media_events(int(time.time()) + 10)[0]
+        assert event["plex_url"] == ("https://watch.plex.tv/show/3-body-problem/season/1/episode/2")
 
 
 def test_rejects_oversized_request_before_parsing(config: Config) -> None:
@@ -912,6 +1035,75 @@ async def test_new_show_without_guid_enriches_from_its_own_rating_key(
 
         assert ("plex_get_metadata", {"ratingKey": "10537"}) in fake.calls
         assert set(sent) == {1001, 9001}
+
+
+async def test_notification_enrichment_persists_universal_plex_link(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = create_app(config)
+    with TestClient(app):
+        runtime = app.state.runtime
+        runtime.store.add_media_event(
+            event_key="episode:19",
+            media_type="series",
+            external_id=81797,
+            rating_key="19",
+            title="Episode 19",
+            show_title="One Piece",
+            season_number=2,
+            episode_number=19,
+            plex_url="https://app.plex.tv/fallback",
+            observed_at=int(time.time()) - 10,
+        )
+
+        async def lookup(_media_type: str, _external_id: int) -> str:
+            return "one-piece"
+
+        monkeypatch.setattr(runtime.notifications, "_lookup_plex_slug", lookup)
+        events = runtime.store.pending_media_events(int(time.time()) + 10)
+        enriched = await runtime.notifications._enrich(events)
+
+        expected = "https://watch.plex.tv/show/one-piece/season/2/episode/19"
+        assert enriched[0]["plex_url"] == expected
+        persisted = runtime.store.pending_media_events(int(time.time()) + 10)
+        assert persisted[0]["plex_url"] == expected
+
+
+async def test_plex_slug_lookup_keeps_token_out_of_the_url(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config.upstream_token_file.write_text(
+        "MCP_AUTH_TOKEN=upstream-secret\nPLEX_API_KEY=plex-secret\n", encoding="utf-8"
+    )
+    captured: dict[str, Any] = {}
+
+    class Response:
+        is_error = False
+
+        @staticmethod
+        def json() -> dict[str, Any]:
+            return {"MediaContainer": {"Metadata": [{"slug": "one-piece"}]}}
+
+    class Client:
+        async def __aenter__(self) -> Client:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def get(self, url: str, **values: Any) -> Response:
+            captured.update({"url": url, **values})
+            return Response()
+
+    monkeypatch.setattr("media_gateway.notifications.httpx.AsyncClient", lambda **_kwargs: Client())
+    app = create_app(config)
+    with TestClient(app):
+        slug = await app.state.runtime.notifications._lookup_plex_slug("series", 81797)
+
+    assert slug == "one-piece"
+    assert captured["params"] == {"guid": "tvdb://81797", "type": 2}
+    assert "plex-secret" not in str(captured["url"])
+    assert captured["headers"]["X-Plex-Token"] == "plex-secret"
 
 
 async def test_season_batch_waits_until_the_latest_episode_is_quiet(config: Config) -> None:

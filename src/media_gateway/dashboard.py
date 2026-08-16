@@ -53,9 +53,16 @@ def _time(value: object) -> str:
     return datetime.fromtimestamp(value, tz=UTC).strftime("%Y-%m-%d %H:%M UTC")
 
 
+# Canonical CRBL favicon, copied verbatim from the design system
+# (assets/crbl-favicon.svg): the amber B on a dark rounded square, ~19%
+# corner radius. Do not redraw it here.
+FAVICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">\n  <rect width="32" height="32" rx="6" fill="#1C1917"></rect>\n  <text x="16" y="23" font-family="&#39;JetBrains Mono&#39;, &#39;Geist Mono&#39;, &#39;Fira Code&#39;, monospace" font-weight="700" font-size="20" text-anchor="middle" fill="#F59E0B">B</text>\n</svg>'
+
+
 def _page(content: str, *, title: str = "Media operations") -> str:
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(title)} · CRBL</title>
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/assets/app.css"></head><body>{content}</body></html>"""
 
 

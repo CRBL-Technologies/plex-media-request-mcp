@@ -89,6 +89,14 @@ def _trusted(request: Request) -> bool:
     return hmac.compare_digest(authorization, expected)
 
 
+def _page_number(request: Request, name: str) -> int:
+    raw = request.query_params.get(name, "1")
+    if len(raw) > 5 or not raw.isascii() or not raw.isdigit():
+        return 1
+    value = int(raw)
+    return min(value, 10_000) if value > 0 else 1
+
+
 async def health(_request: Request) -> Response:
     return JSONResponse({"status": "ok"})
 
@@ -150,11 +158,13 @@ async def dashboard(request: Request) -> Response:
     snapshot = runtime.policy.snapshot()
     roles = {user_id: Role.USER for user_id in snapshot.allowed}
     roles.update({user_id: Role.ADMIN for user_id in snapshot.admins})
+    request_page = runtime.store.request_page(_page_number(request, "request_page"))
+    activity_page = runtime.store.activity_page(_page_number(request, "activity_page"))
     return HTMLResponse(
         dashboard_page(
             users=runtime.store.users(roles),
-            activity=runtime.store.recent_activity(),
-            requests=runtime.store.recent_requests(),
+            activity=activity_page,
+            requests=request_page,
             csrf=runtime.sessions.csrf(auth),
             notice=request.query_params.get("notice"),
         )

@@ -58,7 +58,56 @@ def test_login_redirect_and_real_user_table(config: Config) -> None:
         assert "@philippe" in page.text
         assert "2002" in page.text
         assert '"users"' not in page.text
+        assert "Active user" not in page.text
         assert "#fffbf5" in client.get("/assets/app.css").text
+
+
+def test_dashboard_paginates_requests_and_activity_independently(config: Config) -> None:
+    app = create_app(config)
+    with TestClient(app) as client:
+        runtime = app.state.runtime
+        actor = Actor(user_id=1001, chat_id=1001)
+        for number in range(30):
+            runtime.store.record_request(
+                media_type="movie",
+                external_id=10_000 + number,
+                seasons=(),
+                title=f"Movie {number}",
+                year=2026,
+                actor=actor,
+            )
+            runtime.store.record_activity("policy", f"Policy {number}")
+        _login(client)
+
+        page = client.get("/?request_page=2&activity_page=3")
+
+        assert page.status_code == 200
+        assert "Page 2 of 2 · 30 total" in page.text
+        assert "Page 3 of 3 · 60 total" in page.text
+        assert "request_page=1&amp;activity_page=3#requests" in page.text
+        assert "request_page=2&amp;activity_page=2#activity" in page.text
+        assert client.get("/?request_page=" + "9" * 10_000).status_code == 200
+
+
+def test_dashboard_plex_activity_includes_episode_hierarchy(config: Config) -> None:
+    app = create_app(config)
+    with TestClient(app) as client:
+        app.state.runtime.store.add_media_event(
+            event_key="episode:42",
+            media_type="series",
+            external_id=411959,
+            rating_key="42",
+            title="Countdown",
+            show_title="3 Body Problem",
+            season_number=1,
+            episode_number=2,
+            plex_url="https://app.plex.tv/42",
+        )
+        _login(client)
+
+        page = client.get("/")
+
+        assert "Plex added 3 Body Problem · S01E02 · Countdown" in page.text
 
 
 def test_dashboard_adds_and_removes_allowlisted_user(config: Config) -> None:
@@ -606,6 +655,55 @@ async def test_automatic_plex_addition_notifies_admin_without_request(config: Co
         runtime.notifications._send = capture  # type: ignore[method-assign]
         await runtime.notifications.flush()
         assert sent == [9001]
+
+
+async def test_notifications_filter_revoked_requesters_but_preserve_allowed_chat(
+    config: Config,
+) -> None:
+    app = create_app(config)
+    sent: list[int] = []
+    with TestClient(app):
+        runtime = app.state.runtime
+        runtime.store.record_request(
+            media_type="movie",
+            external_id=100,
+            seasons=(),
+            title="Allowed",
+            year=2026,
+            actor=Actor(user_id=1001, chat_id=-10001),
+        )
+        runtime.store.record_request(
+            media_type="movie",
+            external_id=200,
+            seasons=(),
+            title="Revoked",
+            year=2026,
+            actor=Actor(user_id=2002, chat_id=2002),
+        )
+
+        async def capture(chat_id: int, _text: str, _url: str) -> None:
+            sent.append(chat_id)
+
+        runtime.notifications._send = capture  # type: ignore[method-assign]
+        for external_id, title in ((100, "Allowed"), (200, "Revoked")):
+            runtime.store.add_media_event(
+                event_key=f"movie:{external_id}",
+                media_type="movie",
+                external_id=external_id,
+                rating_key=str(external_id),
+                title=title,
+                show_title=None,
+                season_number=None,
+                episode_number=None,
+                plex_url=f"https://app.plex.tv/{external_id}",
+                observed_at=int(time.time()) - 10,
+            )
+
+        await runtime.notifications.flush()
+
+        assert sent.count(9001) == 2
+        assert -10001 in sent
+        assert 2002 not in sent
 
 
 async def test_episode_enrichment_retries_before_requester_notification(config: Config) -> None:

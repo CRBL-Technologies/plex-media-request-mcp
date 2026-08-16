@@ -4,12 +4,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any
 
 
 class Role(StrEnum):
     BLOCKED = "blocked"
     USER = "user"
     ADMIN = "admin"
+
+
+@dataclass(frozen=True, slots=True)
+class Page:
+    items: list[dict[str, Any]]
+    number: int
+    pages: int
+    total: int
 
 
 @dataclass(frozen=True, slots=True)

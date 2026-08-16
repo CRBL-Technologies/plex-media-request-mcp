@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from .types import Actor, Role
+from .types import Actor, Page, Role
 
 SCHEMA_VERSION = 1
 TABLE_COLUMNS = {
@@ -70,6 +70,9 @@ class Store:
             connection.execute("PRAGMA foreign_keys=ON")
             yield connection
             connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
 
@@ -146,6 +149,38 @@ class Store:
                 );
                 """
             )
+            # The first clean-gateway release recorded one activity row for
+            # every allowed message. Keep last_seen in users, but remove that
+            # dashboard noise. Rebuild Plex rows from their durable media
+            # events so the activity detail includes the hierarchy. This data
+            # cleanup deliberately keeps schema version 1 rollback-compatible.
+            db.execute("DELETE FROM activity WHERE kind IN ('seen', 'available')")
+            events = db.execute(
+                """SELECT media_type, title, show_title, season_number,
+                          episode_number, observed_at
+                FROM media_events ORDER BY observed_at, event_key"""
+            ).fetchall()
+            db.executemany(
+                """INSERT INTO activity(occurred_at, kind, user_id, label)
+                VALUES (?, 'available', NULL, ?)""",
+                (
+                    (
+                        int(event["observed_at"]),
+                        self._media_activity_label(
+                            media_type=str(event["media_type"]),
+                            title=str(event["title"]),
+                            show_title=(
+                                str(event["show_title"])
+                                if event["show_title"] is not None
+                                else None
+                            ),
+                            season_number=event["season_number"],
+                            episode_number=event["episode_number"],
+                        ),
+                    )
+                    for event in events
+                ),
+            )
             db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             for table, expected in TABLE_COLUMNS.items():
                 columns = {
@@ -208,15 +243,15 @@ class Store:
                     now if blocked else None,
                 ),
             )
-            if record_activity:
+            if record_activity and blocked:
                 db.execute(
                     """INSERT INTO activity(occurred_at, kind, user_id, label)
                     VALUES (?, ?, ?, ?)""",
                     (
                         now,
-                        "blocked" if blocked else "seen",
+                        "blocked",
                         actor.user_id,
-                        "Blocked message" if blocked else "Active user",
+                        "Blocked message",
                     ),
                 )
 
@@ -264,13 +299,28 @@ class Store:
             "last_blocked": int(row["last_blocked"]) if row["last_blocked"] else None,
         }
 
-    def recent_activity(self, limit: int = 50) -> list[dict[str, Any]]:
+    @staticmethod
+    def _page(number: int, page_size: int, total: int) -> tuple[int, int, int]:
+        size = min(max(page_size, 1), 100)
+        pages = max(1, (total + size - 1) // size)
+        current = min(max(number, 1), pages)
+        return current, pages, (current - 1) * size
+
+    def activity_page(self, number: int = 1, page_size: int = 25) -> Page:
         with self._db() as db:
+            total = int(
+                db.execute("SELECT count(*) FROM activity WHERE kind != 'seen'").fetchone()[0]
+            )
+            current, pages, offset = self._page(number, page_size, total)
             rows = db.execute(
-                "SELECT occurred_at, kind, user_id, label FROM activity ORDER BY id DESC LIMIT ?",
-                (min(max(limit, 1), 200),),
+                """SELECT occurred_at, kind, user_id, label FROM activity
+                WHERE kind != 'seen' ORDER BY occurred_at DESC, id DESC LIMIT ? OFFSET ?""",
+                (min(max(page_size, 1), 100), offset),
             ).fetchall()
-        return [dict(row) for row in rows]
+        return Page([dict(row) for row in rows], current, pages, total)
+
+    def recent_activity(self, limit: int = 50) -> list[dict[str, Any]]:
+        return self.activity_page(1, limit).items
 
     def record_request(
         self,
@@ -382,13 +432,37 @@ class Store:
                 ),
             )
             if cursor.rowcount:
-                label = f"Plex added {show_title or title}"
+                label = self._media_activity_label(
+                    media_type=media_type,
+                    title=title,
+                    show_title=show_title,
+                    season_number=season_number,
+                    episode_number=episode_number,
+                )
                 db.execute(
                     """INSERT INTO activity(occurred_at, kind, user_id, label)
                     VALUES (?, ?, NULL, ?)""",
                     (now, "available", label[:200]),
                 )
             return cursor.rowcount == 1
+
+    @staticmethod
+    def _media_activity_label(
+        *,
+        media_type: str,
+        title: str,
+        show_title: str | None,
+        season_number: object,
+        episode_number: object,
+    ) -> str:
+        if media_type == "movie":
+            return f"Plex added movie · {title}"[:200]
+        show = show_title or title
+        if isinstance(season_number, int) and isinstance(episode_number, int):
+            return f"Plex added {show} · S{season_number:02d}E{episode_number:02d} · {title}"[:200]
+        if isinstance(season_number, int):
+            return f"Plex added {show} · Season {season_number}"[:200]
+        return f"Plex added series · {show}"[:200]
 
     def set_media_external_id(self, event_key: str, external_id: int) -> None:
         with self._db() as db:
@@ -407,23 +481,23 @@ class Store:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def request_chats(
+    def request_destinations(
         self, *, media_type: str, external_id: int | None, season_number: int | None
-    ) -> set[int]:
+    ) -> set[tuple[int, int]]:
         if external_id is None:
             return set()
         with self._db() as db:
             rows = db.execute(
-                """SELECT chat_id, seasons FROM requests
+                """SELECT user_id, chat_id, seasons FROM requests
                 WHERE media_type=? AND external_id=? AND state='requested'""",
                 (media_type, external_id),
             ).fetchall()
-        chats: set[int] = set()
+        destinations: set[tuple[int, int]] = set()
         for row in rows:
             seasons = json.loads(row["seasons"])
             if media_type == "movie" or season_number is None or season_number in seasons:
-                chats.add(int(row["chat_id"]))
-        return chats
+                destinations.add((int(row["user_id"]), int(row["chat_id"])))
+        return destinations
 
     def requested_seasons(self, external_id: int) -> set[int]:
         """Return outstanding requested seasons for one series."""
@@ -485,13 +559,17 @@ class Store:
                 ((now, key) for key in keys),
             )
 
-    def recent_requests(self, limit: int = 25) -> list[dict[str, Any]]:
+    def request_page(self, number: int = 1, page_size: int = 25) -> Page:
         with self._db() as db:
+            total = int(db.execute("SELECT count(*) FROM requests").fetchone()[0])
+            current, pages, offset = self._page(number, page_size, total)
             rows = db.execute(
-                "SELECT * FROM requests ORDER BY id DESC LIMIT ?",
-                (min(max(limit, 1), 100),),
+                """SELECT requests.*, users.username, users.first_name, users.last_name
+                FROM requests LEFT JOIN users USING(user_id)
+                ORDER BY requests.created_at DESC, requests.id DESC LIMIT ? OFFSET ?""",
+                (min(max(page_size, 1), 100), offset),
             ).fetchall()
-        return [
+        items = [
             {
                 "id": int(row["id"]),
                 "media_type": row["media_type"],
@@ -500,8 +578,15 @@ class Store:
                 "title": row["title"],
                 "year": row["year"],
                 "user_id": int(row["user_id"]),
+                "username": row["username"],
+                "name": " ".join(part for part in (row["first_name"], row["last_name"]) if part)
+                or None,
                 "state": row["state"],
                 "created_at": int(row["created_at"]),
             }
             for row in rows
         ]
+        return Page(items, current, pages, total)
+
+    def recent_requests(self, limit: int = 25) -> list[dict[str, Any]]:
+        return self.request_page(1, limit).items

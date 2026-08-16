@@ -58,3 +58,32 @@ def test_unknown_database_version_fails_closed(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="unsupported gateway database version: 99"):
         Store(path)
+
+
+def test_database_context_rolls_back_on_error(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.sqlite3")
+
+    with pytest.raises(RuntimeError, match="stop"), store._db() as database:
+        database.execute(
+            """INSERT INTO activity(occurred_at, kind, user_id, label)
+            VALUES (1, 'test', NULL, 'No')"""
+        )
+        raise RuntimeError("stop")
+
+    assert store.recent_activity() == []
+
+
+def test_activity_cleanup_and_pagination(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.sqlite3")
+    actor = Actor(user_id=1001, chat_id=1001)
+    store.observe_actor(actor)
+    for number in range(30):
+        store.record_activity("request", f"Request {number}", actor.user_id)
+
+    page = store.activity_page(2, 10)
+
+    assert page.number == 2
+    assert page.pages == 3
+    assert page.total == 30
+    assert len(page.items) == 10
+    assert all(item["label"] != "Active user" for item in page.items)

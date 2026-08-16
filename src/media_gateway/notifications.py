@@ -261,12 +261,19 @@ class Notifications:
     async def _deliver_batch(self, batch: list[dict[str, Any]]) -> None:
         first = batch[0]
         keys = [str(item["event_key"]) for item in batch]
-        recipients = set(self.policy.snapshot().admins)
-        recipients |= self.store.request_chats(
+        policy = self.policy.snapshot()
+        recipients = set(policy.admins)
+        requester_destinations = self.store.request_destinations(
             media_type=str(first["media_type"]),
             external_id=first["external_id"],
             season_number=first["season_number"],
         )
+        # A removed user keeps historical request state for audit, but must no
+        # longer receive messages. Filter by trusted requester identity while
+        # preserving the original private or group chat destination.
+        recipients |= {
+            chat_id for user_id, chat_id in requester_destinations if user_id in policy.allowed
+        }
         if not recipients:
             return
         for chat_id in recipients:

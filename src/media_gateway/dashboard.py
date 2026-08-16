@@ -26,7 +26,11 @@ background:var(--card);border:1px solid var(--border);border-radius:12px;box-sha
 table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:12px 16px;border-bottom:1px solid var(--border);vertical-align:middle}
 th{background:var(--surface);color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
 tr:last-child td{border-bottom:0}.mono{font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}
-.badge{display:inline-flex;padding:3px 8px;border-radius:999px;font-weight:700;font-size:12px;border:1px solid}
+.badge{display:inline-flex;padding:3px 8px;border-radius:999px;font-weight:700;font-size:12px;border:1px solid;white-space:nowrap}
+/* Auto table layout hands the title column the slack, so every short
+   column stays on one line and only the title wraps. */
+.nowrap{white-space:nowrap}td .subtitle{white-space:nowrap}
+.cell-title{min-width:170px}.cell-title strong{display:block}
 .admin{color:#92400e;background:#fffbeb;border-color:#fcd34d}.user{color:#166534;background:#f0fdf4;border-color:#bbf7d0}
 .blocked{color:#991b1b;background:#fef2f2;border-color:#fecaca}
 .available,.requested{color:#166534;background:#f0fdf4;border-color:#bbf7d0}.pending{color:#92400e;background:#fffbeb;border-color:#fcd34d}
@@ -104,13 +108,15 @@ def dashboard_page(
     )
     request_rows = (
         "".join(
-            f"<tr><td><strong>{html.escape(str(item['title']))}</strong>"
+            f'<tr><td class="cell-title"><strong>{html.escape(str(item["title"]))}</strong>'
             f'<div class="subtitle">{("TMDB" if item["media_type"] == "movie" else "TVDB")} {item["external_id"]}</div></td>'
-            f"<td>{html.escape(str(item['media_type']).title())}</td>"
-            f"<td>{html.escape(', '.join('S' + str(s) for s in item['seasons']) or '—')}</td>"
-            f'<td>{_requester(item)}</td><td><span class="badge {html.escape(str(item["state"]))}">'
+            f'<td class="nowrap">{html.escape(str(item["media_type"]).title())}</td>'
+            f"""<td class="nowrap">{html.escape(", ".join("S" + str(s) for s in item["seasons"]) or "—")}</td>"""
+            f'<td class="nowrap">{_requester(item)}</td>'
+            f'<td class="nowrap"><span class="badge {html.escape(str(item["state"]))}">'
             f"{html.escape(_request_status(item))}</span></td>"
-            f"<td>{len(item['destinations'])}</td><td>{_time(item['created_at'])}</td></tr>"
+            f'<td class="nowrap">{len(item["destinations"])}</td>'
+            f'<td class="nowrap">{_time(item["created_at"])}</td></tr>'
             for item in requests.items
         )
         or '<tr><td colspan="7" class="empty">No bot requests recorded yet.</td></tr>'

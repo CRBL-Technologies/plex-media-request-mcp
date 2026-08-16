@@ -39,6 +39,12 @@ def event(user_id: int = 1001) -> Value:
     return result
 
 
+def text_event(text: str, user_id: int = 1001) -> Value:
+    result = event(user_id)
+    result.text = text  # type: ignore[attr-defined]
+    return result
+
+
 def test_actor_comes_only_from_native_event() -> None:
     actor = actor_from_event(event())
     assert actor == Actor(
@@ -330,6 +336,145 @@ async def test_failed_picker_never_returns_an_ambiguous_candidate(
     assert result["results"] == []
     assert result["telegram_presentation"]["selection_status"] == "unavailable"
     assert "do not guess" in result["telegram_presentation"]["instruction"]
+
+
+async def test_new_text_supersedes_picker_and_continues_as_fresh_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ClarifyGateway:
+        def __init__(self) -> None:
+            self.responses: dict[str, str] = {}
+
+        def resolve_gateway_clarify(self, clarify_id: str, response: str) -> bool:
+            self.responses[clarify_id] = response
+            return True
+
+        def wait_for_response(self, clarify_id: str, _timeout: float) -> str:
+            return self.responses[clarify_id]
+
+    gateway = FakeGateway()
+    clarify = ClarifyGateway()
+    monkeypatch.setattr(plugin, "_client", gateway)
+    monkeypatch.setattr(plugin, "_clarify_gateway", lambda: clarify)
+    pending = plugin._PendingMediaPicker(
+        clarify_id="picker-1",
+        choices=(
+            "The Last House (2026) · Movie · TMDB 11",
+            "The Last House (2024) · Movie · TMDB 22",
+        ),
+    )
+    plugin._set_pending_picker("agent:main:telegram:dm:1001", pending)
+    adapter = plugin.MediaTelegramAdapter(SimpleNamespace(extra={}))
+    monkeypatch.setattr(plugin, "_active_adapter", adapter)
+
+    incoming = text_event("avengers")
+    assert await adapter.handle_message(incoming) is incoming
+    assert clarify.responses == {"picker-1": plugin.MEDIA_PICKER_SUPERSEDED}
+    assert plugin._get_pending_picker("agent:main:telegram:dm:1001") is None
+    assert gateway.calls == []
+
+
+async def test_number_year_and_exact_title_resolve_picker_without_new_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    choices = (
+        "The Last House (2026) · Movie · TMDB 11",
+        "The Last House (2024) · Movie · TMDB 22",
+        "Sell Your House (2026) · Movie · TMDB 33",
+    )
+    assert plugin._picker_choice("2", choices) == choices[1]
+    assert plugin._picker_choice("2024", choices) == choices[1]
+    assert plugin._picker_choice("Sell Your House", choices) == choices[2]
+    assert plugin._picker_choice("2026", choices) is None
+    assert plugin._picker_choice("avengers", choices) is None
+
+    class ClarifyGateway:
+        def __init__(self) -> None:
+            self.response = ""
+
+        def resolve_gateway_clarify(self, _clarify_id: str, response: str) -> bool:
+            self.response = response
+            return True
+
+        def wait_for_response(self, _clarify_id: str, _timeout: float) -> str:
+            return self.response
+
+    gateway = FakeGateway()
+    clarify = ClarifyGateway()
+    monkeypatch.setattr(plugin, "_client", gateway)
+    monkeypatch.setattr(plugin, "_clarify_gateway", lambda: clarify)
+    plugin._set_pending_picker(
+        "agent:main:telegram:dm:1001",
+        plugin._PendingMediaPicker(clarify_id="picker-2", choices=choices),
+    )
+    adapter = plugin.MediaTelegramAdapter(SimpleNamespace(extra={}))
+    monkeypatch.setattr(plugin, "_active_adapter", adapter)
+
+    assert await adapter.handle_message(text_event("2")) is None
+    assert clarify.response == choices[1]
+    assert plugin._get_pending_picker("agent:main:telegram:dm:1001") is None
+    assert gateway.calls == []
+
+
+def test_media_picker_timeout_is_short_and_bounded() -> None:
+    assert plugin._picker_timeout(60) == 60
+    assert plugin._picker_timeout(600) == 120
+    assert plugin._picker_timeout(0) == 120
+
+
+async def test_unanswered_picker_expires_without_returning_a_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SearchGateway(FakeGateway):
+        async def call(self, actor: Actor, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            self.calls.append((actor.user_id, name, arguments))
+            return {
+                "query": "House",
+                "results": [
+                    {"media_type": "movie", "tmdb_id": 11, "title": "House", "year": 2026},
+                    {"media_type": "movie", "tmdb_id": 22, "title": "House", "year": 2024},
+                ],
+            }
+
+    class PresentationAdapter:
+        def __init__(self) -> None:
+            self._media_delivery_loop = asyncio.get_running_loop()
+
+        async def send_clarify(self, **_values: Any) -> SimpleNamespace:
+            return SimpleNamespace(success=True)
+
+    class ClarifyGateway:
+        timeout = 0.0
+
+        @staticmethod
+        def register(**_values: Any) -> None:
+            return None
+
+        @staticmethod
+        def resolve_gateway_clarify(_clarify_id: str, _response: str) -> bool:
+            return True
+
+        @classmethod
+        def wait_for_response(cls, _clarify_id: str, timeout: float) -> None:
+            cls.timeout = timeout
+            return None
+
+        @staticmethod
+        def get_clarify_timeout() -> int:
+            return 600
+
+    monkeypatch.setattr(plugin, "_client", SearchGateway())
+    monkeypatch.setattr(plugin, "_active_adapter", PresentationAdapter())
+    monkeypatch.setattr(plugin, "_clarify_gateway", lambda: ClarifyGateway())
+    actor = Actor(user_id=1001, chat_id=1001)
+    with actor_scope(actor, Role.USER, "agent:main:telegram:dm:1001"):
+        raw = await plugin._handler("search_media")({"query": "House"})
+
+    result = json.loads(raw)
+    assert ClarifyGateway.timeout == plugin.MEDIA_PICKER_TIMEOUT_SECONDS
+    assert result["results"] == []
+    assert result["telegram_presentation"]["selection_status"] == "expired"
+    assert "without a user-facing response" in result["telegram_presentation"]["instruction"]
 
 
 def test_search_presentation_keeps_card_numbers_aligned_after_invalid_rows() -> None:

@@ -5,11 +5,12 @@ import json
 import sys
 from dataclasses import dataclass
 from types import ModuleType, SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
 from hermes_media import plugin
+from hermes_media.client import GatewayError
 from hermes_media.trusted import TrustError, actor_from_event, actor_scope
 from media_gateway.constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
 from media_gateway.tools import SHARED_SCHEMAS
@@ -324,11 +325,26 @@ async def test_media_card_switches_poster_then_requests_active_movie(
     assert rows[1][0].text == "●  🎬 The Last House · 2026"
     assert rows[-1][0].text == "+ Request movie"
 
+    class RequestGateway:
+        calls: ClassVar[list[tuple[int, str, dict[str, Any]]]] = []
+
+        async def call(self, actor: Actor, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            RequestGateway.calls.append((actor.user_id, name, arguments))
+            return {"request_id": 7, "status": "search_started"}
+
+    monkeypatch.setattr(plugin, "_gateway", lambda: RequestGateway())
+
     query.data = "md:picker-1:select"
     assert await plugin._handle_media_picker_callback(SimpleNamespace(callback_query=query), None)
+    # The tap performed the request itself; the model only narrates it.
+    assert RequestGateway.calls == [(1001, "request_movie", {"tmdb_id": 11})]
     assert ClarifyGateway.response == (
-        plugin.MEDIA_PICKER_REQUEST + "The Last House (2026) · Movie · TMDB 11"
+        plugin.MEDIA_PICKER_REQUESTED + "search_started:The Last House (2026) · Movie · TMDB 11"
     )
+    assert "Requesting…" in query.answers
+    closed = query.edits[-1]
+    assert closed["reply_markup"] is None
+    assert "Requested ✓" in closed["caption"]
 
 
 def _media_card_fixture(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Any, Any]:
@@ -447,6 +463,86 @@ async def test_failed_tab_switch_keeps_the_displayed_candidate_authoritative(
     # The card still displayed the series tab, so the series must be what
     # resolves - never the movie the user never saw opened.
     assert clarify.response == "House (2004) · Series · TVDB 22"
+
+
+async def test_failed_gateway_request_closes_card_without_claiming_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clarify, query_cls, pending = _media_card_fixture(monkeypatch)
+
+    class FailingGateway:
+        async def call(self, actor: Actor, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            raise GatewayError("radarr is down")
+
+    monkeypatch.setattr(plugin, "_gateway", lambda: FailingGateway())
+    plugin._commit_picker_tab(pending, 1, True)
+    query = query_cls(data="md:picker-1:select")
+
+    assert await plugin._handle_media_picker_callback(SimpleNamespace(callback_query=query), None)
+    assert clarify.response == (
+        plugin.MEDIA_PICKER_REQUEST_FAILED + "The Last House (2026) · Movie · TMDB 11"
+    )
+    closed = query.edits[-1]
+    assert "Request failed" in closed["caption"]
+    assert "Requested ✓" not in closed["caption"]
+
+
+async def test_performed_request_reports_outcome_and_forbids_second_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    choice = "The Last House (2026) · Movie · TMDB 11"
+
+    async def already_requested(*_args: Any, **_kwargs: Any) -> str:
+        return plugin.MEDIA_PICKER_REQUESTED + "requested:" + choice
+
+    monkeypatch.setattr(plugin, "_select_search_result", already_requested)
+    actor = Actor(user_id=1001, chat_id=1001)
+    with actor_scope(actor, Role.USER, "session-1"):
+        result = await plugin._decorate_search_result(
+            1001,
+            "session-1",
+            {
+                "query": "last house",
+                "results": [
+                    {"media_type": "movie", "tmdb_id": 11, "title": "The Last House", "year": 2026},
+                    {"media_type": "movie", "tmdb_id": 22, "title": "House", "year": 2024},
+                ],
+            },
+        )
+    presentation = result["telegram_presentation"]
+    assert presentation["selection_status"] == "requested"
+    assert presentation["request_status"] == "requested"
+    assert presentation["provider_mutation_performed"] is True
+    assert "Never call request_movie" in presentation["instruction"]
+    assert result["results"][0]["tmdb_id"] == 11
+
+
+async def test_failed_request_marker_tells_model_nothing_was_requested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    choice = "The Last House (2026) · Movie · TMDB 11"
+
+    async def failed(*_args: Any, **_kwargs: Any) -> str:
+        return plugin.MEDIA_PICKER_REQUEST_FAILED + choice
+
+    monkeypatch.setattr(plugin, "_select_search_result", failed)
+    actor = Actor(user_id=1001, chat_id=1001)
+    with actor_scope(actor, Role.USER, "session-1"):
+        result = await plugin._decorate_search_result(
+            1001,
+            "session-1",
+            {
+                "query": "last house",
+                "results": [
+                    {"media_type": "movie", "tmdb_id": 11, "title": "The Last House", "year": 2026},
+                    {"media_type": "movie", "tmdb_id": 22, "title": "House", "year": 2024},
+                ],
+            },
+        )
+    presentation = result["telegram_presentation"]
+    assert presentation["selection_status"] == "request_failed"
+    assert presentation["provider_mutation_performed"] is False
+    assert "nothing was" in presentation["instruction"]
 
 
 async def test_expired_media_card_tap_is_reported_and_requests_nothing(

@@ -55,8 +55,10 @@ Search results retain the provider's public poster URL. The Hermes adapter
 presents up to four matches in one tabbed Telegram card with the best match open
 by default. Each labeled row opens that result and swaps the card's poster and
 caption in place; no album or numbered legend is posted. A movie tab offers a
-direct Request movie action, while a series tab selects the exact TVDB result
-before asking for seasons. Only that selected result is returned to the model,
+direct Request movie action that performs the gateway request from the tap
+itself — the card then shows the recorded outcome and the agent only confirms
+it — while a series tab selects the exact TVDB result before asking for
+seasons. Only that selected result is returned to the model,
 so a typed number or button click cannot become a second bare query. Remote
 poster URLs are never sent through Hermes' local-file `MEDIA:` convention.
 An exact number, unique year, or exact title still selects a result, while

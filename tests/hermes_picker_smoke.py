@@ -119,11 +119,28 @@ async def main() -> None:
     update = SimpleNamespace(callback_query=query)
     await waiting_adapter._handle_callback_query(update, None)
     assert query.media_values["media"].media == "https://image.tmdb.org/house.jpg"
-    query.data = query.media_values["reply_markup"].inline_keyboard[-1][0].callback_data
-    await waiting_adapter._handle_callback_query(update, None)
-    selected = await asyncio.wait_for(pending, timeout=2)
+
+    requests: list[tuple[int, str, dict[str, object]]] = []
+
+    class RequestGateway:
+        async def call(
+            self, actor: Actor, name: str, arguments: dict[str, object]
+        ) -> dict[str, object]:
+            requests.append((actor.user_id, name, dict(arguments)))
+            return {"request_id": 1, "status": "search_started"}
+
+    original_client = plugin._client
+    plugin._client = RequestGateway()  # type: ignore[assignment]
+    try:
+        query.data = query.media_values["reply_markup"].inline_keyboard[-1][0].callback_data
+        await waiting_adapter._handle_callback_query(update, None)
+        selected = await asyncio.wait_for(pending, timeout=2)
+    finally:
+        plugin._client = original_client
+    assert requests == [(actor.user_id, "request_movie", {"tmdb_id": 22})]
     assert selected["results"][0]["tmdb_id"] == 22
-    assert selected["telegram_presentation"]["selection_status"] == "request_selected"
+    assert selected["telegram_presentation"]["selection_status"] == "requested"
+    assert selected["telegram_presentation"]["request_status"] == "search_started"
 
     await _assert_cancel_closes_card(actor, session_key)
     await _assert_new_message_supersedes_card(actor, source, session_key)

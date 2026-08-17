@@ -589,7 +589,11 @@ async def _handle_single_result_callback(query: Any, action: str) -> bool:
             logger.warning("Single-result request_movie failed", exc_info=True)
             note = "Request failed — ask me to try again."
         try:
-            has_photo = getattr(getattr(query, "message", None), "photo", None) is not None
+            # python-telegram-bot returns an empty tuple, not None, for a
+            # message without a photo, so this must test truthiness. An
+            # is-not-None check leaves every text card's button live and lets
+            # a second tap fire a duplicate request.
+            has_photo = bool(getattr(getattr(query, "message", None), "photo", None))
             await close_media_picker(query, caption=f"<i>{note}</i>", has_photo=has_photo)
         except Exception:
             logger.debug("Could not update single-result card", exc_info=True)

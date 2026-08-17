@@ -394,6 +394,44 @@ async def test_single_result_request_callback_fires_movie_request(
     assert "Requesting" in (query.answers[0] or "")
 
 
+async def test_single_result_text_card_closes_as_text_not_caption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A posterless card is a text message; python-telegram-bot reports its
+    ``photo`` as an empty tuple, so closing it must not use edit_message_caption."""
+
+    class RequestGateway:
+        async def call(
+            self, _actor: Actor, _name: str, _arguments: dict[str, Any]
+        ) -> dict[str, Any]:
+            return {"status": "requested"}
+
+    class Query:
+        data = "md:req:m12345"
+        from_user = SimpleNamespace(id=1001)
+        # Exactly what PTB hands back for a message that carries no photo.
+        message = SimpleNamespace(chat_id=1001, photo=())
+
+        def __init__(self) -> None:
+            self.answers: list[str | None] = []
+            self.texts: list[dict[str, Any]] = []
+
+        async def answer(self, text: str | None = None) -> None:
+            self.answers.append(text)
+
+        async def edit_message_text(self, **values: Any) -> None:
+            self.texts.append(values)
+
+        async def edit_message_caption(self, **_values: Any) -> None:
+            raise AssertionError("a posterless card must not be closed as a caption")
+
+    monkeypatch.setattr(plugin, "_client", RequestGateway())
+    query = Query()
+    assert await plugin._handle_media_picker_callback(SimpleNamespace(callback_query=query), None)
+    # The button must be cleared, or a second tap fires a duplicate request.
+    assert query.texts and query.texts[-1]["reply_markup"] is None
+
+
 async def test_single_result_series_callback_asks_for_seasons(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

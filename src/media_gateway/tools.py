@@ -186,7 +186,8 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
     "search_media": {
         "description": (
             "Search Radarr and Sonarr for a movie or series. Results include poster_url "
-            "when available. On Telegram, the media adapter presents up to four results in one "
+            "when available, and in_plex with plex_url when the title is already on Plex. "
+            "On Telegram, the media adapter presents up to four results in one "
             "tabbed poster card; opening a tab swaps its poster in place before the tool returns. "
             "Never use MEDIA for a remote poster URL, repeat the candidate list, or call clarify "
             "for the same results. Pressing Request movie performs the request through the "
@@ -213,7 +214,8 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
             "recommendation research. Use this once for discovery requests instead of calling "
             "search_media separately for every title. Include a year in each title when known. "
             "On Telegram the results are returned for a conversational reply; present each "
-            "title with its availability and offer to add any that are missing. "
+            "title with its availability and offer to add any that are missing. A result marked "
+            "in_plex is already on Plex. "
             "Do not use it for a direct title lookup."
         ),
         "inputSchema": {

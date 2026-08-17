@@ -66,10 +66,18 @@ An exact number, unique year, or exact title still selects a result, while
 other text supersedes the old card and starts a fresh request.
 Recommendation research uses `recommend_media` once with four distinct titles
 instead of opening one ambiguity picker per suggestion. Recommendation turns
-reject model-generated single-title lookups before a card is sent. The one
-four-title card offers Pick, Search more, and Cancel; Search more explicitly
-asks Hermes for a fresh batch that excludes the current titles. Silence never
-advances recommendation research.
+reject model-generated single-title lookups before a card is sent. Recommendations
+answer conversationally and post no card at all: the model states each title with
+its availability and offers to add the missing ones, so a casual suggestion request
+never blocks on a modal prompt. The user asks for any title by name to request it.
+
+A search that resolves to exactly one result posts that poster with a single
+action button underneath. A title already on Plex links straight to its
+`watch.plex.tv` page; one that is not offers Request, which performs the movie
+request from the tap itself and asks a series for its seasons. A title that is
+available but exposes no Plex slug shows no button, because offering Request for
+something already watchable is worse than offering nothing. Results carry `in_plex`
+and `plex_url` so the model can state availability without a second lookup.
 Every title lookup, availability check, and request must refresh `search_media`
 in the current turn; conversation history is never a valid substitute for a
 current provider result. Hermes's built-in Telegram hint takes precedence over

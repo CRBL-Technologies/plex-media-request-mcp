@@ -364,9 +364,7 @@ async def test_single_result_request_callback_fires_movie_request(
     requested: list[int] = []
 
     class RequestGateway:
-        async def call(
-            self, actor: Actor, name: str, arguments: dict[str, Any]
-        ) -> dict[str, Any]:
+        async def call(self, actor: Actor, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
             assert name == "request_movie"
             requested.append(arguments["tmdb_id"])
             return {"status": "requested"}
@@ -1188,9 +1186,14 @@ def test_search_tool_contract_owns_native_telegram_selection() -> None:
     assert "before the tool returns" in text
     assert "call clarify" in text
     assert "Never use MEDIA" in text
+    # The model is told what in_plex means, so it can state availability
+    # instead of guessing from in_radarr/in_sonarr alone.
+    assert "in_plex" in text
+    assert "in_plex" in plugin.PLATFORM_HINT
     recommendation_schema = SHARED_SCHEMAS["recommend_media"]
     recommendation = recommendation_schema["description"]
     assert "conversational reply" in recommendation
+    assert "in_plex" in recommendation
     assert "instead of calling search_media separately" in recommendation
     assert recommendation_schema["inputSchema"]["properties"]["titles"]["minItems"] == 4
 

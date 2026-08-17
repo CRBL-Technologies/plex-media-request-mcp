@@ -485,12 +485,14 @@ def _single_result_markup(
             [[InlineKeyboardButton("▶ Open in Plex", url=plex_url)]]
         )
     media_type = candidate.get("media_type")
-    # Already available, but with no slug to link to. Offering Request here
-    # would invite a redundant request for something the user can already
-    # watch, so the card degrades to no button at all.
-    if candidate.get("downloaded"):
-        return None
     if media_type == "movie":
+        # Already available, but with no slug to link to. Offering Request here
+        # would invite a redundant request for something the user can already
+        # watch, so the card degrades to no button at all. A series is exempt:
+        # its button opens the season picker, which stays useful for a complete
+        # show because it reports what is held and can re-search a season.
+        if candidate.get("downloaded"):
+            return None
         tmdb_id = candidate.get("tmdb_id")
         if isinstance(tmdb_id, int) and tmdb_id > 0:
             return InlineKeyboardMarkup(  # type: ignore[no-any-return]

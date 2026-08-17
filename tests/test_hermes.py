@@ -444,6 +444,14 @@ def test_single_result_button_matches_availability(monkeypatch: pytest.MonkeyPat
     assert series is not None
     assert series.callback_data == "md:req:s411959"
 
+    # Even a fully held series keeps it: the picker still reports what is there
+    # and can re-search a season. The no-button rule is for movies only.
+    held = only_button(
+        {"media_type": "series", "tvdb_id": 411959, "downloaded": True, "seasons_missing": []}
+    )
+    assert held is not None
+    assert held.callback_data == "md:req:s411959"
+
 
 async def test_model_driven_request_retires_the_cards_button(
     monkeypatch: pytest.MonkeyPatch,

@@ -1021,6 +1021,156 @@ def test_untracked_movies_cost_no_library_reads(config: Config) -> None:
     assert [name for name, _ in fake.calls if name == "radarr_get_movie"] == []
 
 
+def test_recommendations_name_the_titles_they_could_not_find(config: Config) -> None:
+    """Four researched titles must not quietly become three suggestions."""
+
+    app = create_app(config)
+    fake = FakeUpstream()
+
+    def lookup(arguments: dict[str, Any]) -> dict[str, Any]:
+        term = str(arguments.get("term", ""))
+        if term.startswith("Some Film That Does Not Exist"):
+            return {"data": []}
+        title, year = term.rsplit(" (", 1)
+        return {
+            "data": [
+                {"tmdbId": abs(hash(term)) % 9999, "title": title, "year": int(year.rstrip(")"))}
+            ]
+        }
+
+    fake.responses["radarr_search_movie"] = lookup
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "recommend_media",
+                "arguments": {
+                    "titles": [
+                        "Arrival (2016)",
+                        "Ex Machina (2014)",
+                        "Some Film That Does Not Exist (2019)",
+                        "Dark City (1998)",
+                    ],
+                    "media_type": "movie",
+                },
+            },
+        )
+
+    result = response.json()["result"]
+    assert len(result["results"]) == 3
+    assert result["unmatched_titles"] == ["Some Film That Does Not Exist (2019)"]
+
+
+def test_series_results_report_which_seasons_are_held(config: Config) -> None:
+    """A search result alone cannot tell a held series from a tracked one."""
+
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["sonarr_search_series"] = {
+        "data": [
+            {
+                "tvdbId": 371980,
+                "title": "Severance",
+                "year": 2022,
+                "id": 4,
+                "seasons": [{"seasonNumber": 1}, {"seasonNumber": 2}],
+            }
+        ]
+    }
+    fake.responses["sonarr_get_series_by_id"] = {
+        "data": {
+            "id": 4,
+            "seasons": [
+                {"seasonNumber": 1, "statistics": {"episodeFileCount": 9, "totalEpisodeCount": 9}},
+                {"seasonNumber": 2, "statistics": {"episodeFileCount": 0, "totalEpisodeCount": 10}},
+            ],
+        }
+    }
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "search_media",
+                "arguments": {"query": "Severance", "media_type": "series", "limit": 1},
+            },
+        )
+
+    result = response.json()["result"]["results"][0]
+    assert result["seasons_complete"] == [1]
+    assert result["seasons_missing"] == [2]
+    # Half a show is not "available".
+    assert result["downloaded"] is False
+
+
+def test_fully_held_series_is_reported_as_downloaded(config: Config) -> None:
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["sonarr_search_series"] = {
+        "data": [
+            {
+                "tvdbId": 371980,
+                "title": "Severance",
+                "year": 2022,
+                "id": 4,
+                "seasons": [{"seasonNumber": 1}],
+            }
+        ]
+    }
+    fake.responses["sonarr_get_series_by_id"] = {
+        "data": {
+            "id": 4,
+            "seasons": [
+                {"seasonNumber": 1, "statistics": {"episodeFileCount": 9, "totalEpisodeCount": 9}}
+            ],
+        }
+    }
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "search_media",
+                "arguments": {"query": "Severance", "media_type": "series", "limit": 1},
+            },
+        )
+
+    result = response.json()["result"]["results"][0]
+    assert result["downloaded"] is True
+    assert result["seasons_missing"] == []
+
+
+def test_untracked_series_costs_no_library_read(config: Config) -> None:
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["sonarr_search_series"] = {
+        "data": [
+            {"tvdbId": 371980, "title": "Severance", "year": 2022, "seasons": [{"seasonNumber": 1}]}
+        ]
+    }
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "search_media",
+                "arguments": {"query": "Severance", "media_type": "series", "limit": 1},
+            },
+        )
+
+    assert "seasons_complete" not in response.json()["result"]["results"][0]
+    assert [name for name, _ in fake.calls if name == "sonarr_get_series_by_id"] == []
+
+
 def test_series_seasons_reports_counts_from_the_tracked_series(config: Config) -> None:
     """The lookup response leaves statistics null, so counts need the series itself."""
 

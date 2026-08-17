@@ -80,10 +80,15 @@ something already watchable is worse than offering nothing. Results carry `in_pl
 and `plex_url` so the model can state availability without a second lookup.
 Every title lookup, availability check, and request must refresh `search_media`
 in the current turn; conversation history is never a valid substitute for a
-current provider result. Hermes's built-in Telegram hint takes precedence over
-plugin metadata, so this rule is also installed as the canonical
-`platform_hints.telegram.append` override. The image startup gate validates the
-effective resolved prompt before the agent starts.
+current provider result. That guidance has exactly one copy,
+`hermes_media.plugin.PLATFORM_HINT`. Hermes prefers its own built-in Telegram
+hint over a plugin's registered one, so the plugin installs its text on Hermes'
+hint resolver at registration instead of mirroring it into
+`platform_hints.telegram.append`; a config file that is not in this repository
+must never be a second source of truth for text that changes with the tools it
+describes. The image startup gate resolves the prompt with no config override at
+all and refuses to start unless the guidance arrived and Hermes' own Telegram
+hint survived beside it.
 
 Upstream 2.3.0 lists `radarr_get_queue` in its full profile but does not register
 the tool. The gateway therefore contains one narrow read-only Radarr queue call;

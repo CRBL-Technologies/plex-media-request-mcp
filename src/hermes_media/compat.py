@@ -125,6 +125,46 @@ def install_tool_visibility(
     tools_config._get_platform_tools = visible
 
 
+def install_platform_hint(*, platform: str, platform_hint: str) -> None:
+    """Append the CRBL guidance to the resolved prompt for one platform.
+
+    Hermes resolves a platform's default hint from its own built-in
+    ``PLATFORM_HINTS`` table and only consults a plugin's registered
+    ``platform_hint`` for platforms it does not know, so the value CRBL passes
+    to ``register_platform`` never reaches a Telegram prompt. The only other
+    door is ``config.yaml``'s ``platform_hints`` override, which would make an
+    ungoverned file on the host a second source of truth for text that has to
+    change in lockstep with the tools it describes.
+
+    Wrapping the resolver keeps that single source in code. The guidance is
+    appended to whatever Hermes resolved, so a config override still applies
+    and is not silently discarded.
+    """
+
+    try:
+        from agent import system_prompt  # type: ignore[import-not-found]
+    except ImportError:
+        return
+    original = getattr(system_prompt, "_resolve_platform_hint", None)
+    if not callable(original) or getattr(original, "__crbl_media__", False):
+        return
+    target = platform.lower().strip()
+
+    def resolved(agent: Any, platform_key: str, default_hint: str, *args: Any, **kw: Any) -> str:
+        effective = original(agent, platform_key, default_hint, *args, **kw)
+        if str(platform_key).lower().strip() != target:
+            return str(effective)
+        text = str(effective)
+        # Idempotent by content as well as by patch flag: a config override
+        # that still carries the guidance must not produce it twice.
+        if platform_hint in text:
+            return text
+        return f"{text}\n\n{platform_hint}".strip() if text else platform_hint
+
+    resolved.__crbl_media__ = True  # type: ignore[attr-defined]
+    system_prompt._resolve_platform_hint = resolved
+
+
 def interrupt_running_turn(adapter: object, session_key: str, reason: str) -> bool:
     """Interrupt the exact pinned-Hermes turn that owns an expired picker.
 
@@ -389,9 +429,7 @@ async def send_single_result_card(
     return SimpleNamespace(success=True, message_id=str(message.message_id))
 
 
-def verify_pinned_runtime(
-    *, manager: object, config: Mapping[str, Any], expected_tools: set[str], platform_hint: str
-) -> None:
+def verify_pinned_runtime(*, manager: object, expected_tools: set[str], platform_hint: str) -> None:
     """Fail closed when any private pinned-Hermes integration contract moves."""
 
     from agent.prompt_builder import PLATFORM_HINTS  # type: ignore[import-not-found]
@@ -444,12 +482,21 @@ def verify_pinned_runtime(
         raise RuntimeError("CRBL role-aware tool resolver is not active")
     if TOOLSETS.get("search", {}).get("tools") != ["web_search"]:
         raise RuntimeError("Hermes search-only toolset contract changed")
-    hints = config.get("platform_hints")
-    telegram = hints.get("telegram") if isinstance(hints, Mapping) else None
+    if not getattr(_resolve_platform_hint, "__crbl_media__", False):
+        raise RuntimeError("CRBL platform-hint installer is not active")
+    if "telegram" not in PLATFORM_HINTS:
+        raise RuntimeError("Hermes no longer resolves a built-in Telegram hint")
+    # Resolve with no config override at all: the guidance must reach the
+    # assembled prompt from the code constant alone, or the single source of
+    # truth is not actually installed.
     effective = _resolve_platform_hint(
-        SimpleNamespace(_platform_hint_overrides={"telegram": telegram}),
+        SimpleNamespace(_platform_hint_overrides={}),
         "telegram",
         PLATFORM_HINTS["telegram"],
     )
     if platform_hint not in effective:
         raise RuntimeError("CRBL media guidance is absent from the effective Telegram prompt")
+    # The built-in hint must survive alongside it; replacing Hermes' own
+    # Telegram formatting guidance would break MarkdownV2 output.
+    if PLATFORM_HINTS["telegram"] not in effective:
+        raise RuntimeError("CRBL guidance replaced rather than extended the Telegram hint")

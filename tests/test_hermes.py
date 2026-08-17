@@ -1248,11 +1248,45 @@ def test_web_search_guardrail_uses_canonical_hermes_config() -> None:
         )
 
 
-def test_platform_hint_requires_effective_telegram_override() -> None:
-    plugin.validate_platform_hint(
-        {"platform_hints": {"telegram": {"append": plugin.PLATFORM_HINT}}}
-    )
-    with pytest.raises(RuntimeError, match=r"platform_hints\.telegram\.append"):
-        plugin.validate_platform_hint({})
-    with pytest.raises(RuntimeError, match=r"platform_hints\.telegram\.append"):
-        plugin.validate_platform_hint({"platform_hints": {"telegram": plugin.PLATFORM_HINT}})
+def test_platform_hint_is_installed_from_code_without_any_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PLATFORM_HINT is the only copy, so it must reach the prompt unaided."""
+
+    from hermes_media.compat import install_platform_hint
+
+    def native(agent: Any, platform_key: str, default_hint: str) -> str:
+        override = getattr(agent, "_platform_hint_overrides", {}).get(platform_key)
+        return f"{default_hint}\n\n{override}".strip() if override else default_hint
+
+    system_prompt = ModuleType("agent.system_prompt")
+    system_prompt._resolve_platform_hint = native  # type: ignore[attr-defined]
+    agent_pkg = ModuleType("agent")
+    agent_pkg.system_prompt = system_prompt  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "agent", agent_pkg)
+    monkeypatch.setitem(sys.modules, "agent.system_prompt", system_prompt)
+
+    install_platform_hint(platform="telegram", platform_hint=plugin.PLATFORM_HINT)
+    resolve = system_prompt._resolve_platform_hint
+    assert getattr(resolve, "__crbl_media__", False) is True
+
+    # No config override anywhere: the guidance still lands, and Hermes' own
+    # Telegram formatting hint survives next to it.
+    empty = SimpleNamespace(_platform_hint_overrides={})
+    effective = resolve(empty, "telegram", "BUILTIN TELEGRAM HINT")
+    assert plugin.PLATFORM_HINT in effective
+    assert "BUILTIN TELEGRAM HINT" in effective
+
+    # Other platforms are untouched.
+    assert resolve(empty, "discord", "DISCORD HINT") == "DISCORD HINT"
+
+    # A config override that already carries the guidance must not double it.
+    duplicated = SimpleNamespace(_platform_hint_overrides={"telegram": plugin.PLATFORM_HINT})
+    assert resolve(duplicated, "telegram", "BUILTIN").count(plugin.PLATFORM_HINT) == 1
+
+    # Installing twice must not append twice.
+    install_platform_hint(platform="telegram", platform_hint=plugin.PLATFORM_HINT)
+    assert system_prompt._resolve_platform_hint is resolve
+
+    # The hint is no longer mirrored into any config file.
+    assert not hasattr(plugin, "validate_platform_hint")

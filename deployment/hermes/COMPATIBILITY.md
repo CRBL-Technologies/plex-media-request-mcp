@@ -19,13 +19,22 @@ Before changing the pinned digest:
    this contract at container start, and `native_adapter()` returns the bare
    fallback when the native class is missing so the registration check can still
    detect it by identity.
-5. Verify a tab switch edits one card's poster in place, the active row changes
+5. Verify `agent.system_prompt._resolve_platform_hint` still exists and is still
+   the single site that resolves a platform's prompt hint. `install_platform_hint`
+   wraps it so `PLATFORM_HINT` stays the only copy of the CRBL guidance instead
+   of being mirrored into `platform_hints.telegram.append`. If Hermes stops
+   preferring its built-in `PLATFORM_HINTS["telegram"]` over a plugin's
+   registered hint, the wrapper can be dropped in favour of the value already
+   passed to `register_platform`. `verify_pinned_runtime` fails closed when the
+   wrapper is inactive or when the guidance no longer reaches a prompt resolved
+   with no config override.
+6. Verify a tab switch edits one card's poster in place, the active row changes
    from `○` to `●`, and Request movie performs the gateway request from the
    tap itself without posting callback text into the chat.
-6. Verify an unanswered media picker interrupts its exact active Hermes session
+7. Verify an unanswered media picker interrupts its exact active Hermes session
    with no queued interrupt message. The interrupted turn must end without a
    follow-up API call or another unsolicited search card.
-7. Run Ruff, strict mypy, the complete pytest suite, both hash-locked dependency
+8. Run Ruff, strict mypy, the complete pytest suite, both hash-locked dependency
    audits, Compose validation, and the gateway container migration smoke.
-8. Publish immutable images, deploy with a verified database backup, and check
+9. Publish immutable images, deploy with a verified database backup, and check
    that Plex and unrelated agent containers retain their IDs.

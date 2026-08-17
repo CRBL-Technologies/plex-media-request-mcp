@@ -26,6 +26,7 @@ from .compat import (
     answer_media_callback,
     close_media_picker,
     edit_media_picker,
+    install_platform_hint,
     install_tool_visibility,
     interrupt_running_turn,
     native_adapter,
@@ -922,6 +923,10 @@ def _visibility_patch() -> None:
     )
 
 
+def _platform_hint_patch() -> None:
+    install_platform_hint(platform=PLATFORM, platform_hint=PLATFORM_HINT)
+
+
 def validate_search_guardrail(config: Mapping[str, Any]) -> None:
     """Require the native agent and startup verifier to share one search cap."""
 
@@ -932,18 +937,6 @@ def validate_search_guardrail(config: Mapping[str, Any]) -> None:
         raise RuntimeError(
             "Hermes config must set "
             f"tool_loop_guardrails.loop_caps.max_web_searches to {WEB_SEARCH_CAP}"
-        )
-
-
-def validate_platform_hint(config: Mapping[str, Any]) -> None:
-    """Require the CRBL guidance in Hermes' effective Telegram override."""
-
-    hints = config.get("platform_hints")
-    telegram = hints.get(PLATFORM) if isinstance(hints, Mapping) else None
-    append = telegram.get("append") if isinstance(telegram, Mapping) else None
-    if append != PLATFORM_HINT:
-        raise RuntimeError(
-            "Hermes config must append the CRBL media guidance at platform_hints.telegram.append"
         )
 
 
@@ -1004,6 +997,10 @@ def _configured(config: object) -> bool:
 
 def register(ctx: object) -> None:
     _visibility_patch()
+    # PLATFORM_HINT is the only copy of this text. Hermes prefers its built-in
+    # Telegram hint over the value registered below, so the guidance is
+    # installed on the resolver instead of being mirrored into config.yaml.
+    _platform_hint_patch()
     register_platform = getattr(ctx, "register_platform", None)
     register_tool = getattr(ctx, "register_tool", None)
     if not callable(register_platform) or not callable(register_tool):

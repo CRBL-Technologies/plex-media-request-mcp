@@ -42,18 +42,19 @@ PY
 from hermes_cli.config import load_config_readonly
 from hermes_cli.plugins import PluginManager
 from hermes_media.compat import verify_pinned_runtime
-from hermes_media.plugin import PLATFORM_HINT, validate_platform_hint, validate_search_guardrail
+from hermes_media.plugin import PLATFORM_HINT, validate_search_guardrail
 from media_gateway.constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
 
 manager = PluginManager()
 manager.discover_and_load()
 expected = set(SHARED_TOOLS) | ADMIN_UPSTREAM_TOOLS
-config = load_config_readonly()
-validate_search_guardrail(config)
-validate_platform_hint(config)
+# max_web_searches is a native Hermes setting with no copy in this repo, so it
+# is still read from config. The platform hint is not: it lives only in
+# PLATFORM_HINT and is installed by the plugin, and verify_pinned_runtime
+# confirms it reached the assembled prompt.
+validate_search_guardrail(load_config_readonly())
 verify_pinned_runtime(
     manager=manager,
-    config=config,
     expected_tools=expected,
     platform_hint=PLATFORM_HINT,
 )

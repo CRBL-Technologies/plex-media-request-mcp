@@ -66,16 +66,38 @@ An exact number, unique year, or exact title still selects a result, while
 other text supersedes the old card and starts a fresh request.
 Recommendation research uses `recommend_media` once with four distinct titles
 instead of opening one ambiguity picker per suggestion. Recommendation turns
-reject model-generated single-title lookups before a card is sent. The one
-four-title card offers Pick, Search more, and Cancel; Search more explicitly
-asks Hermes for a fresh batch that excludes the current titles. Silence never
-advances recommendation research.
+reject model-generated single-title lookups before a card is sent. Recommendations
+answer conversationally and post no card at all: the model states each title with
+its availability and offers to add the missing ones, so a casual suggestion request
+never blocks on a modal prompt. The user asks for any title by name to request it.
+
+A search that resolves to exactly one result posts that poster with a single
+action button underneath. A downloaded movie links to its `watch.plex.tv` page,
+which is the only link form the Plex apps open natively; one that is not
+downloaded offers Request, which performs the request from the tap itself. A
+downloaded movie with no Plex slug shows no button, because offering Request for
+something already watchable is worse than offering nothing.
+
+A series always offers Request, which opens a season picker instead of
+requesting anything. The picker reports each season's episode counts from
+`series_seasons`, because a Sonarr search result carries no per-season
+statistics. A complete season renders as ticked and inert — Telegram has no
+disabled button, so tapping one only says it is already complete rather than
+re-searching it. Missing seasons start unticked, `＋ All missing` selects them
+all, and specials appear last as season 0. The picker holds the TVDB id and the
+tick state itself, so a tap needs no model turn, and it performs the request
+once and then retires.
 Every title lookup, availability check, and request must refresh `search_media`
 in the current turn; conversation history is never a valid substitute for a
-current provider result. Hermes's built-in Telegram hint takes precedence over
-plugin metadata, so this rule is also installed as the canonical
-`platform_hints.telegram.append` override. The image startup gate validates the
-effective resolved prompt before the agent starts.
+current provider result. That guidance has exactly one copy,
+`hermes_media.plugin.PLATFORM_HINT`. Hermes prefers its own built-in Telegram
+hint over a plugin's registered one, so the plugin installs its text on Hermes'
+hint resolver at registration instead of mirroring it into
+`platform_hints.telegram.append`; a config file that is not in this repository
+must never be a second source of truth for text that changes with the tools it
+describes. The image startup gate resolves the prompt with no config override at
+all and refuses to start unless the guidance arrived and Hermes' own Telegram
+hint survived beside it.
 
 Upstream 2.3.0 lists `radarr_get_queue` in its full profile but does not register
 the tool. The gateway therefore contains one narrow read-only Radarr queue call;

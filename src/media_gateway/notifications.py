@@ -5,15 +5,14 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
-import re
 import time
 from collections import defaultdict
 from contextlib import suppress
 from typing import Any
-from urllib.parse import quote, urlsplit
 
 import httpx
 
+from . import plex_watch
 from .config import Config
 from .policy import Policy
 from .secrets import read_dotenv
@@ -22,8 +21,6 @@ from .types import Actor
 from .upstream import Upstream
 
 LOGGER = logging.getLogger(__name__)
-PLEX_METADATA_MATCH_URL = "https://metadata.provider.plex.tv/library/metadata/matches"
-PLEX_SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
 def _positive(value: object) -> int | None:
@@ -32,6 +29,25 @@ def _positive(value: object) -> int | None:
     if isinstance(value, str) and value.isdigit() and int(value) > 0:
         return int(value)
     return None
+
+
+def _season_index(value: object) -> int | None:
+    """A season number, where 0 is the specials season rather than absent.
+
+    Episode numbers stay strictly positive; only seasons reach zero.
+    """
+
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+def _season_label(season: object) -> str:
+    if season is None:
+        return ""
+    return "Specials" if season == 0 else f"Season {season}"
 
 
 def _external_id(metadata: dict[str, Any], provider: str) -> int | None:
@@ -56,48 +72,6 @@ def _guide_id(value: object, provider: str) -> int | None:
     if not value.startswith(prefix):
         return None
     return _positive(value.removeprefix(prefix).split("?", 1)[0])
-
-
-def _valid_slug(value: object) -> str | None:
-    if not isinstance(value, str) or len(value) > 200 or PLEX_SLUG.fullmatch(value) is None:
-        return None
-    return value
-
-
-def _metadata_slug(metadata: dict[str, Any], kind: str) -> str | None:
-    key = {"movie": "slug", "show": "slug", "season": "parentSlug", "episode": "grandparentSlug"}[
-        kind
-    ]
-    return _valid_slug(metadata.get(key))
-
-
-def _watch_slug(value: object) -> str | None:
-    if not isinstance(value, str):
-        return None
-    parsed = urlsplit(value)
-    parts = [part for part in parsed.path.split("/") if part]
-    if parsed.scheme != "https" or parsed.hostname != "watch.plex.tv" or len(parts) < 2:
-        return None
-    if parts[0] not in {"movie", "show"}:
-        return None
-    return _valid_slug(parts[1])
-
-
-def _watch_url(
-    *,
-    media_type: str,
-    slug: str,
-    season_number: object = None,
-    episode_number: object = None,
-) -> str:
-    if media_type == "movie":
-        return f"https://watch.plex.tv/movie/{slug}"
-    result = f"https://watch.plex.tv/show/{slug}"
-    if isinstance(season_number, int) and season_number > 0:
-        result += f"/season/{season_number}"
-        if isinstance(episode_number, int) and episode_number > 0:
-            result += f"/episode/{episode_number}"
-    return result
 
 
 class Notifications:
@@ -139,7 +113,7 @@ class Notifications:
             show_title = (
                 str(metadata.get("parentTitle"))[:300] if metadata.get("parentTitle") else None
             )
-            season = _positive(metadata.get("index"))
+            season = _season_index(metadata.get("index"))
             episode = None
         else:
             external_id = _guide_id(metadata.get("grandparentGuid"), "tvdb")
@@ -150,22 +124,23 @@ class Notifications:
                 if metadata.get("grandparentTitle")
                 else None
             )
-            season = _positive(metadata.get("parentIndex"))
+            season = _season_index(metadata.get("parentIndex"))
             episode = _positive(metadata.get("index"))
         title = str(metadata.get("title") or "Untitled")[:300]
-        slug = _metadata_slug(metadata, kind)
+        # A watch.plex.tv link opens the Plex app; the server route below opens
+        # the browser client instead, so it is only for a title with no slug.
+        # See plex_watch's docstring before changing this preference.
+        slug = plex_watch.metadata_slug(metadata, kind)
         if slug is not None:
-            url = _watch_url(
+            url = plex_watch.watch_url(
                 media_type="movie" if kind == "movie" else "series",
                 slug=slug,
                 season_number=season,
                 episode_number=episode,
             )
         else:
-            encoded_key = quote(f"/library/metadata/{rating_key}", safe="")
-            url = (
-                "https://app.plex.tv/desktop/#!/server/"
-                f"{quote(self.config.plex_machine_id, safe='')}/details?key={encoded_key}"
+            url = plex_watch.server_details_url(
+                machine_id=self.config.plex_machine_id, rating_key=rating_key
             )
         return self.store.add_media_event(
             event_key=f"{kind}:{rating_key}",
@@ -310,16 +285,22 @@ class Notifications:
                     # the notification even though Plex omits it from the
                     # top-level webhook payload.
                     event["season_number"] = next(iter(requested))
-            slug = _watch_slug(event.get("plex_url"))
+            # Upgrade a stored server-route link once the id is known, because
+            # only a watch.plex.tv link opens the Plex app.
+            slug = plex_watch.watch_slug(event.get("plex_url"))
             external_id = event.get("external_id")
             media_type = str(event.get("media_type") or "")
             if slug is None and isinstance(external_id, int) and media_type in {"movie", "series"}:
                 key = media_type, external_id
                 if key not in resolved_slugs:
-                    resolved_slugs[key] = await self._lookup_plex_slug(media_type, external_id)
+                    resolved_slugs[key] = await plex_watch.lookup_slug(
+                        token_file=self.config.upstream_token_file,
+                        media_type=media_type,
+                        external_id=external_id,
+                    )
                 slug = resolved_slugs[key]
             if slug is not None and media_type in {"movie", "series"}:
-                plex_url = _watch_url(
+                plex_url = plex_watch.watch_url(
                     media_type=media_type,
                     slug=slug,
                     season_number=event.get("season_number"),
@@ -330,37 +311,6 @@ class Notifications:
                     self.store.set_media_plex_url(str(event["event_key"]), plex_url)
             ready.append(event)
         return ready
-
-    async def _lookup_plex_slug(self, media_type: str, external_id: int) -> str | None:
-        try:
-            token = read_dotenv(self.config.upstream_token_file, {"PLEX_API_KEY"}).get(
-                "PLEX_API_KEY"
-            )
-        except (OSError, ValueError):
-            return None
-        if not token:
-            return None
-        provider = "tmdb" if media_type == "movie" else "tvdb"
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                response = await client.get(
-                    PLEX_METADATA_MATCH_URL,
-                    params={
-                        "guid": f"{provider}://{external_id}",
-                        "type": 1 if media_type == "movie" else 2,
-                    },
-                    headers={"X-Plex-Token": token, "Accept": "application/json"},
-                )
-        except httpx.HTTPError:
-            return None
-        if response.is_error:
-            return None
-        try:
-            value = response.json()
-        except ValueError:
-            return None
-        candidates = self._metadata_objects(value) if isinstance(value, dict) else []
-        return _valid_slug(candidates[0].get("slug")) if candidates else None
 
     async def _deliver_batch(self, batch: list[dict[str, Any]]) -> None:
         first = batch[0]
@@ -408,10 +358,10 @@ class Notifications:
         season = first["season_number"]
         episodes = [item for item in batch if item["episode_number"] is not None]
         if not episodes:
-            label = f"Season {season}" if season is not None else "New series"
+            label = _season_label(season) or "New series"
             return f"📺 <b>Available in Plex</b>\n{show} · {label}"
         if len(batch) > 1:
-            label = f"Season {season}" if season is not None else "New episodes"
+            label = _season_label(season) or "New episodes"
             return f"📺 <b>Available in Plex</b>\n{show} · {label} ({len(episodes)} episodes)"
         episode = first["episode_number"]
         marker = ""

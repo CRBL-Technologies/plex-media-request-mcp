@@ -7,6 +7,7 @@ import re
 from typing import Any
 from urllib.parse import urlsplit
 
+from . import plex_watch
 from .config import Config
 from .constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
 from .store import Store
@@ -35,6 +36,12 @@ def _exact(value: object, allowed: set[str]) -> dict[str, Any]:
 def _positive(value: object, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ToolError(f"{name} must be a positive integer")
+    return value
+
+
+def _season_argument(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > 1000:
+        raise ToolError("season must be a non-negative integer")
     return value
 
 
@@ -132,6 +139,8 @@ def _poster_url(item: dict[str, Any]) -> str | None:
 
 
 def _season_numbers(item: dict[str, Any]) -> list[int]:
+    """Every season Sonarr knows, including 0 for specials."""
+
     raw = item.get("seasons")
     if not isinstance(raw, list):
         return []
@@ -140,9 +149,45 @@ def _season_numbers(item: dict[str, Any]) -> list[int]:
         if not isinstance(season, dict):
             continue
         number = _first(season, "seasonNumber", "season_number")
-        if isinstance(number, int) and number > 0:
+        if isinstance(number, int) and not isinstance(number, bool) and number >= 0:
             result.append(number)
     return sorted(set(result))
+
+
+def _season_states(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """Per-season episode counts, so a caller can tell complete from missing.
+
+    ``monitored`` alone is not availability: a season can be monitored with no
+    files at all, which means it was asked for and is still searching.
+    """
+
+    raw = item.get("seasons")
+    if not isinstance(raw, list):
+        return []
+    states: list[dict[str, Any]] = []
+    for season in raw:
+        if not isinstance(season, dict):
+            continue
+        number = _first(season, "seasonNumber", "season_number")
+        if not isinstance(number, int) or isinstance(number, bool) or number < 0:
+            continue
+        stats = season.get("statistics")
+        stats = stats if isinstance(stats, dict) else {}
+        files = stats.get("episodeFileCount")
+        total = _first(stats, "totalEpisodeCount", "episodeCount")
+        files = files if isinstance(files, int) and files >= 0 else 0
+        total = total if isinstance(total, int) and total >= 0 else 0
+        states.append(
+            {
+                "number": number,
+                "files": files,
+                "episodes": total,
+                "monitored": season.get("monitored") is True,
+                "complete": total > 0 and files >= total,
+                "partial": 0 < files < total,
+            }
+        )
+    return sorted(states, key=lambda state: int(state["number"]))
 
 
 def _movie_candidate(item: dict[str, Any]) -> dict[str, Any] | None:
@@ -186,7 +231,9 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
     "search_media": {
         "description": (
             "Search Radarr and Sonarr for a movie or series. Results include poster_url "
-            "when available. On Telegram, the media adapter presents up to four results in one "
+            "when available, and plex_url on a lone downloaded movie. Availability comes from "
+            "downloaded for a movie and from the season report for a series. "
+            "On Telegram, the media adapter presents up to four results in one "
             "tabbed poster card; opening a tab swaps its poster in place before the tool returns. "
             "Never use MEDIA for a remote poster URL, repeat the candidate list, or call clarify "
             "for the same results. Pressing Request movie performs the request through the "
@@ -212,8 +259,9 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
             "Present one exact Radarr/Sonarr match for each of exactly 4 distinct titles after "
             "recommendation research. Use this once for discovery requests instead of calling "
             "search_media separately for every title. Include a year in each title when known. "
-            "On Telegram this creates one recommendation card with Pick, Search more, and "
-            "Cancel actions. Do not use it for a direct title lookup."
+            "On Telegram the results are returned for a conversational reply; present each "
+            "title with its availability and offer to add any that are missing. "
+            "Do not use it for a direct title lookup."
         ),
         "inputSchema": {
             "type": "object",
@@ -241,14 +289,16 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
         },
     },
     "request_series": {
-        "description": "Request one or more seasons of a series by TVDB ID.",
+        "description": (
+            "Request one or more seasons of a series by TVDB ID. Season 0 is the specials season."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "tvdb_id": {"type": "integer", "minimum": 1},
                 "seasons": {
                     "type": "array",
-                    "items": {"type": "integer", "minimum": 1},
+                    "items": {"type": "integer", "minimum": 0},
                     "minItems": 1,
                     "maxItems": 50,
                     "uniqueItems": True,
@@ -256,6 +306,20 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
                 "anime": {"type": "boolean"},
             },
             "required": ["tvdb_id", "seasons"],
+            "additionalProperties": False,
+        },
+    },
+    "series_seasons": {
+        "description": (
+            "Report every season of a series with how many episodes Sonarr holds, so a "
+            "reply can say which seasons are complete, partial, or missing. Season 0 is "
+            "the specials season. Use this instead of guessing availability from a search "
+            "result, which carries no per-season counts."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"tvdb_id": {"type": "integer", "minimum": 1}},
+            "required": ["tvdb_id"],
             "additionalProperties": False,
         },
     },
@@ -372,6 +436,39 @@ class ToolService:
         results = _interleave(groups, limit)
         return results, errors
 
+    async def _enrich_plex_urls(self, results: list[dict[str, Any]]) -> None:
+        """Attach ``plex_url`` to a lone downloaded movie, at a cost of one call.
+
+        Only the single-result card renders a watch link, so a multi-result set
+        and a recommendation batch resolve nothing: enriching them would spend
+        one request per title on a field no caller reads. Radarr reports
+        availability, so no Plex library traversal is involved -- the lookup
+        turns a TMDB id into a slug and nothing more.
+
+        Series are excluded on purpose. Their card opens the season picker,
+        which reports per-season availability from Sonarr instead.
+        """
+
+        if len(results) != 1:
+            return
+        candidate = results[0]
+        if candidate.get("media_type") != "movie" or not candidate.get("downloaded"):
+            return
+        tmdb_id = candidate.get("tmdb_id")
+        if not isinstance(tmdb_id, int) or tmdb_id <= 0:
+            return
+        slug = await plex_watch.lookup_slug(
+            token_file=self.config.upstream_token_file,
+            media_type="movie",
+            external_id=tmdb_id,
+        )
+        if slug is None:
+            return
+        # Deliberately the watch.plex.tv form: it opens the Plex app, where the
+        # server appears as a source. A link naming this server's item opens the
+        # browser client instead. See plex_watch's docstring.
+        candidate["plex_url"] = plex_watch.watch_url(media_type="movie", slug=slug)
+
     async def _search_media(self, arguments: object, _actor: Actor, _role: Role) -> dict[str, Any]:
         args = _exact(arguments, {"query", "media_type", "limit"})
         query = _short_text(args.get("query"), "query", minimum=2)
@@ -384,6 +481,7 @@ class ToolService:
         results, errors = await self._search_candidates(query, media_type, limit)
         if not results and errors:
             raise UpstreamError("media search is temporarily unavailable")
+        await self._enrich_plex_urls(results)
         return {"query": query, "results": results, "unavailable_sources": errors}
 
     @staticmethod
@@ -441,6 +539,7 @@ class ToolService:
                 results.append(choice)
         if not results and errors:
             raise UpstreamError("media recommendation lookup is temporarily unavailable")
+        await self._enrich_plex_urls(results)
         return {
             "query": "recommendations",
             "requested_titles": titles,
@@ -530,6 +629,15 @@ class ToolService:
         return "requested"
 
     async def _movie_in_plex(self, tmdb_id: int, title: str) -> bool:
+        """Answer whether *this* library already holds the movie.
+
+        This is the expensive question -- a library search plus one metadata
+        call per candidate -- so it is asked only where a request needs to know
+        whether the file is already watchable. A watch link is a different
+        question and uses ``plex_watch.lookup_slug``, which costs one request
+        and must never be answered by walking the library.
+        """
+
         raw = await self.upstream.call(
             "plex_search", {"query": title, "limit": 20, "searchTypes": ["movies"]}
         )
@@ -563,13 +671,50 @@ class ToolService:
                         return True
         return False
 
+    async def _series_seasons(
+        self, arguments: object, _actor: Actor, _role: Role
+    ) -> dict[str, Any]:
+        args = _exact(arguments, {"tvdb_id"})
+        tvdb_id = _positive(args.get("tvdb_id"), "tvdb_id")
+        lookup = await self.upstream.call(
+            "sonarr_search_series", {"term": f"tvdb:{tvdb_id}", "limit": 10}
+        )
+        source = next(
+            (item for item in _rows(lookup) if _first(item, "tvdbId", "tvdb_id") == tvdb_id),
+            None,
+        )
+        if source is None:
+            raise ToolError("TVDB ID was not found by Sonarr")
+        candidate = _series_candidate(source)
+        if candidate is None:
+            raise ToolError("Sonarr returned incomplete series metadata")
+        sonarr_id = source.get("id")
+        record = source
+        if isinstance(sonarr_id, int) and sonarr_id > 0:
+            # The lookup response carries season numbers but leaves statistics
+            # null, so episode counts need the tracked series itself.
+            current = _record(
+                await self.upstream.call("sonarr_get_series_by_id", {"id": sonarr_id})
+            )
+            if current is not None:
+                record = current
+        return {
+            "tvdb_id": tvdb_id,
+            "title": candidate["title"],
+            "year": candidate["year"],
+            "in_sonarr": isinstance(sonarr_id, int) and sonarr_id > 0,
+            "seasons": _season_states(record),
+        }
+
     async def _request_series(self, arguments: object, actor: Actor, _role: Role) -> dict[str, Any]:
         args = _exact(arguments, {"tvdb_id", "seasons", "anime"})
         tvdb_id = _positive(args.get("tvdb_id"), "tvdb_id")
         raw_seasons = args.get("seasons")
         if not isinstance(raw_seasons, list) or not raw_seasons or len(raw_seasons) > 50:
             raise ToolError("seasons must be a non-empty array")
-        seasons = tuple(sorted({_positive(item, "season") for item in raw_seasons}))
+        # Season 0 is the specials season, so a season number is non-negative
+        # rather than positive.
+        seasons = tuple(sorted({_season_argument(item) for item in raw_seasons}))
         anime = args.get("anime", False)
         if not isinstance(anime, bool):
             raise ToolError("anime must be a boolean")

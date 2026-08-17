@@ -14,6 +14,7 @@ import time
 import uuid
 from collections.abc import Callable, Coroutine, Mapping
 from concurrent.futures import Future
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
@@ -24,13 +25,18 @@ from media_gateway.types import Actor, Role
 from .client import GatewayClient, GatewayError
 from .compat import (
     answer_media_callback,
+    clear_card_buttons,
     close_media_picker,
     edit_media_picker,
+    edit_season_selection,
+    install_platform_hint,
     install_tool_visibility,
     interrupt_running_turn,
     native_adapter,
     read_media_callback,
     send_media_picker,
+    send_season_picker,
+    send_single_result_card,
 )
 from .trusted import (
     actor_from_event,
@@ -57,7 +63,6 @@ MEDIA_PICKER_TIMEOUT_SECONDS = 120.0
 MEDIA_PICKER_SUPERSEDED = "__crbl_media_picker_superseded__"
 MEDIA_PICKER_EXPIRED = "__crbl_media_picker_expired__"
 MEDIA_PICKER_CANCELLED = "__crbl_media_picker_cancelled__"
-MEDIA_PICKER_MORE = "__crbl_media_picker_more__"
 MEDIA_PICKER_REQUESTED = "__crbl_media_picker_requested__:"
 MEDIA_PICKER_REQUEST_FAILED = "__crbl_media_picker_request_failed__:"
 PLATFORM_HINT = (
@@ -68,14 +73,21 @@ PLATFORM_HINT = (
     "ambiguous-result selection before it returns. Never repeat its candidate list or "
     "call clarify for those same candidates. For a recommendation request, use web_search to "
     "choose exactly 4 distinct titles, then call recommend_media exactly once with those exact "
-    "titles and years; never call search_media separately for each recommendation. Discovery "
+    "titles and years; never call search_media separately for each recommendation. "
+    "recommend_media returns results for a conversational reply; present each title with its "
+    "availability and offer to add any that are missing. A downloaded title is already "
+    "available: say so plainly and never offer to add it. Discovery "
     "turns reject model-generated single-title searches before a card is sent. If the user's "
     "current message explicitly says "
     "to add or request media, continue to request the selected result, whether it was chosen by "
     "button or by typed reply. The Telegram media card's Request movie action performs the "
     "request itself before the tool returns; when the result reports the request already "
-    "happened, confirm the outcome and never call request_movie for it again. Choosing a series "
-    "identifies it but still requires the desired seasons. A title-only lookup remains read-only "
+    "happened, confirm the outcome and never call request_movie for it again. A single series "
+    "result offers a Request button that opens a season picker showing which seasons are "
+    "complete; the picker performs the request itself, so never call request_series for a "
+    "selection made there. To answer a season question in text, call series_seasons rather than "
+    "inferring availability from a search result, which carries no per-season counts. Season 0 "
+    "is the specials season. A title-only lookup remains read-only "
     "until the user presses an action or asks for the request in the same message."
 )
 logger = logging.getLogger(__name__)
@@ -104,7 +116,145 @@ class _PendingMediaPicker:
     actor_chat_id: int = 0
     active_index: int = 0
     has_photo: bool = False
-    recommendation_mode: bool = False
+
+
+@dataclass(frozen=True)
+class _SingleResultCard:
+    """One delivered single-result card that still shows a Request button."""
+
+    chat_id: int
+    message_id: int
+    expires_at: float
+
+
+_single_card_lock = threading.Lock()
+_single_cards: dict[tuple[int, str, int], _SingleResultCard] = {}
+SINGLE_CARD_TTL_SECONDS = 3600
+
+
+def _remember_single_card(
+    *, chat_id: int, media_type: str, external_id: int, message_id: int
+) -> None:
+    now = time.monotonic()
+    with _single_card_lock:
+        for key in [k for k, v in _single_cards.items() if v.expires_at <= now]:
+            _single_cards.pop(key, None)
+        _single_cards[chat_id, media_type, external_id] = _SingleResultCard(
+            chat_id=chat_id,
+            message_id=message_id,
+            expires_at=now + SINGLE_CARD_TTL_SECONDS,
+        )
+
+
+def _take_single_card(
+    *, chat_id: int, media_type: str, external_id: int
+) -> _SingleResultCard | None:
+    with _single_card_lock:
+        card = _single_cards.pop((chat_id, media_type, external_id), None)
+    return card if card is not None and card.expires_at > time.monotonic() else None
+
+
+async def _retire_single_card(*, chat_id: int, media_type: str, external_id: int) -> None:
+    """Remove a card's button once the request happened by another route.
+
+    The model is told to request outright when the user's message says to, so a
+    card delivered in that same turn would otherwise keep a live button whose
+    tap runs the provider operation a second time.
+    """
+
+    card = _take_single_card(chat_id=chat_id, media_type=media_type, external_id=external_id)
+    if card is None:
+        return
+    adapter = _active_adapter
+    if adapter is None:
+        return
+
+    async def clear() -> None:
+        await clear_card_buttons(adapter, chat_id=card.chat_id, message_id=card.message_id)
+
+    try:
+        await _on_adapter_loop(clear)
+    except Exception:
+        logger.debug("Could not clear a requested single-result card", exc_info=True)
+
+
+@dataclass
+class _PendingSeasonPicker:
+    """A season picker's durable state, so a tap survives without the model.
+
+    The TVDB id and the tick state live here rather than in callback data,
+    which Telegram caps at 64 bytes, and rather than in the conversation, which
+    a tap does not reach.
+    """
+
+    picker_id: str
+    tvdb_id: int
+    title: str
+    year: object
+    states: tuple[dict[str, Any], ...]
+    selected: set[int]
+    actor_user_id: int
+    actor_chat_id: int
+    has_photo: bool = False
+    expires_at: float = 0.0
+
+
+_season_picker_lock = threading.Lock()
+_season_pickers: dict[str, _PendingSeasonPicker] = {}
+_claimed_pickers: dict[str, float] = {}
+SEASON_PICKER_TTL_SECONDS = 1800
+
+
+def _put_season_picker(pending: _PendingSeasonPicker) -> None:
+    now = time.monotonic()
+    pending.expires_at = now + SEASON_PICKER_TTL_SECONDS
+    with _season_picker_lock:
+        for key in [k for k, v in _season_pickers.items() if v.expires_at <= now]:
+            _season_pickers.pop(key, None)
+        _season_pickers[pending.picker_id] = pending
+
+
+def _get_season_picker(picker_id: str) -> _PendingSeasonPicker | None:
+    with _season_picker_lock:
+        pending = _season_pickers.get(picker_id)
+        if pending is not None and pending.expires_at <= time.monotonic():
+            _season_pickers.pop(picker_id, None)
+            return None
+    return pending
+
+
+def _drop_season_picker(picker_id: str) -> None:
+    with _season_picker_lock:
+        _season_pickers.pop(picker_id, None)
+
+
+def _claim_season_picker(picker_id: str) -> _PendingSeasonPicker | None:
+    """Take sole ownership of a picker's submission, or return None.
+
+    The submit path awaits the gateway, so two taps arriving together would
+    otherwise both pass the selection check and request the same seasons twice.
+    Removing the picker under the lock, before any await, makes the second tap
+    a no-op instead.
+    """
+
+    now = time.monotonic()
+    with _season_picker_lock:
+        pending = _season_pickers.pop(picker_id, None)
+        if pending is not None:
+            # Remember the claim so the losing tap can be told what happened
+            # instead of being reported as an expired card.
+            for key in [k for k, deadline in _claimed_pickers.items() if deadline <= now]:
+                _claimed_pickers.pop(key, None)
+            _claimed_pickers[picker_id] = now + SEASON_PICKER_TTL_SECONDS
+    if pending is None or pending.expires_at <= now:
+        return None
+    return pending
+
+
+def _season_picker_was_claimed(picker_id: str) -> bool:
+    with _season_picker_lock:
+        deadline = _claimed_pickers.get(picker_id)
+    return deadline is not None and deadline > time.monotonic()
 
 
 _pending_picker_lock = threading.Lock()
@@ -495,11 +645,9 @@ async def _select_search_result(
     choices: list[str],
     candidates: list[dict[str, Any]],
     posters: list[str | None],
-    *,
-    recommendation_mode: bool,
 ) -> str | None:
     adapter = _active_adapter
-    if adapter is None or (len(choices) < 2 and not recommendation_mode):
+    if adapter is None or len(choices) < 2:
         return choices[0] if len(choices) == 1 else None
 
     clarify = _clarify_gateway()
@@ -519,7 +667,6 @@ async def _select_search_result(
         posters=tuple(posters),
         actor_user_id=actor_user_id,
         actor_chat_id=actor_chat_id,
-        recommendation_mode=recommendation_mode,
     )
     previous = _get_pending_picker(session_key)
     if previous is not None:
@@ -539,7 +686,6 @@ async def _select_search_result(
             caption=_candidate_caption(candidate),
             active_index=0,
             active_is_movie=candidate.get("media_type") == "movie",
-            recommendation_mode=recommendation_mode,
         )
         _set_picker_photo(pending, bool(getattr(response, "has_photo", False)))
         return bool(getattr(response, "success", False))
@@ -559,12 +705,250 @@ async def _select_search_result(
         response = await asyncio.to_thread(clarify.wait_for_response, clarify_id, timeout)
         if isinstance(response, str) and response.strip():
             return response.strip()
-        if recommendation_mode:
-            _clear_recommendation_context(session_key)
         interrupt_running_turn(adapter, session_key, "Telegram media picker expired")
         return MEDIA_PICKER_EXPIRED
     finally:
         _discard_pending_picker(session_key, clarify_id)
+
+
+async def _handle_single_result_callback(query: Any, action: str) -> bool:
+    """Handle a tap on a single-result card's action button."""
+
+    if action.startswith("m"):
+        # Movie request: md:req:m<tmdb_id>
+        try:
+            tmdb_id = int(action[1:])
+        except ValueError:
+            await answer_media_callback(query, "Invalid request.")
+            return True
+        await answer_media_callback(query, "Requesting…")
+        caller_id = getattr(getattr(query, "from_user", None), "id", None)
+        chat_id = getattr(getattr(query, "message", None), "chat_id", None)
+        if not isinstance(caller_id, int) or not isinstance(chat_id, int):
+            return True
+        actor = Actor(user_id=caller_id, chat_id=chat_id)
+        # This card is being resolved here, so it must not stay eligible for a
+        # later retire-by-model-request against a message that is already gone.
+        _take_single_card(chat_id=chat_id, media_type="movie", external_id=tmdb_id)
+        try:
+            outcome = await _gateway().call(actor, "request_movie", {"tmdb_id": tmdb_id})
+            request_status = str(outcome.get("status") or "requested")
+            note = {
+                "available": "Already on Plex ✓",
+                "awaiting_plex": "Already added — waiting for Plex to import it.",
+            }.get(request_status, "Requested ✓")
+        except (GatewayError, OSError):
+            logger.warning("Single-result request_movie failed", exc_info=True)
+            note = "Request failed — ask me to try again."
+        try:
+            # python-telegram-bot returns an empty tuple, not None, for a
+            # message without a photo, so this must test truthiness. An
+            # is-not-None check leaves every text card's button live and lets
+            # a second tap fire a duplicate request.
+            has_photo = bool(getattr(getattr(query, "message", None), "photo", None))
+            await close_media_picker(query, caption=f"<i>{note}</i>", has_photo=has_photo)
+        except Exception:
+            logger.debug("Could not update single-result card", exc_info=True)
+        return True
+
+    if action.startswith("s"):
+        # Series request: md:req:s<tvdb_id> opens the season picker.
+        try:
+            tvdb_id = int(action[1:])
+        except ValueError:
+            await answer_media_callback(query, "Invalid request.")
+            return True
+        await _open_season_picker(query, tvdb_id)
+        return True
+
+    await answer_media_callback(query, "Invalid request.")
+    return True
+
+
+def _season_caption(pending: _PendingSeasonPicker) -> str:
+    heading = html.escape(pending.title)
+    if isinstance(pending.year, int):
+        heading += f" ({pending.year})"
+    have = sum(1 for state in pending.states if state.get("complete"))
+    total = len(pending.states)
+    lines = [f"<b>{heading}</b>", f"{have} of {total} seasons complete"]
+    if pending.selected:
+        picked = ", ".join(
+            "Specials" if number == 0 else f"S{number}" for number in sorted(pending.selected)
+        )
+        lines.append(f"<i>Requesting: {picked}</i>")
+    else:
+        lines.append("<i>Pick the seasons you want.</i>")
+    return "\n".join(lines)
+
+
+def _ordered_states(states: list[dict[str, Any]]) -> tuple[dict[str, Any], ...]:
+    """Numbered seasons first, specials last."""
+
+    numbered = [state for state in states if int(state["number"]) > 0]
+    specials = [state for state in states if int(state["number"]) == 0]
+    return tuple(numbered + specials)
+
+
+async def _open_season_picker(query: Any, tvdb_id: int) -> None:
+    caller_id = getattr(getattr(query, "from_user", None), "id", None)
+    chat_id = getattr(getattr(query, "message", None), "chat_id", None)
+    if not isinstance(caller_id, int) or not isinstance(chat_id, int):
+        await answer_media_callback(query, "Invalid request.")
+        return
+    await answer_media_callback(query, "Loading seasons…")
+    actor = Actor(user_id=caller_id, chat_id=chat_id)
+    try:
+        report = await _gateway().call(actor, "series_seasons", {"tvdb_id": tvdb_id})
+    except (GatewayError, OSError):
+        logger.warning("Season report failed", exc_info=True)
+        await answer_media_callback(query, "Could not load seasons. Ask me to try again.")
+        return
+    raw = report.get("seasons")
+    states = _ordered_states([item for item in raw if isinstance(item, dict)] if raw else [])
+    if not states:
+        await answer_media_callback(query, "Sonarr lists no seasons for this series.")
+        return
+    title = report.get("title")
+    pending = _PendingSeasonPicker(
+        picker_id=uuid.uuid4().hex[:10],
+        tvdb_id=tvdb_id,
+        title=title if isinstance(title, str) else "Series",
+        year=report.get("year"),
+        states=states,
+        selected=set(),
+        actor_user_id=caller_id,
+        actor_chat_id=chat_id,
+    )
+    adapter = _active_adapter
+    if adapter is None:
+        return
+    response = await send_season_picker(
+        adapter,
+        chat_id=chat_id,
+        picker_id=pending.picker_id,
+        poster_url=None,
+        caption=_season_caption(pending),
+        states=pending.states,
+        selected=[],
+    )
+    if not getattr(response, "success", False):
+        logger.warning("Season picker delivery failed")
+        return
+    pending.has_photo = bool(getattr(response, "has_photo", False))
+    _put_season_picker(pending)
+    # The series card's own button is spent now that the picker owns the choice.
+    _take_single_card(chat_id=chat_id, media_type="series", external_id=tvdb_id)
+    with suppress(Exception):
+        await clear_card_buttons(
+            adapter,
+            chat_id=chat_id,
+            message_id=int(getattr(getattr(query, "message", None), "message_id", 0)),
+        )
+
+
+async def _handle_season_picker_callback(
+    query: Any, pending: _PendingSeasonPicker, action: str
+) -> bool:
+    caller_id = getattr(getattr(query, "from_user", None), "id", None)
+    if caller_id != pending.actor_user_id:
+        await answer_media_callback(query, "⛔ This media card belongs to another request.")
+        return True
+
+    if action.startswith("s"):
+        try:
+            number = int(action[1:])
+        except ValueError:
+            await answer_media_callback(query, "Invalid season.")
+            return True
+        state = next(
+            (item for item in pending.states if int(item["number"]) == number),
+            None,
+        )
+        if state is None:
+            await answer_media_callback(query, "Invalid season.")
+            return True
+        if state.get("complete"):
+            name = "Specials" if number == 0 else f"Season {number}"
+            await answer_media_callback(query, f"{name} is already complete")
+            return True
+        if number in pending.selected:
+            pending.selected.discard(number)
+        else:
+            pending.selected.add(number)
+        await answer_media_callback(query)
+        with suppress(Exception):
+            await edit_season_selection(
+                query,
+                picker_id=pending.picker_id,
+                states=pending.states,
+                selected=sorted(pending.selected),
+            )
+        return True
+
+    if action == "all":
+        pending.selected = {
+            int(state["number"]) for state in pending.states if not state.get("complete")
+        }
+        await answer_media_callback(query, "All missing seasons selected")
+        with suppress(Exception):
+            await edit_season_selection(
+                query,
+                picker_id=pending.picker_id,
+                states=pending.states,
+                selected=sorted(pending.selected),
+            )
+        return True
+
+    if action == "cancel":
+        _drop_season_picker(pending.picker_id)
+        await answer_media_callback(query, "Cancelled")
+        with suppress(Exception):
+            await close_media_picker(
+                query,
+                caption="<i>Season selection cancelled.</i>",
+                has_photo=pending.has_photo,
+            )
+        return True
+
+    if action != "go":
+        await answer_media_callback(query, "Invalid media action.")
+        return True
+
+    if not pending.selected:
+        await answer_media_callback(query, "Pick at least one season first")
+        return True
+
+    # Claim before the first await, so a double tap cannot run the Sonarr
+    # update and season search twice.
+    claimed = _claim_season_picker(pending.picker_id)
+    if claimed is None:
+        await answer_media_callback(query, "Already requested")
+        return True
+    pending = claimed
+    seasons = sorted(pending.selected)
+    await answer_media_callback(query, "Requesting…")
+    actor = Actor(user_id=pending.actor_user_id, chat_id=pending.actor_chat_id)
+    try:
+        outcome = await _gateway().call(
+            actor, "request_series", {"tvdb_id": pending.tvdb_id, "seasons": seasons}
+        )
+        status = str(outcome.get("status") or "requested")
+        note = {
+            "monitoring_updated": "Requested ✓ — Sonarr is searching those seasons.",
+        }.get(status, "Requested ✓ — you'll get a message when it's on Plex.")
+    except (GatewayError, OSError):
+        logger.warning("Season picker request_series failed", exc_info=True)
+        note = "Request failed — ask me to try again."
+    _drop_season_picker(pending.picker_id)
+    picked = ", ".join("Specials" if number == 0 else f"S{number}" for number in seasons)
+    with suppress(Exception):
+        await close_media_picker(
+            query,
+            caption=f"<b>{html.escape(pending.title)}</b>\n{picked}\n\n<i>{note}</i>",
+            has_photo=pending.has_photo,
+        )
+    return True
 
 
 async def _handle_media_picker_callback(update: object, adapter: object) -> bool:
@@ -574,6 +958,18 @@ async def _handle_media_picker_callback(update: object, adapter: object) -> bool
     if callback is None:
         return False
     query = callback.query
+
+    # Single-result action buttons use the "req" picker_id prefix.
+    if callback.picker_id == "req" and callback.action:
+        return await _handle_single_result_callback(query, callback.action)
+
+    season = _get_season_picker(callback.picker_id) if callback.picker_id else None
+    if season is not None and callback.action:
+        return await _handle_season_picker_callback(query, season, callback.action)
+    if callback.picker_id and _season_picker_was_claimed(callback.picker_id):
+        await answer_media_callback(query, "Already requested")
+        return True
+
     if not callback.picker_id or not callback.action:
         await answer_media_callback(query, "Invalid media card.")
         return True
@@ -605,13 +1001,9 @@ async def _handle_media_picker_callback(update: object, adapter: object) -> bool
                 caption=_candidate_caption(pending.candidates[index]),
                 active_index=index,
                 active_is_movie=pending.candidates[index].get("media_type") == "movie",
-                recommendation_mode=pending.recommendation_mode,
                 has_photo=has_photo,
             )
         except Exception:
-            # The rendered card still shows the previous tab, so the selection
-            # state must stay on it; committing here would let the action
-            # button resolve a candidate the user never saw.
             logger.warning("Telegram media tab switch failed", exc_info=True)
             await answer_media_callback(query, "Could not open that result. Try again.")
             return True
@@ -619,7 +1011,7 @@ async def _handle_media_picker_callback(update: object, adapter: object) -> bool
         await answer_media_callback(query)
         return True
 
-    if callback.action not in {"select", "more", "cancel"}:
+    if callback.action not in {"select", "cancel"}:
         await answer_media_callback(query, "Invalid media action.")
         return True
     active_index, has_photo = _read_picker_tab(pending)
@@ -627,10 +1019,7 @@ async def _handle_media_picker_callback(update: object, adapter: object) -> bool
     choice = pending.choices[active_index]
     is_movie = candidate.get("media_type") == "movie"
 
-    if callback.action == "select" and is_movie and not pending.recommendation_mode:
-        # The tap is authoritative: the request runs here, on the identity the
-        # card was issued to, and the gateway re-authorizes it server-side.
-        # The model only narrates the recorded outcome afterwards.
+    if callback.action == "select" and is_movie:
         await answer_media_callback(query, "Requesting…")
         actor = Actor(user_id=pending.actor_user_id, chat_id=pending.actor_chat_id)
         tmdb_id = candidate.get("tmdb_id")
@@ -646,8 +1035,6 @@ async def _handle_media_picker_callback(update: object, adapter: object) -> bool
             logger.warning("Media card request_movie failed", exc_info=True)
             response = f"{MEDIA_PICKER_REQUEST_FAILED}{choice}"
             note = "Request failed — ask me to try again."
-        # The request already happened, so the card must show its outcome even
-        # if the waiting tool call timed out while the request was running.
         clarify = _clarify_gateway()
         clarify.resolve_gateway_clarify(callback.picker_id, response)
         try:
@@ -657,12 +1044,8 @@ async def _handle_media_picker_callback(update: object, adapter: object) -> bool
             logger.debug("Could not close resolved media card", exc_info=True)
         return True
 
-    if callback.action == "more" and not pending.recommendation_mode:
-        await answer_media_callback(query, "Invalid media action.")
-        return True
     response = {
         "select": choice,
-        "more": MEDIA_PICKER_MORE,
         "cancel": MEDIA_PICKER_CANCELLED,
     }[callback.action]
     clarify = _clarify_gateway()
@@ -670,24 +1053,16 @@ async def _handle_media_picker_callback(update: object, adapter: object) -> bool
         await answer_media_callback(query, "This media card has expired.")
         return True
     if response == MEDIA_PICKER_CANCELLED:
-        _clear_recommendation_context(pending.session_key)
         interrupt_running_turn(
             adapter or _active_adapter,
             pending.session_key,
             "Telegram media picker cancelled",
         )
-    acknowledgement = {
-        MEDIA_PICKER_CANCELLED: "Cancelled",
-        MEDIA_PICKER_MORE: "Searching for more…",
-    }.get(response, "Selected")
+    acknowledgement = "Cancelled" if response == MEDIA_PICKER_CANCELLED else "Selected"
     await answer_media_callback(query, acknowledgement)
     try:
-        # State only what has already happened; series requests still need the
-        # seasons conversation, so the model handles them after this closes.
         if response == MEDIA_PICKER_CANCELLED:
             status = "<i>Media selection cancelled.</i>"
-        elif response == MEDIA_PICKER_MORE:
-            status = "<i>Searching for more suggestions…</i>"
         else:
             status = f"{_candidate_caption(candidate)}\n\n<i>Selected.</i>"
         await close_media_picker(query, caption=status, has_photo=has_photo)
@@ -707,39 +1082,80 @@ async def _decorate_search_result(
         return result
     decorated = dict(result)
     decorated["results"] = candidates
-    if len(candidates) == 1 and not recommendation_mode:
+
+    # --- Recommendations: conversational reply, no picker ---
+    if recommendation_mode:
+        _clear_recommendation_context(session_key)
+        decorated["telegram_presentation"] = {
+            "poster_cards_delivered": False,
+            "poster_count": 0,
+            "selection_status": "conversational",
+            "instruction": (
+                "Present these recommendations conversationally. For each title, state its "
+                "name, year, media type, and whether it is on Plex. Offer to add any that are "
+                "missing. Do not open a picker or repeat raw candidate data."
+            ),
+        }
+        return decorated
+
+    # --- Single result: poster card with action button ---
+    if len(candidates) == 1:
         delivered = False
         adapter = _active_adapter
-        if adapter is not None and cards:
+        candidate = candidates[0]
+        poster = posters[0] if posters else None
+        if adapter is not None:
 
             async def deliver_single() -> bool:
-                send_image = getattr(adapter, "send_image", None)
-                if not callable(send_image):
-                    return False
-                response = await send_image(
-                    chat_id=str(actor_chat_id), image_url=cards[0][0], caption=cards[0][1]
+                response = await send_single_result_card(
+                    adapter,
+                    chat_id=actor_chat_id,
+                    poster_url=poster,
+                    caption=_candidate_caption(candidate),
+                    candidate=candidate,
                 )
-                return bool(getattr(response, "success", False))
+                if not getattr(response, "success", False):
+                    return False
+                # Remember the card so a request made by the model in this same
+                # turn can retire its button instead of leaving it tappable.
+                media_type = candidate.get("media_type")
+                external_id = candidate.get("tmdb_id" if media_type == "movie" else "tvdb_id")
+                message_id = getattr(response, "message_id", None)
+                if isinstance(media_type, str) and isinstance(external_id, int):
+                    try:
+                        _remember_single_card(
+                            chat_id=actor_chat_id,
+                            media_type=media_type,
+                            external_id=external_id,
+                            message_id=int(str(message_id)),
+                        )
+                    except (TypeError, ValueError):
+                        logger.debug("Single-result card had no usable message id")
+                return True
 
             try:
                 delivered = bool(await _on_adapter_loop(deliver_single))
             except Exception:
-                logger.warning("Telegram single poster delivery failed", exc_info=True)
+                logger.warning("Telegram single result card delivery failed", exc_info=True)
         decorated["telegram_presentation"] = {
             "poster_cards_delivered": delivered,
             "poster_count": len(cards),
             "selection_status": "single_result",
             "provider_mutation_performed": False,
-            "next_action": "request the movie, or specify the desired series seasons",
+            "next_action": "request the movie, or open the season picker for a series",
             "instruction": (
                 "Answer only about this result. If the current user message explicitly asks "
                 "to add or request it, call the matching request tool now. Otherwise this is a "
                 "read-only lookup: never imply it was requested, and if unavailable offer a "
-                "clear next action ('request' for a movie, or the desired seasons for a series)."
+                "clear next action ('request' for a movie, or the desired seasons for a series). "
+                "The Telegram card may include a Request button that the user can tap "
+                "independently; if they do, the button handler performs the request, and for a "
+                "series it opens a season picker that reports which seasons are already complete."
             ),
         }
         return decorated
 
+    # --- Multiple results: blocking disambiguation picker ---
     actor = require_actor()
     selection = await _select_search_result(
         actor_chat_id,
@@ -748,10 +1164,7 @@ async def _decorate_search_result(
         choices,
         candidates,
         posters,
-        recommendation_mode=recommendation_mode,
     )
-    # The card is delivered before any selection can occur, so every terminal
-    # status below except "unavailable" implies it reached the user.
     delivered = selection is not None
     if selection == MEDIA_PICKER_SUPERSEDED:
         decorated["results"] = []
@@ -778,27 +1191,12 @@ async def _decorate_search_result(
         }
         return decorated
     if selection == MEDIA_PICKER_CANCELLED:
-        _clear_recommendation_context(session_key)
         decorated["results"] = []
         decorated["telegram_presentation"] = {
             "poster_cards_delivered": delivered,
             "poster_count": len(cards),
             "selection_status": "cancelled",
             "instruction": "The user cancelled the media card. End without another response.",
-        }
-        return decorated
-    if selection == MEDIA_PICKER_MORE:
-        decorated["results"] = []
-        decorated["telegram_presentation"] = {
-            "poster_cards_delivered": delivered,
-            "poster_count": len(cards),
-            "selection_status": "search_more",
-            "exclude_titles": [candidate.get("title") for candidate in candidates],
-            "instruction": (
-                "The user explicitly chose Search more. Research exactly 4 different titles that "
-                "were not in this batch, then call recommend_media exactly once to present "
-                "the next recommendation card."
-            ),
         }
         return decorated
     if not isinstance(selection, str):
@@ -844,15 +1242,7 @@ async def _decorate_search_result(
                 ),
             }
             return decorated
-        if recommendation_mode:
-            _clear_recommendation_context(session_key)
-            instruction = (
-                "The user picked this exact recommendation. Answer only about this title and "
-                "offer to request it if unavailable; do not request it unless the user asked."
-            )
-        elif selected.get("media_type") == "movie":
-            # Typed selections reach here too, so the explicit-request path
-            # must stay available and the wording must not assume a series.
+        if selected.get("media_type") == "movie":
             instruction = (
                 "The user selected this exact movie in Telegram; that selection did not itself "
                 "request anything. If the current user message explicitly asks to add or request "
@@ -899,6 +1289,10 @@ def _visibility_patch() -> None:
     )
 
 
+def _platform_hint_patch() -> None:
+    install_platform_hint(platform=PLATFORM, platform_hint=PLATFORM_HINT)
+
+
 def validate_search_guardrail(config: Mapping[str, Any]) -> None:
     """Require the native agent and startup verifier to share one search cap."""
 
@@ -909,18 +1303,6 @@ def validate_search_guardrail(config: Mapping[str, Any]) -> None:
         raise RuntimeError(
             "Hermes config must set "
             f"tool_loop_guardrails.loop_caps.max_web_searches to {WEB_SEARCH_CAP}"
-        )
-
-
-def validate_platform_hint(config: Mapping[str, Any]) -> None:
-    """Require the CRBL guidance in Hermes' effective Telegram override."""
-
-    hints = config.get("platform_hints")
-    telegram = hints.get(PLATFORM) if isinstance(hints, Mapping) else None
-    append = telegram.get("append") if isinstance(telegram, Mapping) else None
-    if append != PLATFORM_HINT:
-        raise RuntimeError(
-            "Hermes config must append the CRBL media guidance at platform_hints.telegram.append"
         )
 
 
@@ -963,6 +1345,18 @@ def _handler(name: str) -> Callable[..., Coroutine[Any, Any, str]]:
                 session_key,
                 result,
             )
+        elif name == "request_movie":
+            tmdb_id = arguments.get("tmdb_id")
+            if isinstance(tmdb_id, int):
+                await _retire_single_card(
+                    chat_id=actor.chat_id, media_type="movie", external_id=tmdb_id
+                )
+        elif name == "request_series":
+            tvdb_id = arguments.get("tvdb_id")
+            if isinstance(tvdb_id, int):
+                await _retire_single_card(
+                    chat_id=actor.chat_id, media_type="series", external_id=tvdb_id
+                )
         return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
 
     return call
@@ -981,6 +1375,10 @@ def _configured(config: object) -> bool:
 
 def register(ctx: object) -> None:
     _visibility_patch()
+    # PLATFORM_HINT is the only copy of this text. Hermes prefers its built-in
+    # Telegram hint over the value registered below, so the guidance is
+    # installed on the resolver instead of being mirrored into config.yaml.
+    _platform_hint_patch()
     register_platform = getattr(ctx, "register_platform", None)
     register_tool = getattr(ctx, "register_tool", None)
     if not callable(register_platform) or not callable(register_tool):

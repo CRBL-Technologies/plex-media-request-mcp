@@ -5,8 +5,18 @@ from typing import Any
 
 import pytest
 
+from media_gateway import plex_watch
 from media_gateway.config import Config
 from media_gateway.password import hash_password
+
+
+@pytest.fixture(autouse=True)
+def _isolate_plex_slug_cache() -> Any:
+    """Keep one test's resolved slug from answering another test's lookup."""
+
+    plex_watch.clear_cache()
+    yield
+    plex_watch.clear_cache()
 
 
 class FakeUpstream:

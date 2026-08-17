@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, ClassVar
 
 import httpx
 import pytest
 from conftest import FakeUpstream
 from starlette.testclient import TestClient
 
+from media_gateway import plex_watch
 from media_gateway.app import COOKIE, create_app
 from media_gateway.config import Config
 from media_gateway.constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
@@ -185,6 +187,228 @@ def test_roles_and_no_selection_token(config: Config) -> None:
             json={"actor": _actor(1001), "name": "radarr_get_movies", "arguments": {}},
         )
         assert denied.status_code == 400
+
+
+class _SlugClient:
+    """Stand-in for Plex's metadata-match endpoint, counting every request."""
+
+    requests: ClassVar[list[dict[str, Any]]] = []
+    slug: ClassVar[str | None] = "dune-part-two"
+
+    async def __aenter__(self) -> _SlugClient:
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+    async def get(self, url: str, **values: Any) -> Any:
+        type(self).requests.append({"url": url, **values})
+        payload = (
+            {"MediaContainer": {"Metadata": [{"slug": type(self).slug}]}}
+            if type(self).slug is not None
+            else {"MediaContainer": {}}
+        )
+        return SimpleNamespace(is_error=False, json=lambda: payload)
+
+
+@pytest.fixture
+def slug_client(config: Config, monkeypatch: pytest.MonkeyPatch) -> type[_SlugClient]:
+    _SlugClient.requests = []
+    _SlugClient.slug = "dune-part-two"
+    # The slug lookup reads the Plex token from the upstream credentials file.
+    config.upstream_token_file.write_text(
+        f"MCP_AUTH_TOKEN={'u' * 40}\nPLEX_API_KEY=plex-secret\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        "media_gateway.plex_watch.httpx.AsyncClient", lambda **_kwargs: _SlugClient()
+    )
+    return _SlugClient
+
+
+def test_lone_downloaded_movie_links_with_the_form_that_opens_the_app(
+    config: Config, slug_client: type[_SlugClient]
+) -> None:
+    """watch.plex.tv is the only form the Plex apps register as a universal link.
+
+    A link naming this server's item (app.plex.tv/desktop/#!/server/...) opens
+    the browser client instead, which is worse even though it skips a tap.
+    """
+
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["radarr_search_movie"] = {
+        "data": [{"tmdbId": 693134, "title": "Dune: Part Two", "year": 2024, "hasFile": True}]
+    }
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "search_media",
+                "arguments": {"query": "Dune Part Two", "media_type": "movie", "limit": 1},
+            },
+        )
+
+    assert response.status_code == 200
+    result = response.json()["result"]["results"][0]
+    assert result["plex_url"] == "https://watch.plex.tv/movie/dune-part-two"
+    # One GUID match, and no library traversal at all.
+    assert len(slug_client.requests) == 1
+    assert slug_client.requests[0]["params"] == {"guid": "tmdb://693134", "type": 1}
+    assert [name for name, _ in fake.calls if name.startswith("plex_")] == []
+
+
+def test_movie_without_a_plex_slug_gets_no_link(
+    config: Config, slug_client: type[_SlugClient]
+) -> None:
+    """Plex knows no slug, so there is no app-opening link to offer."""
+
+    slug_client.slug = None
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["radarr_search_movie"] = {
+        "data": [{"tmdbId": 693134, "title": "Dune: Part Two", "year": 2024, "hasFile": True}]
+    }
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "search_media",
+                "arguments": {"query": "Dune Part Two", "media_type": "movie", "limit": 1},
+            },
+        )
+
+    assert "plex_url" not in response.json()["result"]["results"][0]
+
+
+def test_multi_result_search_resolves_no_slugs(
+    config: Config, slug_client: type[_SlugClient]
+) -> None:
+    """Only the single-result card renders a link, so a picker costs no lookups."""
+
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["radarr_search_movie"] = {
+        "data": [
+            {"tmdbId": 1, "title": "Dune", "year": 1984, "hasFile": True},
+            {"tmdbId": 2, "title": "Dune", "year": 2021, "hasFile": True},
+            {"tmdbId": 3, "title": "Dune: Part Two", "year": 2024, "hasFile": True},
+        ]
+    }
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "search_media",
+                "arguments": {"query": "Dune", "media_type": "movie", "limit": 3},
+            },
+        )
+
+    assert len(response.json()["result"]["results"]) == 3
+    assert slug_client.requests == []
+
+
+def test_recommendations_resolve_no_slugs(config: Config, slug_client: type[_SlugClient]) -> None:
+    """Recommendations answer conversationally and render no buttons."""
+
+    app = create_app(config)
+    fake = FakeUpstream()
+
+    def movies(arguments: dict[str, Any]) -> dict[str, Any]:
+        term = str(arguments.get("term", ""))
+        title, year = term.rsplit(" ", 1)
+        return {
+            "data": [
+                {
+                    "tmdbId": abs(hash(term)) % 9999,
+                    "title": title,
+                    "year": int(year.strip("()")),
+                    "hasFile": True,
+                }
+            ]
+        }
+
+    fake.responses["radarr_search_movie"] = movies
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "recommend_media",
+                "arguments": {
+                    "titles": [
+                        "Arrival (2016)",
+                        "Ex Machina (2014)",
+                        "Annihilation (2018)",
+                        "Dark City (1998)",
+                    ],
+                    "media_type": "movie",
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    assert slug_client.requests == []
+
+
+def test_series_search_resolves_no_slugs(config: Config, slug_client: type[_SlugClient]) -> None:
+    """A series card opens the season picker, which reports Sonarr's own state."""
+
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["sonarr_search_series"] = {
+        "data": [{"tvdbId": 411959, "title": "3 Body Problem", "year": 2024, "id": 7}]
+    }
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "search_media",
+                "arguments": {"query": "3 Body Problem", "media_type": "series", "limit": 1},
+            },
+        )
+
+    result = response.json()["result"]["results"][0]
+    assert "plex_url" not in result
+    assert slug_client.requests == []
+    assert [name for name, _ in fake.calls if name.startswith("plex_")] == []
+
+
+def test_undownloaded_movie_resolves_no_slug(
+    config: Config, slug_client: type[_SlugClient]
+) -> None:
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["radarr_search_movie"] = {
+        "data": [{"tmdbId": 693134, "title": "Dune: Part Two", "year": 2024, "hasFile": False}]
+    }
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "search_media",
+                "arguments": {"query": "Dune Part Two", "media_type": "movie", "limit": 1},
+            },
+        )
+
+    assert "plex_url" not in response.json()["result"]["results"][0]
+    assert slug_client.requests == []
 
 
 def test_mixed_search_keeps_movie_and_series_results(config: Config) -> None:
@@ -619,6 +843,245 @@ def test_series_request_uses_trusted_actor_and_exact_seasons(config: Config) -> 
         assert requests[0]["seasons"] == [1]
 
 
+def test_specials_notify_only_the_specials_requester(config: Config) -> None:
+    """A season-0 event must not reach everyone who asked for other seasons.
+
+    Season 0 used to be parsed as "no season", and a missing season number
+    matches every outstanding requester of the show.
+    """
+
+    app = create_app(config)
+    with TestClient(app) as client:
+        runtime = app.state.runtime
+        runtime.store.record_request(
+            media_type="series",
+            external_id=371980,
+            seasons=(0,),
+            title="Severance",
+            year=2022,
+            actor=Actor(user_id=1001, chat_id=1001),
+        )
+        runtime.store.record_request(
+            media_type="series",
+            external_id=371980,
+            seasons=(1,),
+            title="Severance",
+            year=2022,
+            actor=Actor(user_id=2002, chat_id=2002),
+        )
+
+        assert runtime.store.requested_seasons(371980) == {0, 1}
+
+        specials = runtime.store.request_destinations(
+            media_type="series", external_id=371980, season_number=0
+        )
+        season_one = runtime.store.request_destinations(
+            media_type="series", external_id=371980, season_number=1
+        )
+
+        assert specials == {(1001, 1001)}
+        assert season_one == {(2002, 2002)}
+        assert client.get("/login").status_code == 200
+
+
+def test_specials_webhook_keeps_its_season_number(config: Config) -> None:
+    app = create_app(config)
+    payload = {
+        "event": "library.new",
+        "Metadata": {
+            "type": "episode",
+            "ratingKey": "3001",
+            "title": "The Lexington Letter",
+            "index": 1,
+            "parentIndex": 0,
+            "grandparentTitle": "Severance",
+            "grandparentGuid": "tvdb://371980",
+            "grandparentRatingKey": "1757",
+        },
+    }
+    token = "plex-hook-secret-with-at-least-32-bytes"
+    with TestClient(app) as client:
+        assert client.post(f"/private/plex/{token}", json=payload).json() == {"accepted": True}
+        event = app.state.runtime.store.pending_media_events(int(time.time()) + 10)[0]
+
+    # 0 is the specials season, not a missing season.
+    assert event["season_number"] == 0
+    assert event["episode_number"] == 1
+
+
+def test_series_seasons_reports_counts_from_the_tracked_series(config: Config) -> None:
+    """The lookup response leaves statistics null, so counts need the series itself."""
+
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["sonarr_search_series"] = {
+        "data": [
+            {
+                "tvdbId": 371980,
+                "title": "Severance",
+                "year": 2022,
+                "id": 4,
+                "seasons": [
+                    {"seasonNumber": 0, "monitored": False},
+                    {"seasonNumber": 1, "monitored": True},
+                    {"seasonNumber": 2, "monitored": False},
+                ],
+            }
+        ]
+    }
+    fake.responses["sonarr_get_series_by_id"] = {
+        "data": {
+            "id": 4,
+            "seasons": [
+                {
+                    "seasonNumber": 0,
+                    "monitored": False,
+                    "statistics": {"episodeFileCount": 0, "totalEpisodeCount": 21},
+                },
+                {
+                    "seasonNumber": 1,
+                    "monitored": True,
+                    "statistics": {"episodeFileCount": 9, "totalEpisodeCount": 9},
+                },
+                {
+                    "seasonNumber": 2,
+                    "monitored": True,
+                    "statistics": {"episodeFileCount": 0, "totalEpisodeCount": 10},
+                },
+                {
+                    "seasonNumber": 3,
+                    "monitored": True,
+                    "statistics": {"episodeFileCount": 4, "totalEpisodeCount": 8},
+                },
+            ],
+        }
+    }
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "series_seasons",
+                "arguments": {"tvdb_id": 371980},
+            },
+        )
+
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["title"] == "Severance"
+    assert result["in_sonarr"] is True
+    by_number = {state["number"]: state for state in result["seasons"]}
+    # Specials are reported rather than hidden.
+    assert by_number[0]["episodes"] == 21
+    assert by_number[0]["complete"] is False
+    assert by_number[1]["complete"] is True
+    # Monitored with no files means it was asked for and is still searching.
+    assert by_number[2]["monitored"] is True
+    assert by_number[2]["complete"] is False
+    assert by_number[2]["partial"] is False
+    assert by_number[3]["partial"] is True
+    assert by_number[3]["complete"] is False
+
+
+def test_series_seasons_handles_an_untracked_series(config: Config) -> None:
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["sonarr_search_series"] = {
+        "data": [
+            {
+                "tvdbId": 371980,
+                "title": "Severance",
+                "year": 2022,
+                "seasons": [{"seasonNumber": 1, "monitored": False}],
+            }
+        ]
+    }
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "series_seasons",
+                "arguments": {"tvdb_id": 371980},
+            },
+        )
+
+    result = response.json()["result"]
+    assert result["in_sonarr"] is False
+    assert result["seasons"] == [
+        {
+            "number": 1,
+            "files": 0,
+            "episodes": 0,
+            "monitored": False,
+            "complete": False,
+            "partial": False,
+        }
+    ]
+    # Nothing is tracked, so there is no series to fetch statistics for.
+    assert [name for name, _ in fake.calls] == ["sonarr_search_series"]
+
+
+def test_specials_can_be_requested(config: Config) -> None:
+    """Season 0 is a real season, so request_series must accept it."""
+
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["sonarr_search_series"] = {
+        "data": [
+            {
+                "tvdbId": 371980,
+                "title": "Severance",
+                "year": 2022,
+                "id": 4,
+                "seasons": [{"seasonNumber": 0}, {"seasonNumber": 1}],
+            }
+        ]
+    }
+    fake.responses["sonarr_get_series_by_id"] = {
+        "data": {"id": 4, "seasons": [{"seasonNumber": 0}, {"seasonNumber": 1}]}
+    }
+    fake.responses["sonarr_get_episodes"] = {"data": [{"id": 55}]}
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "request_series",
+                "arguments": {"tvdb_id": 371980, "seasons": [0]},
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["result"]["series"]["seasons"] == [0]
+    searched = [args for name, args in fake.calls if name == "sonarr_search_season"]
+    assert searched == [{"seriesId": 4, "seasonNumber": 0}]
+
+
+def test_request_series_still_rejects_a_negative_season(config: Config) -> None:
+    app = create_app(config)
+    fake = FakeUpstream()
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "request_series",
+                "arguments": {"tvdb_id": 371980, "seasons": [-1]},
+            },
+        )
+
+    assert response.status_code == 400
+
+
 def test_existing_series_enables_the_season_and_searches_it(config: Config) -> None:
     app = create_app(config)
     fake = FakeUpstream()
@@ -772,6 +1235,7 @@ def test_plex_webhook_links_an_episode_to_the_mobile_app_route(config: Config) -
         response = client.post(f"/private/plex/{token}", json=payload)
         assert response.json() == {"accepted": True}
         event = app.state.runtime.store.pending_media_events(int(time.time()) + 10)[0]
+        # watch.plex.tv, because only that form opens the Plex app.
         assert event["plex_url"] == ("https://watch.plex.tv/show/3-body-problem/season/1/episode/2")
 
 
@@ -1056,9 +1520,49 @@ async def test_new_show_without_guid_enriches_from_its_own_rating_key(
         assert set(sent) == {1001, 9001}
 
 
-async def test_notification_enrichment_persists_universal_plex_link(
+async def test_notification_enrichment_keeps_the_direct_server_link(config: Config) -> None:
+    """Enrichment must not downgrade a server link to a catalogue page.
+
+    It used to overwrite the stored link with a watch.plex.tv entry, which made
+    the recipient choose a streaming service for a file already on the server.
+    """
+
+    app = create_app(config)
+    with TestClient(app):
+        runtime = app.state.runtime
+        direct = (
+            "https://app.plex.tv/desktop/#!/server/machine-123"
+            "/details?key=%2Flibrary%2Fmetadata%2F19"
+        )
+        runtime.store.add_media_event(
+            event_key="episode:19",
+            media_type="series",
+            external_id=81797,
+            rating_key="19",
+            title="Episode 19",
+            show_title="One Piece",
+            season_number=2,
+            episode_number=19,
+            plex_url=direct,
+            observed_at=int(time.time()) - 10,
+        )
+
+        events = runtime.store.pending_media_events(int(time.time()) + 10)
+        enriched = await runtime.notifications._enrich(events)
+
+        assert enriched[0]["plex_url"] == direct
+        assert runtime.store.pending_media_events(int(time.time()) + 10)[0]["plex_url"] == direct
+
+
+async def test_notification_enrichment_upgrades_to_the_app_link(
     config: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A stored server-route link is replaced once the slug can be resolved.
+
+    The server route opens the browser client, so an event that fell back to it
+    is upgraded to the watch.plex.tv form as soon as the id is known.
+    """
+
     app = create_app(config)
     with TestClient(app):
         runtime = app.state.runtime
@@ -1071,21 +1575,23 @@ async def test_notification_enrichment_persists_universal_plex_link(
             show_title="One Piece",
             season_number=2,
             episode_number=19,
-            plex_url="https://app.plex.tv/fallback",
+            plex_url=(
+                "https://app.plex.tv/desktop/#!/server/machine-123"
+                "/details?key=%2Flibrary%2Fmetadata%2F19"
+            ),
             observed_at=int(time.time()) - 10,
         )
 
-        async def lookup(_media_type: str, _external_id: int) -> str:
+        async def lookup(**_values: Any) -> str:
             return "one-piece"
 
-        monkeypatch.setattr(runtime.notifications, "_lookup_plex_slug", lookup)
+        monkeypatch.setattr(plex_watch, "lookup_slug", lookup)
         events = runtime.store.pending_media_events(int(time.time()) + 10)
         enriched = await runtime.notifications._enrich(events)
 
         expected = "https://watch.plex.tv/show/one-piece/season/2/episode/19"
         assert enriched[0]["plex_url"] == expected
-        persisted = runtime.store.pending_media_events(int(time.time()) + 10)
-        assert persisted[0]["plex_url"] == expected
+        assert runtime.store.pending_media_events(int(time.time()) + 10)[0]["plex_url"] == expected
 
 
 async def test_plex_slug_lookup_keeps_token_out_of_the_url(
@@ -1114,15 +1620,25 @@ async def test_plex_slug_lookup_keeps_token_out_of_the_url(
             captured.update({"url": url, **values})
             return Response()
 
-    monkeypatch.setattr("media_gateway.notifications.httpx.AsyncClient", lambda **_kwargs: Client())
-    app = create_app(config)
-    with TestClient(app):
-        slug = await app.state.runtime.notifications._lookup_plex_slug("series", 81797)
+    monkeypatch.setattr("media_gateway.plex_watch.httpx.AsyncClient", lambda **_kwargs: Client())
+    slug = await plex_watch.lookup_slug(
+        token_file=config.upstream_token_file, media_type="series", external_id=81797
+    )
 
     assert slug == "one-piece"
     assert captured["params"] == {"guid": "tvdb://81797", "type": 2}
     assert "plex-secret" not in str(captured["url"])
     assert captured["headers"]["X-Plex-Token"] == "plex-secret"
+
+    # The second ask is served from cache rather than repeating the request.
+    captured.clear()
+    assert (
+        await plex_watch.lookup_slug(
+            token_file=config.upstream_token_file, media_type="series", external_id=81797
+        )
+        == "one-piece"
+    )
+    assert captured == {}
 
 
 async def test_season_batch_waits_until_the_latest_episode_is_quiet(config: Config) -> None:

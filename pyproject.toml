@@ -37,6 +37,7 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+allowed-confusables = ["＋"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/media_gateway/dashboard.py" = ["E501"]

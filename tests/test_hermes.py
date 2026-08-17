@@ -284,7 +284,7 @@ async def test_search_sends_tabbed_card_and_returns_only_selected_result(
     assert "ask which seasons" in result["telegram_presentation"]["instruction"]
 
 
-async def test_recommendations_present_distinct_titles_with_three_actions(
+async def test_recommendations_return_conversational_status_without_picker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class RecommendationGateway(FakeGateway):
@@ -328,48 +328,15 @@ async def test_recommendations_present_distinct_titles_with_three_actions(
     class PresentationAdapter:
         def __init__(self) -> None:
             self._media_delivery_loop = asyncio.get_running_loop()
-            self._bot = SimpleNamespace(send_photo=self.send_photo)
-            self.card: dict[str, Any] = {}
+            self.photos_sent: list[dict[str, Any]] = []
 
-        async def send_photo(self, **values: Any) -> SimpleNamespace:
-            self.card = values
-            return SimpleNamespace(message_id=42)
+        async def send_image(self, **_values: Any) -> SimpleNamespace:
+            raise AssertionError("recommendations must not send images")
 
-    class ClarifyGateway:
-        @staticmethod
-        def register(**_values: Any) -> None:
-            return None
-
-        @staticmethod
-        def get_clarify_timeout() -> int:
-            return 60
-
-        @staticmethod
-        def wait_for_response(_clarify_id: str, _timeout: float) -> str:
-            return plugin.MEDIA_PICKER_MORE
-
-        @staticmethod
-        def resolve_gateway_clarify(_clarify_id: str, _response: str) -> bool:
-            return True
-
-    class Button:
-        def __init__(self, text: str, *, callback_data: str) -> None:
-            self.text = text
-            self.callback_data = callback_data
-
-    class Markup:
-        def __init__(self, rows: list[list[Button]]) -> None:
-            self.inline_keyboard = rows
-
-    telegram = ModuleType("telegram")
-    telegram.InlineKeyboardButton = Button  # type: ignore[attr-defined]
-    telegram.InlineKeyboardMarkup = Markup  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "telegram", telegram)
     gateway = RecommendationGateway()
     adapter = PresentationAdapter()
     monkeypatch.setattr(plugin, "_client", gateway)
     monkeypatch.setattr(plugin, "_active_adapter", adapter)
-    monkeypatch.setattr(plugin, "_clarify_gateway", lambda: ClarifyGateway())
     actor = Actor(user_id=1001, chat_id=1001)
     arguments = {
         "titles": [
@@ -383,37 +350,31 @@ async def test_recommendations_present_distinct_titles_with_three_actions(
     with actor_scope(actor, Role.USER, "agent:main:telegram:dm:1001"):
         raw = await plugin._handler("recommend_media")(arguments)
 
-    rows = adapter.card["reply_markup"].inline_keyboard
-    assert [button.text for button in rows[-2]] == ["✓ Pick", "↻ Search more"]
-    assert [button.text for button in rows[-1]] == ["Cancel"]
     result = json.loads(raw)
-    assert result["results"] == []
-    assert result["telegram_presentation"]["selection_status"] == "search_more"
-    assert "exactly 4 different titles" in result["telegram_presentation"]["instruction"]
-    assert result["telegram_presentation"]["exclude_titles"] == [
-        "Arrival",
-        "Ex Machina",
-        "Annihilation",
-        "Dark City",
-    ]
+    assert result["telegram_presentation"]["selection_status"] == "conversational"
+    assert "conversational" in result["telegram_presentation"]["instruction"].lower()
+    assert len(result["results"]) == 4
+    assert adapter.photos_sent == []
     assert gateway.calls == [(1001, "recommend_media", arguments)]
 
 
-async def test_recommendation_pick_and_search_more_are_explicit_actions(
+async def test_single_result_request_callback_fires_movie_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class ClarifyGateway:
-        response = ""
+    requested: list[int] = []
 
-        @classmethod
-        def resolve_gateway_clarify(cls, _clarify_id: str, response: str) -> bool:
-            cls.response = response
-            return True
+    class RequestGateway:
+        async def call(
+            self, actor: Actor, name: str, arguments: dict[str, Any]
+        ) -> dict[str, Any]:
+            assert name == "request_movie"
+            requested.append(arguments["tmdb_id"])
+            return {"status": "requested"}
 
     class Query:
-        data = "md:recommend-1:select"
+        data = "md:req:m12345"
         from_user = SimpleNamespace(id=1001)
-        message = SimpleNamespace(chat_id=1001)
+        message = SimpleNamespace(chat_id=1001, photo=None)
 
         def __init__(self) -> None:
             self.answers: list[str | None] = []
@@ -422,42 +383,35 @@ async def test_recommendation_pick_and_search_more_are_explicit_actions(
         async def answer(self, text: str | None = None) -> None:
             self.answers.append(text)
 
-        async def edit_message_caption(self, **values: Any) -> None:
+        async def edit_message_text(self, **values: Any) -> None:
             self.edits.append(values)
 
-    class NoRequestGateway:
-        async def call(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
-            raise AssertionError("Pick must not request a recommendation")
-
-    choice = "Arrival (2016) · Movie · TMDB 11"
-    pending = plugin._PendingMediaPicker(
-        clarify_id="recommend-1",
-        choices=(choice,),
-        candidates=({"media_type": "movie", "tmdb_id": 11, "title": "Arrival", "year": 2016},),
-        posters=("https://image.tmdb.org/arrival.jpg",),
-        actor_user_id=1001,
-        actor_chat_id=1001,
-        has_photo=True,
-        recommendation_mode=True,
-    )
-    monkeypatch.setattr(plugin, "_pending_pickers", {})
-    plugin._set_pending_picker("agent:main:telegram:dm:1001", pending)
-    monkeypatch.setattr(plugin, "_clarify_gateway", lambda: ClarifyGateway())
-    monkeypatch.setattr(plugin, "_gateway", lambda: NoRequestGateway())
+    monkeypatch.setattr(plugin, "_client", RequestGateway())
     query = Query()
+    update = SimpleNamespace(callback_query=query)
+    assert await plugin._handle_media_picker_callback(update, None)
+    assert requested == [12345]
+    assert "Requesting" in (query.answers[0] or "")
 
-    assert await plugin._handle_media_picker_callback(SimpleNamespace(callback_query=query), None)
-    assert ClarifyGateway.response == choice
-    assert query.answers == ["Selected"]
-    assert query.edits[-1]["reply_markup"] is None
+
+async def test_single_result_series_callback_asks_for_seasons(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Query:
+        data = "md:req:s67890"
+        from_user = SimpleNamespace(id=1001)
+        message = SimpleNamespace(chat_id=1001, photo=None)
+
+        def __init__(self) -> None:
+            self.answers: list[str | None] = []
+
+        async def answer(self, text: str | None = None) -> None:
+            self.answers.append(text)
 
     query = Query()
-    query.data = "md:recommend-1:more"
-    ClarifyGateway.response = ""
-    assert await plugin._handle_media_picker_callback(SimpleNamespace(callback_query=query), None)
-    assert ClarifyGateway.response == plugin.MEDIA_PICKER_MORE
-    assert query.answers == ["Searching for more…"]
-    assert "Searching for more suggestions" in query.edits[-1]["caption"]
+    update = SimpleNamespace(callback_query=query)
+    assert await plugin._handle_media_picker_callback(update, None)
+    assert query.answers == ["Which seasons do you want?"]
 
 
 async def test_media_card_switches_poster_then_requests_active_movie(
@@ -801,7 +755,7 @@ def test_media_caption_stays_within_the_telegram_limit_after_escaping() -> None:
     assert "<b>" in caption
 
 
-async def test_single_search_result_sends_one_poster_without_opening_picker(
+async def test_single_search_result_sends_card_with_action_button(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class SearchGateway(FakeGateway):
@@ -821,18 +775,33 @@ async def test_single_search_result_sends_one_poster_without_opening_picker(
                 "unavailable_sources": [],
             }
 
+    class Button:
+        def __init__(self, text: str, *, callback_data: str = "", url: str = "") -> None:
+            self.text = text
+            self.callback_data = callback_data
+            self.url = url
+
+    class Markup:
+        def __init__(self, rows: list[list[Button]]) -> None:
+            self.inline_keyboard = rows
+
     class PresentationAdapter:
         def __init__(self) -> None:
             self._media_delivery_loop = asyncio.get_running_loop()
-            self.images: list[dict[str, Any]] = []
+            self._bot = SimpleNamespace(send_photo=self.send_photo)
+            self.photos: list[dict[str, Any]] = []
 
-        async def send_image(self, **values: Any) -> SimpleNamespace:
-            self.images.append(values)
-            return SimpleNamespace(success=True)
+        async def send_photo(self, **values: Any) -> SimpleNamespace:
+            self.photos.append(values)
+            return SimpleNamespace(message_id=42)
 
         async def send_clarify(self, **_values: Any) -> SimpleNamespace:
             raise AssertionError("a single result must not open the picker")
 
+    telegram = ModuleType("telegram")
+    telegram.InlineKeyboardButton = Button  # type: ignore[attr-defined]
+    telegram.InlineKeyboardMarkup = Markup  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "telegram", telegram)
     gateway = SearchGateway()
     adapter = PresentationAdapter()
     monkeypatch.setattr(plugin, "_client", gateway)
@@ -842,13 +811,14 @@ async def test_single_search_result_sends_one_poster_without_opening_picker(
         raw = await plugin._handler("search_media")({"query": "3 Body Problem 2024"})
 
     result = json.loads(raw)
-    assert adapter.images == [
-        {
-            "chat_id": "1001",
-            "image_url": "https://artworks.thetvdb.com/three-body.jpg",
-            "caption": "1 · 3 Body Problem (2024) · Series · TVDB 411959",
-        }
-    ]
+    assert len(adapter.photos) == 1
+    card = adapter.photos[0]
+    assert card["photo"] == "https://artworks.thetvdb.com/three-body.jpg"
+    markup = card["reply_markup"]
+    buttons = [btn for row in markup.inline_keyboard for btn in row]
+    assert len(buttons) == 1
+    assert buttons[0].text == "＋ Request"
+    assert buttons[0].callback_data == "md:req:s411959"
     assert len(result["results"]) == 1
     assert result["telegram_presentation"]["selection_status"] == "single_result"
 
@@ -1134,7 +1104,7 @@ def test_search_tool_contract_owns_native_telegram_selection() -> None:
     assert "Never use MEDIA" in text
     recommendation_schema = SHARED_SCHEMAS["recommend_media"]
     recommendation = recommendation_schema["description"]
-    assert "Pick, Search more, and Cancel" in recommendation
+    assert "conversational reply" in recommendation
     assert "instead of calling search_media separately" in recommendation
     assert recommendation_schema["inputSchema"]["properties"]["titles"]["minItems"] == 4
 

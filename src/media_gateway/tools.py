@@ -212,8 +212,9 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
             "Present one exact Radarr/Sonarr match for each of exactly 4 distinct titles after "
             "recommendation research. Use this once for discovery requests instead of calling "
             "search_media separately for every title. Include a year in each title when known. "
-            "On Telegram this creates one recommendation card with Pick, Search more, and "
-            "Cancel actions. Do not use it for a direct title lookup."
+            "On Telegram the results are returned for a conversational reply; present each "
+            "title with its availability and offer to add any that are missing. "
+            "Do not use it for a direct title lookup."
         ),
         "inputSchema": {
             "type": "object",
@@ -372,6 +373,26 @@ class ToolService:
         results = _interleave(groups, limit)
         return results, errors
 
+    async def _enrich_plex_urls(self, results: list[dict[str, Any]]) -> None:
+        """Attach ``plex_url`` to downloaded results for Telegram action buttons."""
+
+        for candidate in results:
+            if not candidate.get("downloaded"):
+                continue
+            media_type = candidate.get("media_type")
+            title = candidate.get("title")
+            if not isinstance(title, str):
+                continue
+            try:
+                if media_type == "movie":
+                    tmdb_id = candidate.get("tmdb_id")
+                    if isinstance(tmdb_id, int) and tmdb_id > 0:
+                        _visible, url = await self._plex_movie_lookup(tmdb_id, title)
+                        if url:
+                            candidate["plex_url"] = url
+            except UpstreamError:
+                pass
+
     async def _search_media(self, arguments: object, _actor: Actor, _role: Role) -> dict[str, Any]:
         args = _exact(arguments, {"query", "media_type", "limit"})
         query = _short_text(args.get("query"), "query", minimum=2)
@@ -384,6 +405,7 @@ class ToolService:
         results, errors = await self._search_candidates(query, media_type, limit)
         if not results and errors:
             raise UpstreamError("media search is temporarily unavailable")
+        await self._enrich_plex_urls(results)
         return {"query": query, "results": results, "unavailable_sources": errors}
 
     @staticmethod
@@ -441,6 +463,7 @@ class ToolService:
                 results.append(choice)
         if not results and errors:
             raise UpstreamError("media recommendation lookup is temporarily unavailable")
+        await self._enrich_plex_urls(results)
         return {
             "query": "recommendations",
             "requested_titles": titles,
@@ -530,6 +553,12 @@ class ToolService:
         return "requested"
 
     async def _movie_in_plex(self, tmdb_id: int, title: str) -> bool:
+        visible, _url = await self._plex_movie_lookup(tmdb_id, title)
+        return visible
+
+    async def _plex_movie_lookup(self, tmdb_id: int, title: str) -> tuple[bool, str | None]:
+        """Check if a movie is in Plex and return its watch URL when available."""
+
         raw = await self.upstream.call(
             "plex_search", {"query": title, "limit": 20, "searchTypes": ["movies"]}
         )
@@ -537,7 +566,7 @@ class ToolService:
             raise UpstreamError("Plex search returned an invalid response")
         container = raw.get("MediaContainer")
         if not isinstance(container, dict) or not isinstance(container.get("Hub"), list):
-            return False
+            return False, None
         candidates: list[dict[str, Any]] = []
         for hub in container["Hub"]:
             if not isinstance(hub, dict) or not isinstance(hub.get("Metadata"), list):
@@ -560,8 +589,14 @@ class ToolService:
                         continue
                     raw_id = value.removeprefix("tmdb://").split("?", 1)[0]
                     if raw_id.isdigit() and int(raw_id) == tmdb_id:
-                        return True
-        return False
+                        slug = record.get("slug")
+                        plex_url = (
+                            f"https://watch.plex.tv/movie/{slug}"
+                            if isinstance(slug, str) and slug
+                            else None
+                        )
+                        return True, plex_url
+        return False, None
 
     async def _request_series(self, arguments: object, actor: Actor, _role: Role) -> dict[str, Any]:
         args = _exact(arguments, {"tvdb_id", "seasons", "anime"})

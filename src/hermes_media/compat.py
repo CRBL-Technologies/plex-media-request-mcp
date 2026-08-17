@@ -164,7 +164,6 @@ def _media_picker_markup(
     labels: Sequence[str],
     active_index: int,
     active_is_movie: bool,
-    recommendation_mode: bool,
 ) -> object:
     from telegram import (  # type: ignore[import-not-found]
         InlineKeyboardButton,
@@ -180,36 +179,17 @@ def _media_picker_markup(
         ]
         for index, label in enumerate(labels)
     ]
-    if recommendation_mode:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    "✓ Pick", callback_data=f"{MEDIA_CALLBACK_PREFIX}:{picker_id}:select"
-                ),
-                InlineKeyboardButton(
-                    "↻ Search more", callback_data=f"{MEDIA_CALLBACK_PREFIX}:{picker_id}:more"
-                ),
-            ]
-        )
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    "Cancel", callback_data=f"{MEDIA_CALLBACK_PREFIX}:{picker_id}:cancel"
-                )
-            ]
-        )
-    else:
-        action = "+ Request movie" if active_is_movie else "✓ Choose series"
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    action, callback_data=f"{MEDIA_CALLBACK_PREFIX}:{picker_id}:select"
-                ),
-                InlineKeyboardButton(
-                    "Cancel", callback_data=f"{MEDIA_CALLBACK_PREFIX}:{picker_id}:cancel"
-                ),
-            ]
-        )
+    action = "+ Request movie" if active_is_movie else "✓ Choose series"
+    rows.append(
+        [
+            InlineKeyboardButton(
+                action, callback_data=f"{MEDIA_CALLBACK_PREFIX}:{picker_id}:select"
+            ),
+            InlineKeyboardButton(
+                "Cancel", callback_data=f"{MEDIA_CALLBACK_PREFIX}:{picker_id}:cancel"
+            ),
+        ]
+    )
     return InlineKeyboardMarkup(rows)
 
 
@@ -223,7 +203,6 @@ async def send_media_picker(
     caption: str,
     active_index: int,
     active_is_movie: bool,
-    recommendation_mode: bool,
 ) -> object:
     """Send one tabbed media card through the pinned Telegram bot."""
 
@@ -235,7 +214,6 @@ async def send_media_picker(
         labels=labels,
         active_index=active_index,
         active_is_movie=active_is_movie,
-        recommendation_mode=recommendation_mode,
     )
     if poster_url is not None:
         message = await bot.send_photo(
@@ -266,7 +244,6 @@ async def edit_media_picker(
     caption: str,
     active_index: int,
     active_is_movie: bool,
-    recommendation_mode: bool,
     has_photo: bool,
 ) -> bool:
     """Swap the active tab in place; return whether the message now has a photo."""
@@ -276,7 +253,6 @@ async def edit_media_picker(
         labels=labels,
         active_index=active_index,
         active_is_movie=active_is_movie,
-        recommendation_mode=recommendation_mode,
     )
     if has_photo and poster_url is not None:
         from telegram import InputMediaPhoto
@@ -327,6 +303,88 @@ async def close_media_picker(query: Any, *, caption: str, has_photo: bool) -> No
         await query.edit_message_caption(caption=caption, parse_mode="HTML", reply_markup=None)
     else:
         await query.edit_message_text(text=caption, parse_mode="HTML", reply_markup=None)
+
+
+def _single_result_markup(
+    *,
+    candidate: Mapping[str, Any],
+) -> object | None:
+    """Build one action button for a single search result, or None."""
+
+    from telegram import (  # type: ignore[import-not-found,unused-ignore]
+        InlineKeyboardButton,
+        InlineKeyboardMarkup,
+    )
+
+    plex_url = candidate.get("plex_url")
+    if isinstance(plex_url, str) and plex_url:
+        return InlineKeyboardMarkup(  # type: ignore[no-any-return]
+            [[InlineKeyboardButton("▶ Open in Plex", url=plex_url)]]
+        )
+    media_type = candidate.get("media_type")
+    downloaded = candidate.get("downloaded")
+    if downloaded:
+        return None
+    if media_type == "movie":
+        tmdb_id = candidate.get("tmdb_id")
+        if isinstance(tmdb_id, int) and tmdb_id > 0:
+            return InlineKeyboardMarkup(  # type: ignore[no-any-return]
+                [
+                    [
+                        InlineKeyboardButton(
+                            "＋ Request",
+                            callback_data=f"{MEDIA_CALLBACK_PREFIX}:req:m{tmdb_id}",
+                        )
+                    ]
+                ]
+            )
+    elif media_type == "series":
+        tvdb_id = candidate.get("tvdb_id")
+        if isinstance(tvdb_id, int) and tvdb_id > 0:
+            return InlineKeyboardMarkup(  # type: ignore[no-any-return]
+                [
+                    [
+                        InlineKeyboardButton(
+                            "＋ Request",
+                            callback_data=f"{MEDIA_CALLBACK_PREFIX}:req:s{tvdb_id}",
+                        )
+                    ]
+                ]
+            )
+    return None
+
+
+async def send_single_result_card(
+    adapter: object,
+    *,
+    chat_id: int,
+    poster_url: str | None,
+    caption: str,
+    candidate: Mapping[str, Any],
+) -> object:
+    """Send a single search result with an optional action button."""
+
+    bot = getattr(adapter, "_bot", None)
+    if bot is None:
+        return SimpleNamespace(success=False)
+    markup = _single_result_markup(candidate=candidate)
+    if poster_url is not None:
+        message = await bot.send_photo(
+            chat_id=chat_id,
+            photo=poster_url,
+            caption=caption,
+            parse_mode="HTML",
+            reply_markup=markup,
+        )
+    else:
+        message = await bot.send_message(
+            chat_id=chat_id,
+            text=caption,
+            parse_mode="HTML",
+            reply_markup=markup,
+            disable_web_page_preview=True,
+        )
+    return SimpleNamespace(success=True, message_id=str(message.message_id))
 
 
 def verify_pinned_runtime(

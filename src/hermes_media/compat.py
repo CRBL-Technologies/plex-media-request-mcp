@@ -345,7 +345,7 @@ def _season_label(state: Mapping[str, Any], *, selected: bool) -> str:
         # Telegram has no disabled button, so a complete season reads as done
         # and its tap only explains itself.
         return f"☑  {name}  ·  complete"
-    counts = f"{files}/{episodes}" if isinstance(episodes, int) and episodes else "no episodes"
+    counts = f"{files}/{episodes}" if isinstance(episodes, int) and episodes else "not aired yet"
     if state.get("monitored") and not state.get("partial"):
         counts += " · searching"
     box = "☑" if selected else "☐"
@@ -375,7 +375,13 @@ def season_picker_markup(
         ]
         for state in states
     ]
-    missing = [int(state["number"]) for state in states if not state.get("complete")]
+    # A season with no episodes yet is still shown, and can be ticked to
+    # monitor it, but the shortcut only grabs seasons that actually exist.
+    missing = [
+        int(state["number"])
+        for state in states
+        if not state.get("complete") and int(state.get("episodes") or 0) > 0
+    ]
     if missing:
         rows.append(
             [

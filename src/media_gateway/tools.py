@@ -487,7 +487,12 @@ class ToolService:
             if not states:
                 return
             complete = [int(s["number"]) for s in states if s["complete"]]
-            missing = [int(s["number"]) for s in states if not s["complete"]]
+            # A season Sonarr lists with no episodes has not aired yet, so it
+            # is not missing: there is nothing to acquire, and counting it
+            # would keep every ongoing show permanently unavailable.
+            missing = [
+                int(s["number"]) for s in states if not s["complete"] and int(s["episodes"]) > 0
+            ]
             candidate["seasons_complete"] = complete
             candidate["seasons_missing"] = missing
             # "Downloaded" for a series means every season Sonarr knows is

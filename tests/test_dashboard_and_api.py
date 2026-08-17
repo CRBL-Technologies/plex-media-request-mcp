@@ -1171,6 +1171,59 @@ def test_untracked_series_costs_no_library_read(config: Config) -> None:
     assert [name for name, _ in fake.calls if name == "sonarr_get_series_by_id"] == []
 
 
+def test_an_unaired_season_is_not_reported_missing(config: Config) -> None:
+    """A season Sonarr lists with no episodes has nothing to acquire.
+
+    Counting it as missing would offer to add a season that does not exist yet
+    and keep every ongoing show permanently unavailable.
+    """
+
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["sonarr_search_series"] = {
+        "data": [
+            {
+                "tvdbId": 371980,
+                "title": "Ongoing Show",
+                "year": 2022,
+                "id": 4,
+                "seasons": [{"seasonNumber": 1}, {"seasonNumber": 2}, {"seasonNumber": 3}],
+            }
+        ]
+    }
+    fake.responses["sonarr_get_series_by_id"] = {
+        "data": {
+            "id": 4,
+            "seasons": [
+                {
+                    "seasonNumber": 1,
+                    "statistics": {"episodeFileCount": 10, "totalEpisodeCount": 10},
+                },
+                {"seasonNumber": 2, "statistics": {"episodeFileCount": 8, "totalEpisodeCount": 8}},
+                # Announced, nothing aired.
+                {"seasonNumber": 3, "statistics": {"episodeFileCount": 0, "totalEpisodeCount": 0}},
+            ],
+        }
+    }
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "search_media",
+                "arguments": {"query": "Ongoing", "media_type": "series", "limit": 1},
+            },
+        )
+
+    result = response.json()["result"]["results"][0]
+    assert result["seasons_complete"] == [1, 2]
+    assert result["seasons_missing"] == []
+    # Everything that exists is held, so the show reads as available.
+    assert result["downloaded"] is True
+
+
 def test_mixed_search_keeps_tmdb_and_tvdb_library_ids_separate(config: Config) -> None:
     """Equal external ids must not cross the Radarr/Sonarr namespace boundary."""
 

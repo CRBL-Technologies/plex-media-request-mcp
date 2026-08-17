@@ -890,7 +890,9 @@ async def _handle_season_picker_callback(
 
     if action == "all":
         pending.selected = {
-            int(state["number"]) for state in pending.states if not state.get("complete")
+            int(state["number"])
+            for state in pending.states
+            if not state.get("complete") and int(state.get("episodes") or 0) > 0
         }
         await answer_media_callback(query, "All missing seasons selected")
         with suppress(Exception):

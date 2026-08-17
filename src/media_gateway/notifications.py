@@ -242,8 +242,11 @@ class Notifications:
             else:
                 key = ("movie", event["event_key"])
             grouped[key].append(event)
-        for batch in grouped.values():
-            if max(int(item["observed_at"]) for item in batch) > before:
+        for key, batch in grouped.items():
+            # The delay exists so a season import arrives as one message rather
+            # than one per episode. A movie is its own batch and has nothing to
+            # wait for, so making it sit out the window only delays the news.
+            if key[0] == "series" and max(int(item["observed_at"]) for item in batch) > before:
                 continue
             batch = await self._enrich(batch)
             await self._deliver_batch(batch)

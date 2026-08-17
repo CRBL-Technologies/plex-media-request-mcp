@@ -178,6 +178,12 @@ tool_loop_guardrails:
 
 This is a native Hermes setting, not a second CRBL configuration source.
 
+A Plex arrival is announced once the title has been quiet for
+`MEDIA_GATEWAY_NOTIFICATION_DELAY_SECONDS`, so a season import is one message
+rather than one per episode. A movie is its own batch with nothing to group
+with, so it is sent on the next pass instead of serving out a window that can
+only delay it.
+
 The gateway database advances through numbered, transactional migrations and
 fails closed on an incompatible schema. Deployment takes and verifies a SQLite
 backup before any schema-changing release. The one-time legacy importer was

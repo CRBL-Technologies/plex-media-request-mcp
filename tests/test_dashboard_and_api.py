@@ -2007,6 +2007,72 @@ async def test_plex_slug_lookup_keeps_token_out_of_the_url(
     assert captured == {}
 
 
+async def test_a_movie_is_notified_without_waiting_for_the_batch_window(
+    config: Config,
+) -> None:
+    """A movie is its own batch, so the season-batching delay buys it nothing."""
+
+    app = create_app(config)
+    sent: list[tuple[int, str]] = []
+    with TestClient(app):
+        runtime = app.state.runtime
+
+        async def send(chat_id: int, text: str, plex_url: str) -> None:
+            sent.append((chat_id, plex_url))
+
+        runtime.notifications._send = send  # type: ignore[method-assign]
+        runtime.store.add_media_event(
+            event_key="movie:9001",
+            media_type="movie",
+            external_id=533535,
+            rating_key="9001",
+            title="Deadpool & Wolverine",
+            show_title=None,
+            season_number=None,
+            episode_number=None,
+            plex_url="https://watch.plex.tv/movie/deadpool-and-wolverine",
+            observed_at=int(time.time()),
+        )
+
+        await runtime.notifications.flush()
+
+    assert [url for _chat, url in sent] == ["https://watch.plex.tv/movie/deadpool-and-wolverine"]
+    remaining = runtime.store.pending_media_events(int(time.time()) + 10)
+    assert [event["event_key"] for event in remaining] == []
+
+
+async def test_a_fresh_episode_still_waits_for_its_season(config: Config) -> None:
+    """Series keep the window, or a season import fires one message per episode."""
+
+    app = create_app(config)
+    sent: list[str] = []
+    with TestClient(app):
+        runtime = app.state.runtime
+
+        async def send(chat_id: int, text: str, plex_url: str) -> None:
+            sent.append(plex_url)
+
+        runtime.notifications._send = send  # type: ignore[method-assign]
+        runtime.store.add_media_event(
+            event_key="episode:9002",
+            media_type="series",
+            external_id=371980,
+            rating_key="9002",
+            title="Episode 1",
+            show_title="Severance",
+            season_number=1,
+            episode_number=1,
+            plex_url="https://watch.plex.tv/show/severance/season/1/episode/1",
+            observed_at=int(time.time()),
+        )
+
+        await runtime.notifications.flush()
+
+    assert sent == []
+    remaining = runtime.store.pending_media_events(int(time.time()) + 10)
+    assert [event["event_key"] for event in remaining] == ["episode:9002"]
+
+
 async def test_season_batch_waits_until_the_latest_episode_is_quiet(config: Config) -> None:
     app = create_app(config)
     sent: list[int] = []

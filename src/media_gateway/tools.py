@@ -423,6 +423,8 @@ class ToolService:
         values = await asyncio.gather(*(call for _, call in calls), return_exceptions=True)
         groups: list[list[dict[str, Any]]] = []
         errors: list[str] = []
+        # TMDB id -> Radarr library id, for the availability lookup below.
+        library_ids: dict[int, int] = {}
         for (kind, _), value in zip(calls, values, strict=True):
             if isinstance(value, BaseException):
                 if not isinstance(value, Exception):
@@ -430,11 +432,61 @@ class ToolService:
                 errors.append(kind)
                 continue
             mapper = _movie_candidate if kind == "movie" else _series_candidate
-            groups.append(
-                [candidate for item in _rows(value) if (candidate := mapper(item)) is not None]
-            )
+            group: list[dict[str, Any]] = []
+            for item in _rows(value):
+                candidate = mapper(item)
+                if candidate is None:
+                    continue
+                if kind == "movie":
+                    radarr_id = item.get("id")
+                    if isinstance(radarr_id, int) and radarr_id > 0:
+                        library_ids[candidate["tmdb_id"]] = radarr_id
+                group.append(candidate)
+            groups.append(group)
         results = _interleave(groups, limit)
+        await self._enrich_downloaded(results, library_ids)
         return results, errors
+
+    async def _enrich_downloaded(
+        self, results: list[dict[str, Any]], library_ids: dict[int, int]
+    ) -> None:
+        """Correct ``downloaded`` from each movie's library record.
+
+        Radarr's lookup answers "does this film exist", not "do we hold it":
+        it returns the catalogue entry, where ``hasFile`` is null even for a
+        film sitting on disk. Reading it there reports every title as missing,
+        which makes the bot offer to add films the user can already watch.
+
+        Only the library record carries the answer, so one is fetched per
+        tracked movie in the result set -- concurrently, and never for a title
+        Radarr does not track, which needs no call to know it has no file.
+        """
+
+        targets = [
+            candidate
+            for candidate in results
+            if candidate.get("media_type") == "movie"
+            and not candidate.get("downloaded")
+            and isinstance(library_ids.get(candidate.get("tmdb_id")), int)
+        ]
+        if not targets:
+            return
+
+        async def resolve(candidate: dict[str, Any]) -> None:
+            record = _record(
+                await self.upstream.call(
+                    "radarr_get_movie", {"id": library_ids[candidate["tmdb_id"]]}
+                )
+            )
+            if record is not None and _bool(record.get("hasFile")):
+                candidate["downloaded"] = True
+
+        outcomes = await asyncio.gather(
+            *(resolve(candidate) for candidate in targets), return_exceptions=True
+        )
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException) and not isinstance(outcome, Exception):
+                raise outcome
 
     async def _enrich_plex_urls(self, results: list[dict[str, Any]]) -> None:
         """Attach ``plex_url`` to a lone downloaded movie, at a cost of one call.

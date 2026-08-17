@@ -909,6 +909,118 @@ def test_specials_webhook_keeps_its_season_number(config: Config) -> None:
     assert event["episode_number"] == 1
 
 
+def test_availability_comes_from_the_radarr_library_not_the_lookup(config: Config) -> None:
+    """Radarr's lookup reports hasFile as null even for a film on disk.
+
+    Reading availability there marks every title as missing, so the bot offers
+    to add films the user can already watch.
+    """
+
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["radarr_search_movie"] = {
+        "data": [
+            # Tracked (has an id) but the lookup omits hasFile.
+            {"tmdbId": 299536, "title": "Avengers: Infinity War", "year": 2018, "id": 198},
+            # Not tracked at all: no library record can exist.
+            {"tmdbId": 999999, "title": "Some Unowned Film", "year": 2024},
+        ]
+    }
+    fake.responses["radarr_get_movie"] = {
+        "data": {"id": 198, "title": "Avengers: Infinity War", "hasFile": True}
+    }
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "search_media",
+                "arguments": {"query": "Avengers", "media_type": "movie", "limit": 2},
+            },
+        )
+
+    results = {item["title"]: item for item in response.json()["result"]["results"]}
+    assert results["Avengers: Infinity War"]["downloaded"] is True
+    assert results["Some Unowned Film"]["downloaded"] is False
+    # One library read, and only for the tracked title.
+    assert [args for name, args in fake.calls if name == "radarr_get_movie"] == [{"id": 198}]
+
+
+def test_recommendations_report_owned_titles_as_available(config: Config) -> None:
+    """The reported case: four owned films all shown as missing."""
+
+    app = create_app(config)
+    fake = FakeUpstream()
+    owned = {
+        "Avengers: Infinity War (2018)": (299536, 198, 2018),
+        "Avengers: Endgame (2019)": (299534, 197, 2019),
+        "Doctor Strange in the Multiverse of Madness (2022)": (453395, 760, 2022),
+        "Spider-Man: No Way Home (2021)": (634649, 500, 2021),
+    }
+
+    def lookup(arguments: dict[str, Any]) -> dict[str, Any]:
+        term = str(arguments.get("term", ""))
+        tmdb, radarr_id, year = owned[term]
+        return {
+            "data": [
+                {
+                    "tmdbId": tmdb,
+                    "title": term.rsplit(" (", 1)[0],
+                    "year": year,
+                    "id": radarr_id,
+                }
+            ]
+        }
+
+    def library(arguments: dict[str, Any]) -> dict[str, Any]:
+        return {"data": {"id": arguments["id"], "hasFile": True}}
+
+    fake.responses["radarr_search_movie"] = lookup
+    fake.responses["radarr_get_movie"] = library
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "recommend_media",
+                "arguments": {"titles": list(owned), "media_type": "movie"},
+            },
+        )
+
+    results = response.json()["result"]["results"]
+    assert len(results) == 4
+    assert all(item["downloaded"] is True for item in results)
+
+
+def test_untracked_movies_cost_no_library_reads(config: Config) -> None:
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["radarr_search_movie"] = {
+        "data": [
+            {"tmdbId": 1, "title": "Unowned One", "year": 2024},
+            {"tmdbId": 2, "title": "Unowned Two", "year": 2025},
+        ]
+    }
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "search_media",
+                "arguments": {"query": "Unowned", "media_type": "movie", "limit": 2},
+            },
+        )
+
+    assert all(item["downloaded"] is False for item in response.json()["result"]["results"])
+    assert [name for name, _ in fake.calls if name == "radarr_get_movie"] == []
+
+
 def test_series_seasons_reports_counts_from_the_tracked_series(config: Config) -> None:
     """The lookup response leaves statistics null, so counts need the series itself."""
 

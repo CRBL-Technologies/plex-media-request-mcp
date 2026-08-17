@@ -14,6 +14,7 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
+from . import plex_watch
 from .config import Config
 from .policy import Policy
 from .secrets import read_dotenv
@@ -332,35 +333,13 @@ class Notifications:
         return ready
 
     async def _lookup_plex_slug(self, media_type: str, external_id: int) -> str | None:
-        try:
-            token = read_dotenv(self.config.upstream_token_file, {"PLEX_API_KEY"}).get(
-                "PLEX_API_KEY"
-            )
-        except (OSError, ValueError):
-            return None
-        if not token:
-            return None
-        provider = "tmdb" if media_type == "movie" else "tvdb"
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                response = await client.get(
-                    PLEX_METADATA_MATCH_URL,
-                    params={
-                        "guid": f"{provider}://{external_id}",
-                        "type": 1 if media_type == "movie" else 2,
-                    },
-                    headers={"X-Plex-Token": token, "Accept": "application/json"},
-                )
-        except httpx.HTTPError:
-            return None
-        if response.is_error:
-            return None
-        try:
-            value = response.json()
-        except ValueError:
-            return None
-        candidates = self._metadata_objects(value) if isinstance(value, dict) else []
-        return _valid_slug(candidates[0].get("slug")) if candidates else None
+        # One implementation, shared with the search path that builds card
+        # buttons, so a slug is resolved the same way and cached once.
+        return await plex_watch.lookup_slug(
+            token_file=self.config.upstream_token_file,
+            media_type=media_type,
+            external_id=external_id,
+        )
 
     async def _deliver_batch(self, batch: list[dict[str, Any]]) -> None:
         first = batch[0]

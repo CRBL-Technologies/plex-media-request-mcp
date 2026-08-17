@@ -417,27 +417,105 @@ def test_single_result_button_matches_availability(monkeypatch: pytest.MonkeyPat
         assert len(buttons) == 1
         return buttons[0]
 
-    # A series on Plex links straight to its show page.
+    # A downloaded movie with a resolved slug links straight to Plex.
     watch = only_button(
         {
-            "media_type": "series",
-            "tvdb_id": 411959,
-            "in_plex": True,
-            "plex_url": "https://watch.plex.tv/show/3-body-problem",
+            "media_type": "movie",
+            "tmdb_id": 693134,
+            "downloaded": True,
+            "plex_url": "https://watch.plex.tv/movie/dune-part-two",
         }
     )
     assert watch is not None
     assert watch.text == "▶ Open in Plex"
-    assert watch.url == "https://watch.plex.tv/show/3-body-problem"
+    assert watch.url == "https://watch.plex.tv/movie/dune-part-two"
 
-    # On Plex but with no slug to link to: no button beats a wrong one.
-    assert only_button({"media_type": "series", "tvdb_id": 411959, "in_plex": True}) is None
-    assert only_button({"media_type": "movie", "tmdb_id": 27205, "in_plex": True}) is None
+    # Downloaded but Plex exposed no slug: no button beats a wrong one.
+    assert only_button({"media_type": "movie", "tmdb_id": 27205, "downloaded": True}) is None
 
-    # Not on Plex: request it.
-    request = only_button({"media_type": "series", "tvdb_id": 411959})
+    # Not downloaded: request it.
+    request = only_button({"media_type": "movie", "tmdb_id": 27205})
     assert request is not None
-    assert request.callback_data == "md:req:s411959"
+    assert request.callback_data == "md:req:m27205"
+
+    # A series always routes to the season picker, which owns availability.
+    series = only_button({"media_type": "series", "tvdb_id": 411959})
+    assert series is not None
+    assert series.callback_data == "md:req:s411959"
+
+
+async def test_model_driven_request_retires_the_cards_button(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`request Dune` requests via the model, so the card's button must go.
+
+    Otherwise the button stays live next to an already-requested title and a
+    later tap runs the provider operation a second time.
+    """
+
+    class SearchThenRequestGateway(FakeGateway):
+        async def call(self, actor: Actor, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            self.calls.append((actor.user_id, name, arguments))
+            if name == "search_media":
+                return {
+                    "query": "Dune Part Two",
+                    "results": [
+                        {
+                            "media_type": "movie",
+                            "tmdb_id": 693134,
+                            "title": "Dune: Part Two",
+                            "year": 2024,
+                            "poster_url": "https://image.tmdb.org/dune.jpg",
+                        }
+                    ],
+                    "unavailable_sources": [],
+                }
+            return {"status": "requested", "request_id": 1}
+
+    class Button:
+        def __init__(self, text: str, *, callback_data: str = "", url: str = "") -> None:
+            self.text = text
+            self.callback_data = callback_data
+            self.url = url
+
+    class Markup:
+        def __init__(self, rows: list[list[Button]]) -> None:
+            self.inline_keyboard = rows
+
+    class CardAdapter:
+        def __init__(self) -> None:
+            self._media_delivery_loop = asyncio.get_running_loop()
+            self.cleared: list[dict[str, Any]] = []
+            self._bot = SimpleNamespace(
+                send_photo=self.send_photo,
+                edit_message_reply_markup=self.edit_message_reply_markup,
+            )
+
+        async def send_photo(self, **_values: Any) -> SimpleNamespace:
+            return SimpleNamespace(message_id=4242)
+
+        async def edit_message_reply_markup(self, **values: Any) -> None:
+            self.cleared.append(values)
+
+    telegram = ModuleType("telegram")
+    telegram.InlineKeyboardButton = Button  # type: ignore[attr-defined]
+    telegram.InlineKeyboardMarkup = Markup  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "telegram", telegram)
+    monkeypatch.setattr(plugin, "_single_cards", {})
+    adapter = CardAdapter()
+    monkeypatch.setattr(plugin, "_client", SearchThenRequestGateway())
+    monkeypatch.setattr(plugin, "_active_adapter", adapter)
+    actor = Actor(user_id=1001, chat_id=1001)
+
+    with actor_scope(actor, Role.USER, "agent:main:telegram:dm:1001"):
+        await plugin._handler("search_media")({"query": "Dune Part Two"})
+        assert adapter.cleared == []
+        # The same turn then requests it, exactly as the platform hint directs.
+        await plugin._handler("request_movie")({"tmdb_id": 693134})
+
+    assert adapter.cleared == [{"chat_id": 1001, "message_id": 4242, "reply_markup": None}]
+    # The card is forgotten, so a repeat request cannot edit a stale message.
+    assert plugin._single_cards == {}
 
 
 async def test_single_result_text_card_closes_as_text_not_caption(
@@ -1186,14 +1264,13 @@ def test_search_tool_contract_owns_native_telegram_selection() -> None:
     assert "before the tool returns" in text
     assert "call clarify" in text
     assert "Never use MEDIA" in text
-    # The model is told what in_plex means, so it can state availability
-    # instead of guessing from in_radarr/in_sonarr alone.
-    assert "in_plex" in text
-    assert "in_plex" in plugin.PLATFORM_HINT
+    # Availability is the providers' answer, so the contract points at their
+    # fields rather than at a Plex lookup.
+    assert "plex_url on a lone downloaded movie" in text
+    assert "downloaded" in plugin.PLATFORM_HINT
     recommendation_schema = SHARED_SCHEMAS["recommend_media"]
     recommendation = recommendation_schema["description"]
     assert "conversational reply" in recommendation
-    assert "in_plex" in recommendation
     assert "instead of calling search_media separately" in recommendation
     assert recommendation_schema["inputSchema"]["properties"]["titles"]["minItems"] == 4
 

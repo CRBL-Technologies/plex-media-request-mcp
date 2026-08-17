@@ -7,6 +7,7 @@ import re
 from typing import Any
 from urllib.parse import urlsplit
 
+from . import plex_watch
 from .config import Config
 from .constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
 from .store import Store
@@ -186,7 +187,8 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
     "search_media": {
         "description": (
             "Search Radarr and Sonarr for a movie or series. Results include poster_url "
-            "when available, and in_plex with plex_url when the title is already on Plex. "
+            "when available, and plex_url on a lone downloaded movie. Availability comes from "
+            "downloaded for a movie and from the season report for a series. "
             "On Telegram, the media adapter presents up to four results in one "
             "tabbed poster card; opening a tab swaps its poster in place before the tool returns. "
             "Never use MEDIA for a remote poster URL, repeat the candidate list, or call clarify "
@@ -214,8 +216,7 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
             "recommendation research. Use this once for discovery requests instead of calling "
             "search_media separately for every title. Include a year in each title when known. "
             "On Telegram the results are returned for a conversational reply; present each "
-            "title with its availability and offer to add any that are missing. A result marked "
-            "in_plex is already on Plex. "
+            "title with its availability and offer to add any that are missing. "
             "Do not use it for a direct title lookup."
         ),
         "inputSchema": {
@@ -376,40 +377,33 @@ class ToolService:
         return results, errors
 
     async def _enrich_plex_urls(self, results: list[dict[str, Any]]) -> None:
-        """Attach ``in_plex`` and ``plex_url`` for Telegram action buttons.
+        """Attach ``plex_url`` to a lone downloaded movie, at a cost of one call.
 
-        Only titles the providers already track are looked up, so a search that
-        returns nothing local costs no Plex calls. ``in_plex`` is recorded even
-        when Plex exposes no slug, so a title that is already available never
-        gets offered a redundant Request button.
+        Only the single-result card renders a watch link, so a multi-result set
+        and a recommendation batch resolve nothing: enriching them would spend
+        one request per title on a field no caller reads. Radarr reports
+        availability, so no Plex library traversal is involved -- the lookup
+        turns a TMDB id into a slug and nothing more.
+
+        Series are excluded on purpose. Their card opens the season picker,
+        which reports per-season availability from Sonarr instead.
         """
 
-        for candidate in results:
-            media_type = candidate.get("media_type")
-            title = candidate.get("title")
-            if not isinstance(title, str):
-                continue
-            try:
-                if media_type == "movie" and candidate.get("downloaded"):
-                    tmdb_id = candidate.get("tmdb_id")
-                    if isinstance(tmdb_id, int) and tmdb_id > 0:
-                        visible, url = await self._plex_movie_lookup(tmdb_id, title)
-                        if visible:
-                            candidate["in_plex"] = True
-                        if url:
-                            candidate["plex_url"] = url
-                elif media_type == "series" and candidate.get("in_sonarr"):
-                    # Series candidates carry no per-file flag, so Sonarr
-                    # tracking is the closest signal that Plex may hold it.
-                    tvdb_id = candidate.get("tvdb_id")
-                    if isinstance(tvdb_id, int) and tvdb_id > 0:
-                        visible, url = await self._plex_series_lookup(tvdb_id, title)
-                        if visible:
-                            candidate["in_plex"] = True
-                        if url:
-                            candidate["plex_url"] = url
-            except UpstreamError:
-                pass
+        if len(results) != 1:
+            return
+        candidate = results[0]
+        if candidate.get("media_type") != "movie" or not candidate.get("downloaded"):
+            return
+        tmdb_id = candidate.get("tmdb_id")
+        if not isinstance(tmdb_id, int) or tmdb_id <= 0:
+            return
+        slug = await plex_watch.lookup_slug(
+            token_file=self.config.upstream_token_file,
+            media_type="movie",
+            external_id=tmdb_id,
+        )
+        if slug is not None:
+            candidate["plex_url"] = plex_watch.watch_url(media_type="movie", slug=slug)
 
     async def _search_media(self, arguments: object, _actor: Actor, _role: Role) -> dict[str, Any]:
         args = _exact(arguments, {"query", "media_type", "limit"})
@@ -571,68 +565,30 @@ class ToolService:
         return "requested"
 
     async def _movie_in_plex(self, tmdb_id: int, title: str) -> bool:
-        visible, _url = await self._plex_movie_lookup(tmdb_id, title)
-        return visible
+        """Answer whether *this* library already holds the movie.
 
-    async def _plex_movie_lookup(self, tmdb_id: int, title: str) -> tuple[bool, str | None]:
-        """Check if a movie is in Plex and return its watch URL when available."""
-
-        return await self._plex_lookup(
-            title=title,
-            search_type="movies",
-            item_type="movie",
-            guid_prefix="tmdb://",
-            external_id=tmdb_id,
-            url_kind="movie",
-        )
-
-    async def _plex_series_lookup(self, tvdb_id: int, title: str) -> tuple[bool, str | None]:
-        """Check if a series is in Plex and return its watch URL when available.
-
-        Sonarr identifies series by TVDB, so the Plex show GUID is matched on
-        ``tvdb://`` rather than the ``tmdb://`` the movie path uses.
-        """
-
-        return await self._plex_lookup(
-            title=title,
-            search_type="tv",
-            item_type="show",
-            guid_prefix="tvdb://",
-            external_id=tvdb_id,
-            url_kind="show",
-        )
-
-    async def _plex_lookup(
-        self,
-        *,
-        title: str,
-        search_type: str,
-        item_type: str,
-        guid_prefix: str,
-        external_id: int,
-        url_kind: str,
-    ) -> tuple[bool, str | None]:
-        """Resolve one title to its Plex presence and public watch URL.
-
-        The slug comes from the metadata response this lookup already makes for
-        the identity check, so no extra Plex call is needed to build the URL.
+        This is the expensive question -- a library search plus one metadata
+        call per candidate -- so it is asked only where a request needs to know
+        whether the file is already watchable. A watch link is a different
+        question and uses ``plex_watch.lookup_slug``, which costs one request
+        and must never be answered by walking the library.
         """
 
         raw = await self.upstream.call(
-            "plex_search", {"query": title, "limit": 20, "searchTypes": [search_type]}
+            "plex_search", {"query": title, "limit": 20, "searchTypes": ["movies"]}
         )
         if not isinstance(raw, dict):
             raise UpstreamError("Plex search returned an invalid response")
         container = raw.get("MediaContainer")
         if not isinstance(container, dict) or not isinstance(container.get("Hub"), list):
-            return False, None
+            return False
         candidates: list[dict[str, Any]] = []
         for hub in container["Hub"]:
             if not isinstance(hub, dict) or not isinstance(hub.get("Metadata"), list):
                 continue
             candidates.extend(item for item in hub["Metadata"] if isinstance(item, dict))
         for item in candidates[:20]:
-            if item.get("type") != item_type:
+            if item.get("type") != "movie":
                 continue
             rating_key = item.get("ratingKey")
             if not isinstance(rating_key, str) or not rating_key:
@@ -644,18 +600,12 @@ class ToolService:
                     continue
                 for guide in guides:
                     value = guide.get("id") if isinstance(guide, dict) else None
-                    if not isinstance(value, str) or not value.startswith(guid_prefix):
+                    if not isinstance(value, str) or not value.startswith("tmdb://"):
                         continue
-                    raw_id = value.removeprefix(guid_prefix).split("?", 1)[0]
-                    if raw_id.isdigit() and int(raw_id) == external_id:
-                        slug = record.get("slug")
-                        plex_url = (
-                            f"https://watch.plex.tv/{url_kind}/{slug}"
-                            if isinstance(slug, str) and slug
-                            else None
-                        )
-                        return True, plex_url
-        return False, None
+                    raw_id = value.removeprefix("tmdb://").split("?", 1)[0]
+                    if raw_id.isdigit() and int(raw_id) == tmdb_id:
+                        return True
+        return False
 
     async def _request_series(self, arguments: object, actor: Actor, _role: Role) -> dict[str, Any]:
         args = _exact(arguments, {"tvdb_id", "seasons", "anime"})

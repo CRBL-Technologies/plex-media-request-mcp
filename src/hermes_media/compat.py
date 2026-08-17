@@ -336,6 +336,19 @@ async def edit_media_picker(
     return next_has_photo
 
 
+async def clear_card_buttons(adapter: object, *, chat_id: int, message_id: int) -> None:
+    """Drop one card's buttons, leaving its poster and caption in place.
+
+    Used when a request already happened by another route, so the button cannot
+    be tapped into a second provider operation.
+    """
+
+    bot = getattr(adapter, "_bot", None)
+    if bot is None:
+        return
+    await bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id, reply_markup=None)
+
+
 async def close_media_picker(query: Any, *, caption: str, has_photo: bool) -> None:
     """Remove a card's controls after selection, cancellation, or expiry."""
 
@@ -365,7 +378,7 @@ def _single_result_markup(
     # Already available, but with no slug to link to. Offering Request here
     # would invite a redundant request for something the user can already
     # watch, so the card degrades to no button at all.
-    if candidate.get("downloaded") or candidate.get("in_plex"):
+    if candidate.get("downloaded"):
         return None
     if media_type == "movie":
         tmdb_id = candidate.get("tmdb_id")

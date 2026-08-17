@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, ClassVar
 
 import httpx
 import pytest
@@ -187,36 +188,49 @@ def test_roles_and_no_selection_token(config: Config) -> None:
         assert denied.status_code == 400
 
 
-def test_series_search_links_to_its_plex_show_page(config: Config) -> None:
-    """A series already in Plex is matched on its TVDB GUID and linked by slug."""
+class _SlugClient:
+    """Stand-in for Plex's metadata-match endpoint, counting every request."""
 
+    requests: ClassVar[list[dict[str, Any]]] = []
+    slug: ClassVar[str | None] = "dune-part-two"
+
+    async def __aenter__(self) -> _SlugClient:
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+    async def get(self, url: str, **values: Any) -> Any:
+        type(self).requests.append({"url": url, **values})
+        payload = (
+            {"MediaContainer": {"Metadata": [{"slug": type(self).slug}]}}
+            if type(self).slug is not None
+            else {"MediaContainer": {}}
+        )
+        return SimpleNamespace(is_error=False, json=lambda: payload)
+
+
+@pytest.fixture
+def slug_client(config: Config, monkeypatch: pytest.MonkeyPatch) -> type[_SlugClient]:
+    _SlugClient.requests = []
+    _SlugClient.slug = "dune-part-two"
+    # The slug lookup reads the Plex token from the upstream credentials file.
+    config.upstream_token_file.write_text(
+        f"MCP_AUTH_TOKEN={'u' * 40}\nPLEX_API_KEY=plex-secret\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        "media_gateway.plex_watch.httpx.AsyncClient", lambda **_kwargs: _SlugClient()
+    )
+    return _SlugClient
+
+
+def test_lone_downloaded_movie_resolves_its_slug_in_one_request(
+    config: Config, slug_client: type[_SlugClient]
+) -> None:
     app = create_app(config)
     fake = FakeUpstream()
-    fake.responses["sonarr_search_series"] = {
-        "data": [{"tvdbId": 411959, "title": "3 Body Problem", "year": 2024, "id": 7}]
-    }
-    fake.responses["plex_search"] = {
-        "MediaContainer": {
-            "Hub": [
-                {
-                    "Metadata": [
-                        # A movie of the same name must not satisfy a show lookup.
-                        {"type": "movie", "ratingKey": "900"},
-                        {"type": "show", "ratingKey": "901"},
-                    ]
-                }
-            ]
-        }
-    }
-    fake.responses["plex_get_metadata"] = {
-        "MediaContainer": {
-            "Metadata": [
-                {
-                    "slug": "3-body-problem",
-                    "Guid": [{"id": "imdb://tt13016388"}, {"id": "tvdb://411959"}],
-                }
-            ]
-        }
+    fake.responses["radarr_search_movie"] = {
+        "data": [{"tmdbId": 693134, "title": "Dune: Part Two", "year": 2024, "hasFile": True}]
     }
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
@@ -226,68 +240,142 @@ def test_series_search_links_to_its_plex_show_page(config: Config) -> None:
             json={
                 "actor": _actor(1001),
                 "name": "search_media",
-                "arguments": {"query": "3 Body Problem", "media_type": "series", "limit": 1},
+                "arguments": {"query": "Dune Part Two", "media_type": "movie", "limit": 1},
             },
         )
 
     assert response.status_code == 200
     result = response.json()["result"]["results"][0]
-    assert result["in_plex"] is True
-    assert result["plex_url"] == "https://watch.plex.tv/show/3-body-problem"
-    searches = [args for name, args in fake.calls if name == "plex_search"]
-    assert searches == [{"query": "3 Body Problem", "limit": 20, "searchTypes": ["tv"]}]
-    # The show entry is the only one worth a metadata call.
-    assert [args for name, args in fake.calls if name == "plex_get_metadata"] == [
-        {"ratingKey": "901"}
-    ]
-
-
-def test_series_absent_from_plex_is_left_requestable(config: Config) -> None:
-    app = create_app(config)
-    fake = FakeUpstream()
-    fake.responses["sonarr_search_series"] = {
-        "data": [{"tvdbId": 411959, "title": "3 Body Problem", "year": 2024, "id": 7}]
-    }
-    fake.responses["plex_search"] = {"MediaContainer": {"Hub": []}}
-    with TestClient(app) as client:
-        app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "search_media",
-                "arguments": {"query": "3 Body Problem", "media_type": "series", "limit": 1},
-            },
-        )
-
-    result = response.json()["result"]["results"][0]
-    assert "in_plex" not in result
-    assert "plex_url" not in result
-
-
-def test_untracked_series_costs_no_plex_lookup(config: Config) -> None:
-    """Sonarr does not track it, so there is nothing for Plex to hold."""
-
-    app = create_app(config)
-    fake = FakeUpstream()
-    fake.responses["sonarr_search_series"] = {
-        "data": [{"tvdbId": 411959, "title": "3 Body Problem", "year": 2024}]
-    }
-    with TestClient(app) as client:
-        app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "search_media",
-                "arguments": {"query": "3 Body Problem", "media_type": "series", "limit": 1},
-            },
-        )
-
-    assert response.status_code == 200
+    assert result["plex_url"] == "https://watch.plex.tv/movie/dune-part-two"
+    # Exactly one request, by GUID, and never a library traversal.
+    assert len(slug_client.requests) == 1
+    assert slug_client.requests[0]["params"] == {"guid": "tmdb://693134", "type": 1}
     assert [name for name, _ in fake.calls if name.startswith("plex_")] == []
+
+
+def test_multi_result_search_resolves_no_slugs(
+    config: Config, slug_client: type[_SlugClient]
+) -> None:
+    """Only the single-result card renders a link, so a picker costs no lookups."""
+
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["radarr_search_movie"] = {
+        "data": [
+            {"tmdbId": 1, "title": "Dune", "year": 1984, "hasFile": True},
+            {"tmdbId": 2, "title": "Dune", "year": 2021, "hasFile": True},
+            {"tmdbId": 3, "title": "Dune: Part Two", "year": 2024, "hasFile": True},
+        ]
+    }
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "search_media",
+                "arguments": {"query": "Dune", "media_type": "movie", "limit": 3},
+            },
+        )
+
+    assert len(response.json()["result"]["results"]) == 3
+    assert slug_client.requests == []
+
+
+def test_recommendations_resolve_no_slugs(config: Config, slug_client: type[_SlugClient]) -> None:
+    """Recommendations answer conversationally and render no buttons."""
+
+    app = create_app(config)
+    fake = FakeUpstream()
+
+    def movies(arguments: dict[str, Any]) -> dict[str, Any]:
+        term = str(arguments.get("term", ""))
+        title, year = term.rsplit(" ", 1)
+        return {
+            "data": [
+                {
+                    "tmdbId": abs(hash(term)) % 9999,
+                    "title": title,
+                    "year": int(year.strip("()")),
+                    "hasFile": True,
+                }
+            ]
+        }
+
+    fake.responses["radarr_search_movie"] = movies
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "recommend_media",
+                "arguments": {
+                    "titles": [
+                        "Arrival (2016)",
+                        "Ex Machina (2014)",
+                        "Annihilation (2018)",
+                        "Dark City (1998)",
+                    ],
+                    "media_type": "movie",
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    assert slug_client.requests == []
+
+
+def test_series_search_resolves_no_slugs(config: Config, slug_client: type[_SlugClient]) -> None:
+    """A series card opens the season picker, which reports Sonarr's own state."""
+
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["sonarr_search_series"] = {
+        "data": [{"tvdbId": 411959, "title": "3 Body Problem", "year": 2024, "id": 7}]
+    }
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "search_media",
+                "arguments": {"query": "3 Body Problem", "media_type": "series", "limit": 1},
+            },
+        )
+
+    result = response.json()["result"]["results"][0]
+    assert "plex_url" not in result
+    assert slug_client.requests == []
+    assert [name for name, _ in fake.calls if name.startswith("plex_")] == []
+
+
+def test_undownloaded_movie_resolves_no_slug(
+    config: Config, slug_client: type[_SlugClient]
+) -> None:
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["radarr_search_movie"] = {
+        "data": [{"tmdbId": 693134, "title": "Dune: Part Two", "year": 2024, "hasFile": False}]
+    }
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "search_media",
+                "arguments": {"query": "Dune Part Two", "media_type": "movie", "limit": 1},
+            },
+        )
+
+    assert "plex_url" not in response.json()["result"]["results"][0]
+    assert slug_client.requests == []
 
 
 def test_mixed_search_keeps_movie_and_series_results(config: Config) -> None:

@@ -24,6 +24,7 @@ from media_gateway.types import Actor, Role
 from .client import GatewayClient, GatewayError
 from .compat import (
     answer_media_callback,
+    clear_card_buttons,
     close_media_picker,
     edit_media_picker,
     install_platform_hint,
@@ -71,8 +72,8 @@ PLATFORM_HINT = (
     "choose exactly 4 distinct titles, then call recommend_media exactly once with those exact "
     "titles and years; never call search_media separately for each recommendation. "
     "recommend_media returns results for a conversational reply; present each title with its "
-    "availability and offer to add any that are missing. A result marked in_plex is already on "
-    "Plex: say so plainly and never offer to add it. Discovery "
+    "availability and offer to add any that are missing. A downloaded title is already "
+    "available: say so plainly and never offer to add it. Discovery "
     "turns reject model-generated single-title searches before a card is sent. If the user's "
     "current message explicitly says "
     "to add or request media, continue to request the selected result, whether it was chosen by "
@@ -108,6 +109,66 @@ class _PendingMediaPicker:
     actor_chat_id: int = 0
     active_index: int = 0
     has_photo: bool = False
+
+
+@dataclass(frozen=True)
+class _SingleResultCard:
+    """One delivered single-result card that still shows a Request button."""
+
+    chat_id: int
+    message_id: int
+    expires_at: float
+
+
+_single_card_lock = threading.Lock()
+_single_cards: dict[tuple[int, str, int], _SingleResultCard] = {}
+SINGLE_CARD_TTL_SECONDS = 3600
+
+
+def _remember_single_card(
+    *, chat_id: int, media_type: str, external_id: int, message_id: int
+) -> None:
+    now = time.monotonic()
+    with _single_card_lock:
+        for key in [k for k, v in _single_cards.items() if v.expires_at <= now]:
+            _single_cards.pop(key, None)
+        _single_cards[chat_id, media_type, external_id] = _SingleResultCard(
+            chat_id=chat_id,
+            message_id=message_id,
+            expires_at=now + SINGLE_CARD_TTL_SECONDS,
+        )
+
+
+def _take_single_card(
+    *, chat_id: int, media_type: str, external_id: int
+) -> _SingleResultCard | None:
+    with _single_card_lock:
+        card = _single_cards.pop((chat_id, media_type, external_id), None)
+    return card if card is not None and card.expires_at > time.monotonic() else None
+
+
+async def _retire_single_card(*, chat_id: int, media_type: str, external_id: int) -> None:
+    """Remove a card's button once the request happened by another route.
+
+    The model is told to request outright when the user's message says to, so a
+    card delivered in that same turn would otherwise keep a live button whose
+    tap runs the provider operation a second time.
+    """
+
+    card = _take_single_card(chat_id=chat_id, media_type=media_type, external_id=external_id)
+    if card is None:
+        return
+    adapter = _active_adapter
+    if adapter is None:
+        return
+
+    async def clear() -> None:
+        await clear_card_buttons(adapter, chat_id=card.chat_id, message_id=card.message_id)
+
+    try:
+        await _on_adapter_loop(clear)
+    except Exception:
+        logger.debug("Could not clear a requested single-result card", exc_info=True)
 
 
 _pending_picker_lock = threading.Lock()
@@ -580,6 +641,9 @@ async def _handle_single_result_callback(query: Any, action: str) -> bool:
         if not isinstance(caller_id, int) or not isinstance(chat_id, int):
             return True
         actor = Actor(user_id=caller_id, chat_id=chat_id)
+        # This card is being resolved here, so it must not stay eligible for a
+        # later retire-by-model-request against a message that is already gone.
+        _take_single_card(chat_id=chat_id, media_type="movie", external_id=tmdb_id)
         try:
             outcome = await _gateway().call(actor, "request_movie", {"tmdb_id": tmdb_id})
             request_status = str(outcome.get("status") or "requested")
@@ -766,7 +830,24 @@ async def _decorate_search_result(
                     caption=_candidate_caption(candidate),
                     candidate=candidate,
                 )
-                return bool(getattr(response, "success", False))
+                if not getattr(response, "success", False):
+                    return False
+                # Remember the card so a request made by the model in this same
+                # turn can retire its button instead of leaving it tappable.
+                media_type = candidate.get("media_type")
+                external_id = candidate.get("tmdb_id" if media_type == "movie" else "tvdb_id")
+                message_id = getattr(response, "message_id", None)
+                if isinstance(media_type, str) and isinstance(external_id, int):
+                    try:
+                        _remember_single_card(
+                            chat_id=actor_chat_id,
+                            media_type=media_type,
+                            external_id=external_id,
+                            message_id=int(str(message_id)),
+                        )
+                    except (TypeError, ValueError):
+                        logger.debug("Single-result card had no usable message id")
+                return True
 
             try:
                 delivered = bool(await _on_adapter_loop(deliver_single))
@@ -979,6 +1060,18 @@ def _handler(name: str) -> Callable[..., Coroutine[Any, Any, str]]:
                 session_key,
                 result,
             )
+        elif name == "request_movie":
+            tmdb_id = arguments.get("tmdb_id")
+            if isinstance(tmdb_id, int):
+                await _retire_single_card(
+                    chat_id=actor.chat_id, media_type="movie", external_id=tmdb_id
+                )
+        elif name == "request_series":
+            tvdb_id = arguments.get("tvdb_id")
+            if isinstance(tvdb_id, int):
+                await _retire_single_card(
+                    chat_id=actor.chat_id, media_type="series", external_id=tvdb_id
+                )
         return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
 
     return call

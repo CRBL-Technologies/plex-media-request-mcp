@@ -462,27 +462,27 @@ class ToolService:
         Radarr does not track, which needs no call to know it has no file.
         """
 
-        targets = [
-            candidate
-            for candidate in results
-            if candidate.get("media_type") == "movie"
-            and not candidate.get("downloaded")
-            and isinstance(library_ids.get(candidate.get("tmdb_id")), int)
-        ]
+        targets: list[tuple[dict[str, Any], int]] = []
+        for candidate in results:
+            if candidate.get("media_type") != "movie" or candidate.get("downloaded"):
+                continue
+            tmdb_id = candidate.get("tmdb_id")
+            if not isinstance(tmdb_id, int):
+                continue
+            radarr_id = library_ids.get(tmdb_id)
+            if radarr_id is not None:
+                targets.append((candidate, radarr_id))
         if not targets:
             return
 
-        async def resolve(candidate: dict[str, Any]) -> None:
-            record = _record(
-                await self.upstream.call(
-                    "radarr_get_movie", {"id": library_ids[candidate["tmdb_id"]]}
-                )
-            )
+        async def resolve(candidate: dict[str, Any], radarr_id: int) -> None:
+            record = _record(await self.upstream.call("radarr_get_movie", {"id": radarr_id}))
             if record is not None and _bool(record.get("hasFile")):
                 candidate["downloaded"] = True
 
         outcomes = await asyncio.gather(
-            *(resolve(candidate) for candidate in targets), return_exceptions=True
+            *(resolve(candidate, radarr_id) for candidate, radarr_id in targets),
+            return_exceptions=True,
         )
         for outcome in outcomes:
             if isinstance(outcome, BaseException) and not isinstance(outcome, Exception):

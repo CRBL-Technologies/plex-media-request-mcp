@@ -394,6 +394,54 @@ async def test_single_result_request_callback_fires_movie_request(
     assert "Requesting" in (query.answers[0] or "")
 
 
+def test_single_result_button_matches_availability(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Button:
+        def __init__(self, text: str, *, callback_data: str = "", url: str = "") -> None:
+            self.text = text
+            self.callback_data = callback_data
+            self.url = url
+
+    class Markup:
+        def __init__(self, rows: list[list[Button]]) -> None:
+            self.inline_keyboard = rows
+
+    telegram = ModuleType("telegram")
+    telegram.InlineKeyboardButton = Button  # type: ignore[attr-defined]
+    telegram.InlineKeyboardMarkup = Markup  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "telegram", telegram)
+    from hermes_media.compat import _single_result_markup
+
+    def only_button(candidate: dict[str, Any]) -> Button | None:
+        markup = _single_result_markup(candidate=candidate)
+        if markup is None:
+            return None
+        buttons = [btn for row in markup.inline_keyboard for btn in row]
+        assert len(buttons) == 1
+        return buttons[0]
+
+    # A series on Plex links straight to its show page.
+    watch = only_button(
+        {
+            "media_type": "series",
+            "tvdb_id": 411959,
+            "in_plex": True,
+            "plex_url": "https://watch.plex.tv/show/3-body-problem",
+        }
+    )
+    assert watch is not None
+    assert watch.text == "▶ Open in Plex"
+    assert watch.url == "https://watch.plex.tv/show/3-body-problem"
+
+    # On Plex but with no slug to link to: no button beats a wrong one.
+    assert only_button({"media_type": "series", "tvdb_id": 411959, "in_plex": True}) is None
+    assert only_button({"media_type": "movie", "tmdb_id": 27205, "in_plex": True}) is None
+
+    # Not on Plex: request it.
+    request = only_button({"media_type": "series", "tvdb_id": 411959})
+    assert request is not None
+    assert request.callback_data == "md:req:s411959"
+
+
 async def test_single_result_text_card_closes_as_text_not_caption(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -187,6 +187,109 @@ def test_roles_and_no_selection_token(config: Config) -> None:
         assert denied.status_code == 400
 
 
+def test_series_search_links_to_its_plex_show_page(config: Config) -> None:
+    """A series already in Plex is matched on its TVDB GUID and linked by slug."""
+
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["sonarr_search_series"] = {
+        "data": [{"tvdbId": 411959, "title": "3 Body Problem", "year": 2024, "id": 7}]
+    }
+    fake.responses["plex_search"] = {
+        "MediaContainer": {
+            "Hub": [
+                {
+                    "Metadata": [
+                        # A movie of the same name must not satisfy a show lookup.
+                        {"type": "movie", "ratingKey": "900"},
+                        {"type": "show", "ratingKey": "901"},
+                    ]
+                }
+            ]
+        }
+    }
+    fake.responses["plex_get_metadata"] = {
+        "MediaContainer": {
+            "Metadata": [
+                {
+                    "slug": "3-body-problem",
+                    "Guid": [{"id": "imdb://tt13016388"}, {"id": "tvdb://411959"}],
+                }
+            ]
+        }
+    }
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "search_media",
+                "arguments": {"query": "3 Body Problem", "media_type": "series", "limit": 1},
+            },
+        )
+
+    assert response.status_code == 200
+    result = response.json()["result"]["results"][0]
+    assert result["in_plex"] is True
+    assert result["plex_url"] == "https://watch.plex.tv/show/3-body-problem"
+    searches = [args for name, args in fake.calls if name == "plex_search"]
+    assert searches == [{"query": "3 Body Problem", "limit": 20, "searchTypes": ["tv"]}]
+    # The show entry is the only one worth a metadata call.
+    assert [args for name, args in fake.calls if name == "plex_get_metadata"] == [
+        {"ratingKey": "901"}
+    ]
+
+
+def test_series_absent_from_plex_is_left_requestable(config: Config) -> None:
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["sonarr_search_series"] = {
+        "data": [{"tvdbId": 411959, "title": "3 Body Problem", "year": 2024, "id": 7}]
+    }
+    fake.responses["plex_search"] = {"MediaContainer": {"Hub": []}}
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "search_media",
+                "arguments": {"query": "3 Body Problem", "media_type": "series", "limit": 1},
+            },
+        )
+
+    result = response.json()["result"]["results"][0]
+    assert "in_plex" not in result
+    assert "plex_url" not in result
+
+
+def test_untracked_series_costs_no_plex_lookup(config: Config) -> None:
+    """Sonarr does not track it, so there is nothing for Plex to hold."""
+
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["sonarr_search_series"] = {
+        "data": [{"tvdbId": 411959, "title": "3 Body Problem", "year": 2024}]
+    }
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "search_media",
+                "arguments": {"query": "3 Body Problem", "media_type": "series", "limit": 1},
+            },
+        )
+
+    assert response.status_code == 200
+    assert [name for name, _ in fake.calls if name.startswith("plex_")] == []
+
+
 def test_mixed_search_keeps_movie_and_series_results(config: Config) -> None:
     app = create_app(config)
     fake = FakeUpstream()

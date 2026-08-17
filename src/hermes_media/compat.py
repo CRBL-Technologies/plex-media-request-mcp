@@ -322,8 +322,10 @@ def _single_result_markup(
             [[InlineKeyboardButton("▶ Open in Plex", url=plex_url)]]
         )
     media_type = candidate.get("media_type")
-    downloaded = candidate.get("downloaded")
-    if downloaded:
+    # Already available, but with no slug to link to. Offering Request here
+    # would invite a redundant request for something the user can already
+    # watch, so the card degrades to no button at all.
+    if candidate.get("downloaded") or candidate.get("in_plex"):
         return None
     if media_type == "movie":
         tmdb_id = candidate.get("tmdb_id")

@@ -374,20 +374,36 @@ class ToolService:
         return results, errors
 
     async def _enrich_plex_urls(self, results: list[dict[str, Any]]) -> None:
-        """Attach ``plex_url`` to downloaded results for Telegram action buttons."""
+        """Attach ``in_plex`` and ``plex_url`` for Telegram action buttons.
+
+        Only titles the providers already track are looked up, so a search that
+        returns nothing local costs no Plex calls. ``in_plex`` is recorded even
+        when Plex exposes no slug, so a title that is already available never
+        gets offered a redundant Request button.
+        """
 
         for candidate in results:
-            if not candidate.get("downloaded"):
-                continue
             media_type = candidate.get("media_type")
             title = candidate.get("title")
             if not isinstance(title, str):
                 continue
             try:
-                if media_type == "movie":
+                if media_type == "movie" and candidate.get("downloaded"):
                     tmdb_id = candidate.get("tmdb_id")
                     if isinstance(tmdb_id, int) and tmdb_id > 0:
-                        _visible, url = await self._plex_movie_lookup(tmdb_id, title)
+                        visible, url = await self._plex_movie_lookup(tmdb_id, title)
+                        if visible:
+                            candidate["in_plex"] = True
+                        if url:
+                            candidate["plex_url"] = url
+                elif media_type == "series" and candidate.get("in_sonarr"):
+                    # Series candidates carry no per-file flag, so Sonarr
+                    # tracking is the closest signal that Plex may hold it.
+                    tvdb_id = candidate.get("tvdb_id")
+                    if isinstance(tvdb_id, int) and tvdb_id > 0:
+                        visible, url = await self._plex_series_lookup(tvdb_id, title)
+                        if visible:
+                            candidate["in_plex"] = True
                         if url:
                             candidate["plex_url"] = url
             except UpstreamError:
@@ -559,8 +575,49 @@ class ToolService:
     async def _plex_movie_lookup(self, tmdb_id: int, title: str) -> tuple[bool, str | None]:
         """Check if a movie is in Plex and return its watch URL when available."""
 
+        return await self._plex_lookup(
+            title=title,
+            search_type="movies",
+            item_type="movie",
+            guid_prefix="tmdb://",
+            external_id=tmdb_id,
+            url_kind="movie",
+        )
+
+    async def _plex_series_lookup(self, tvdb_id: int, title: str) -> tuple[bool, str | None]:
+        """Check if a series is in Plex and return its watch URL when available.
+
+        Sonarr identifies series by TVDB, so the Plex show GUID is matched on
+        ``tvdb://`` rather than the ``tmdb://`` the movie path uses.
+        """
+
+        return await self._plex_lookup(
+            title=title,
+            search_type="tv",
+            item_type="show",
+            guid_prefix="tvdb://",
+            external_id=tvdb_id,
+            url_kind="show",
+        )
+
+    async def _plex_lookup(
+        self,
+        *,
+        title: str,
+        search_type: str,
+        item_type: str,
+        guid_prefix: str,
+        external_id: int,
+        url_kind: str,
+    ) -> tuple[bool, str | None]:
+        """Resolve one title to its Plex presence and public watch URL.
+
+        The slug comes from the metadata response this lookup already makes for
+        the identity check, so no extra Plex call is needed to build the URL.
+        """
+
         raw = await self.upstream.call(
-            "plex_search", {"query": title, "limit": 20, "searchTypes": ["movies"]}
+            "plex_search", {"query": title, "limit": 20, "searchTypes": [search_type]}
         )
         if not isinstance(raw, dict):
             raise UpstreamError("Plex search returned an invalid response")
@@ -573,7 +630,7 @@ class ToolService:
                 continue
             candidates.extend(item for item in hub["Metadata"] if isinstance(item, dict))
         for item in candidates[:20]:
-            if item.get("type") != "movie":
+            if item.get("type") != item_type:
                 continue
             rating_key = item.get("ratingKey")
             if not isinstance(rating_key, str) or not rating_key:
@@ -585,13 +642,13 @@ class ToolService:
                     continue
                 for guide in guides:
                     value = guide.get("id") if isinstance(guide, dict) else None
-                    if not isinstance(value, str) or not value.startswith("tmdb://"):
+                    if not isinstance(value, str) or not value.startswith(guid_prefix):
                         continue
-                    raw_id = value.removeprefix("tmdb://").split("?", 1)[0]
-                    if raw_id.isdigit() and int(raw_id) == tmdb_id:
+                    raw_id = value.removeprefix(guid_prefix).split("?", 1)[0]
+                    if raw_id.isdigit() and int(raw_id) == external_id:
                         slug = record.get("slug")
                         plex_url = (
-                            f"https://watch.plex.tv/movie/{slug}"
+                            f"https://watch.plex.tv/{url_kind}/{slug}"
                             if isinstance(slug, str) and slug
                             else None
                         )

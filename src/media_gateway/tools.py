@@ -231,8 +231,9 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
     "search_media": {
         "description": (
             "Search Radarr and Sonarr for a movie or series. Results include poster_url "
-            "when available, and plex_url on a lone downloaded movie. Availability comes from "
-            "downloaded for a movie and from the season report for a series. "
+            "when available, and plex_url on a lone downloaded movie. downloaded reports "
+            "whether the file is held: for a series it means every known season is complete, "
+            "and seasons_complete and seasons_missing list them. "
             "On Telegram, the media adapter presents up to four results in one "
             "tabbed poster card; opening a tab swaps its poster in place before the tool returns. "
             "Never use MEDIA for a remote poster URL, repeat the candidate list, or call clarify "
@@ -260,7 +261,9 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
             "recommendation research. Use this once for discovery requests instead of calling "
             "search_media separately for every title. Include a year in each title when known. "
             "On Telegram the results are returned for a conversational reply; present each "
-            "title with its availability and offer to add any that are missing. "
+            "title with its availability and offer to add any that are missing. Any title in "
+            "unmatched_titles could not be found by the providers: say so instead of dropping "
+            "it silently, so the reply never presents fewer suggestions than were researched. "
             "Do not use it for a direct title lookup."
         ),
         "inputSchema": {
@@ -423,8 +426,10 @@ class ToolService:
         values = await asyncio.gather(*(call for _, call in calls), return_exceptions=True)
         groups: list[list[dict[str, Any]]] = []
         errors: list[str] = []
-        # TMDB id -> Radarr library id, for the availability lookup below.
-        library_ids: dict[int, int] = {}
+        # (provider kind, external id) -> the provider's own library id. TMDB
+        # and TVDB occupy separate namespaces and can legitimately contain the
+        # same integer, so the kind must remain part of the key.
+        library_ids: dict[tuple[str, int], int] = {}
         for (kind, _), value in zip(calls, values, strict=True):
             if isinstance(value, BaseException):
                 if not isinstance(value, Exception):
@@ -437,18 +442,73 @@ class ToolService:
                 candidate = mapper(item)
                 if candidate is None:
                     continue
-                if kind == "movie":
-                    radarr_id = item.get("id")
-                    if isinstance(radarr_id, int) and radarr_id > 0:
-                        library_ids[candidate["tmdb_id"]] = radarr_id
+                provider_id = item.get("id")
+                if isinstance(provider_id, int) and provider_id > 0:
+                    key = "tmdb_id" if kind == "movie" else "tvdb_id"
+                    library_ids[kind, candidate[key]] = provider_id
                 group.append(candidate)
             groups.append(group)
         results = _interleave(groups, limit)
-        await self._enrich_downloaded(results, library_ids)
+        await asyncio.gather(
+            self._enrich_downloaded(results, library_ids),
+            self._enrich_series_availability(results, library_ids),
+        )
         return results, errors
 
+    async def _enrich_series_availability(
+        self, results: list[dict[str, Any]], library_ids: dict[tuple[str, int], int]
+    ) -> None:
+        """Say which seasons a tracked series already has.
+
+        Sonarr's lookup carries season numbers but null statistics, so a search
+        result cannot tell a series that is fully held from one that is merely
+        tracked. Without this a recommendation reply can only say a series
+        exists, never whether it is watchable.
+        """
+
+        targets: list[tuple[dict[str, Any], int]] = []
+        for candidate in results:
+            if candidate.get("media_type") != "series":
+                continue
+            tvdb_id = candidate.get("tvdb_id")
+            if not isinstance(tvdb_id, int):
+                continue
+            sonarr_id = library_ids.get(("series", tvdb_id))
+            if sonarr_id is not None:
+                targets.append((candidate, sonarr_id))
+        if not targets:
+            return
+
+        async def resolve(candidate: dict[str, Any], sonarr_id: int) -> None:
+            record = _record(await self.upstream.call("sonarr_get_series_by_id", {"id": sonarr_id}))
+            if record is None:
+                return
+            states = _season_states(record)
+            if not states:
+                return
+            complete = [int(s["number"]) for s in states if s["complete"]]
+            # A season Sonarr lists with no episodes has not aired yet, so it
+            # is not missing: there is nothing to acquire, and counting it
+            # would keep every ongoing show permanently unavailable.
+            missing = [
+                int(s["number"]) for s in states if not s["complete"] and int(s["episodes"]) > 0
+            ]
+            candidate["seasons_complete"] = complete
+            candidate["seasons_missing"] = missing
+            # "Downloaded" for a series means every season Sonarr knows is
+            # complete, so the model never calls a half-held show available.
+            candidate["downloaded"] = bool(complete) and not missing
+
+        outcomes = await asyncio.gather(
+            *(resolve(candidate, sonarr_id) for candidate, sonarr_id in targets),
+            return_exceptions=True,
+        )
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException) and not isinstance(outcome, Exception):
+                raise outcome
+
     async def _enrich_downloaded(
-        self, results: list[dict[str, Any]], library_ids: dict[int, int]
+        self, results: list[dict[str, Any]], library_ids: dict[tuple[str, int], int]
     ) -> None:
         """Correct ``downloaded`` from each movie's library record.
 
@@ -469,7 +529,7 @@ class ToolService:
             tmdb_id = candidate.get("tmdb_id")
             if not isinstance(tmdb_id, int):
                 continue
-            radarr_id = library_ids.get(tmdb_id)
+            radarr_id = library_ids.get(("movie", tmdb_id))
             if radarr_id is not None:
                 targets.append((candidate, radarr_id))
         if not targets:
@@ -584,17 +644,25 @@ class ToolService:
         results: list[dict[str, Any]] = []
         errors: set[str] = set()
         seen: set[tuple[str, int]] = set()
+        unmatched: list[str] = []
         for title, (candidates, unavailable) in zip(titles, searches, strict=True):
             errors.update(unavailable)
             choice = self._recommendation_choice(title, candidates, seen)
             if choice is not None:
                 results.append(choice)
+            else:
+                # Radarr and Sonarr only match a title exactly, so a
+                # mis-remembered or unreleased one resolves to nothing. Name it
+                # rather than dropping it, or four suggestions silently become
+                # three with no way to tell which went missing.
+                unmatched.append(title)
         if not results and errors:
             raise UpstreamError("media recommendation lookup is temporarily unavailable")
         await self._enrich_plex_urls(results)
         return {
             "query": "recommendations",
             "requested_titles": titles,
+            "unmatched_titles": unmatched,
             "results": results,
             "unavailable_sources": sorted(errors),
             "presentation": "recommendations",

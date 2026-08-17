@@ -76,7 +76,9 @@ PLATFORM_HINT = (
     "titles and years; never call search_media separately for each recommendation. "
     "recommend_media returns results for a conversational reply; present each title with its "
     "availability and offer to add any that are missing. A downloaded title is already "
-    "available: say so plainly and never offer to add it. Discovery "
+    "available: say so plainly and never offer to add it, and for a series name the seasons "
+    "in seasons_missing rather than calling the whole show unavailable. Name any title in "
+    "unmatched_titles as one you could not find, so a batch never quietly shrinks. Discovery "
     "turns reject model-generated single-title searches before a card is sent. If the user's "
     "current message explicitly says "
     "to add or request media, continue to request the selected result, whether it was chosen by "
@@ -888,7 +890,9 @@ async def _handle_season_picker_callback(
 
     if action == "all":
         pending.selected = {
-            int(state["number"]) for state in pending.states if not state.get("complete")
+            int(state["number"])
+            for state in pending.states
+            if not state.get("complete") and int(state.get("episodes") or 0) > 0
         }
         await answer_media_callback(query, "All missing seasons selected")
         with suppress(Exception):

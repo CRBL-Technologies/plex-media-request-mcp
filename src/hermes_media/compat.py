@@ -345,7 +345,7 @@ def _season_label(state: Mapping[str, Any], *, selected: bool) -> str:
         # Telegram has no disabled button, so a complete season reads as done
         # and its tap only explains itself.
         return f"☑  {name}  ·  complete"
-    counts = f"{files}/{episodes}" if isinstance(episodes, int) and episodes else "no episodes"
+    counts = f"{files}/{episodes}" if isinstance(episodes, int) and episodes else "not aired yet"
     if state.get("monitored") and not state.get("partial"):
         counts += " · searching"
     box = "☑" if selected else "☐"
@@ -375,7 +375,13 @@ def season_picker_markup(
         ]
         for state in states
     ]
-    missing = [int(state["number"]) for state in states if not state.get("complete")]
+    # A season with no episodes yet is still shown, and can be ticked to
+    # monitor it, but the shortcut only grabs seasons that actually exist.
+    missing = [
+        int(state["number"])
+        for state in states
+        if not state.get("complete") and int(state.get("episodes") or 0) > 0
+    ]
     if missing:
         rows.append(
             [
@@ -485,12 +491,14 @@ def _single_result_markup(
             [[InlineKeyboardButton("▶ Open in Plex", url=plex_url)]]
         )
     media_type = candidate.get("media_type")
-    # Already available, but with no slug to link to. Offering Request here
-    # would invite a redundant request for something the user can already
-    # watch, so the card degrades to no button at all.
-    if candidate.get("downloaded"):
-        return None
     if media_type == "movie":
+        # Already available, but with no slug to link to. Offering Request here
+        # would invite a redundant request for something the user can already
+        # watch, so the card degrades to no button at all. A series is exempt:
+        # its button opens the season picker, which stays useful for a complete
+        # show because it reports what is held and can re-search a season.
+        if candidate.get("downloaded"):
+            return None
         tmdb_id = candidate.get("tmdb_id")
         if isinstance(tmdb_id, int) and tmdb_id > 0:
             return InlineKeyboardMarkup(  # type: ignore[no-any-return]

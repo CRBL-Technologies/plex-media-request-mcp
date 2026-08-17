@@ -444,6 +444,14 @@ def test_single_result_button_matches_availability(monkeypatch: pytest.MonkeyPat
     assert series is not None
     assert series.callback_data == "md:req:s411959"
 
+    # Even a fully held series keeps it: the picker still reports what is there
+    # and can re-search a season. The no-button rule is for movies only.
+    held = only_button(
+        {"media_type": "series", "tvdb_id": 411959, "downloaded": True, "seasons_missing": []}
+    )
+    assert held is not None
+    assert held.callback_data == "md:req:s411959"
+
 
 async def test_model_driven_request_retires_the_cards_button(
     monkeypatch: pytest.MonkeyPatch,
@@ -587,6 +595,15 @@ SEVERANCE_SEASONS = {
             "complete": False,
             "partial": False,
         },
+        # Announced but nothing aired: shown, but not something to request.
+        {
+            "number": 3,
+            "files": 0,
+            "episodes": 0,
+            "monitored": False,
+            "complete": False,
+            "partial": False,
+        },
     ],
 }
 
@@ -692,11 +709,12 @@ async def test_series_tap_opens_a_season_picker_with_availability(season_env: An
     # Numbered seasons first, specials last, then the shortcut and actions.
     assert labels[0].startswith("☑  S1  ·  complete")
     assert labels[1] == "☐  S2  ·  0/10"
-    assert labels[2] == "☐  Specials  ·  0/21"
-    assert labels[3] == "＋ All missing"
-    assert labels[4] == "Request (0)"
-    assert labels[5] == "Cancel"
-    assert buttons[2].callback_data == f"md:{picker_id}:s0"
+    assert labels[2] == "☐  S3  ·  not aired yet"
+    assert labels[3] == "☐  Specials  ·  0/21"
+    assert labels[4] == "＋ All missing"
+    assert labels[5] == "Request (0)"
+    assert labels[6] == "Cancel"
+    assert buttons[3].callback_data == f"md:{picker_id}:s0"
     # Nothing is pre-ticked, and the series card's spent button is cleared.
     assert plugin._season_pickers[picker_id].selected == set()
     assert season_env.adapter.cleared == [
@@ -772,6 +790,7 @@ async def test_all_missing_shortcut_skips_complete_seasons(season_env: Any) -> N
     query = SeasonQuery(f"md:{picker_id}:all")
     assert await plugin._handle_media_picker_callback(SimpleNamespace(callback_query=query), None)
 
+    # Season 3 has not aired, so the shortcut leaves it alone.
     assert plugin._season_pickers[picker_id].selected == {0, 2}
     assert query.answers == ["All missing seasons selected"]
 

@@ -426,9 +426,10 @@ class ToolService:
         values = await asyncio.gather(*(call for _, call in calls), return_exceptions=True)
         groups: list[list[dict[str, Any]]] = []
         errors: list[str] = []
-        # External id (TMDB for a movie, TVDB for a series) -> the provider's
-        # own library id, for the availability lookups below.
-        library_ids: dict[int, int] = {}
+        # (provider kind, external id) -> the provider's own library id. TMDB
+        # and TVDB occupy separate namespaces and can legitimately contain the
+        # same integer, so the kind must remain part of the key.
+        library_ids: dict[tuple[str, int], int] = {}
         for (kind, _), value in zip(calls, values, strict=True):
             if isinstance(value, BaseException):
                 if not isinstance(value, Exception):
@@ -444,7 +445,7 @@ class ToolService:
                 provider_id = item.get("id")
                 if isinstance(provider_id, int) and provider_id > 0:
                     key = "tmdb_id" if kind == "movie" else "tvdb_id"
-                    library_ids[candidate[key]] = provider_id
+                    library_ids[kind, candidate[key]] = provider_id
                 group.append(candidate)
             groups.append(group)
         results = _interleave(groups, limit)
@@ -455,7 +456,7 @@ class ToolService:
         return results, errors
 
     async def _enrich_series_availability(
-        self, results: list[dict[str, Any]], library_ids: dict[int, int]
+        self, results: list[dict[str, Any]], library_ids: dict[tuple[str, int], int]
     ) -> None:
         """Say which seasons a tracked series already has.
 
@@ -472,7 +473,7 @@ class ToolService:
             tvdb_id = candidate.get("tvdb_id")
             if not isinstance(tvdb_id, int):
                 continue
-            sonarr_id = library_ids.get(tvdb_id)
+            sonarr_id = library_ids.get(("series", tvdb_id))
             if sonarr_id is not None:
                 targets.append((candidate, sonarr_id))
         if not targets:
@@ -502,7 +503,7 @@ class ToolService:
                 raise outcome
 
     async def _enrich_downloaded(
-        self, results: list[dict[str, Any]], library_ids: dict[int, int]
+        self, results: list[dict[str, Any]], library_ids: dict[tuple[str, int], int]
     ) -> None:
         """Correct ``downloaded`` from each movie's library record.
 
@@ -523,7 +524,7 @@ class ToolService:
             tmdb_id = candidate.get("tmdb_id")
             if not isinstance(tmdb_id, int):
                 continue
-            radarr_id = library_ids.get(tmdb_id)
+            radarr_id = library_ids.get(("movie", tmdb_id))
             if radarr_id is not None:
                 targets.append((candidate, radarr_id))
         if not targets:

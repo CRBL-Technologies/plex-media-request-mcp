@@ -1171,6 +1171,57 @@ def test_untracked_series_costs_no_library_read(config: Config) -> None:
     assert [name for name, _ in fake.calls if name == "sonarr_get_series_by_id"] == []
 
 
+def test_mixed_search_keeps_tmdb_and_tvdb_library_ids_separate(config: Config) -> None:
+    """Equal external ids must not cross the Radarr/Sonarr namespace boundary."""
+
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["radarr_search_movie"] = {
+        "data": [{"tmdbId": 42, "title": "Movie 42", "year": 2024, "id": 100}]
+    }
+    fake.responses["sonarr_search_series"] = {
+        "data": [
+            {
+                "tvdbId": 42,
+                "title": "Series 42",
+                "year": 2024,
+                "id": 200,
+                "seasons": [{"seasonNumber": 1}],
+            }
+        ]
+    }
+    fake.responses["radarr_get_movie"] = {"data": {"id": 100, "title": "Movie 42", "hasFile": True}}
+    fake.responses["sonarr_get_series_by_id"] = {
+        "data": {
+            "id": 200,
+            "seasons": [
+                {
+                    "seasonNumber": 1,
+                    "statistics": {"episodeFileCount": 8, "totalEpisodeCount": 8},
+                }
+            ],
+        }
+    }
+
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "search_media",
+                "arguments": {"query": "42", "media_type": "all", "limit": 2},
+            },
+        )
+
+    results = {item["media_type"]: item for item in response.json()["result"]["results"]}
+    assert results["movie"]["downloaded"] is True
+    assert results["series"]["downloaded"] is True
+    assert [args for name, args in fake.calls if name == "radarr_get_movie"] == [{"id": 100}]
+    assert [args for name, args in fake.calls if name == "sonarr_get_series_by_id"] == [{"id": 200}]
+
+
 def test_series_seasons_reports_counts_from_the_tracked_series(config: Config) -> None:
     """The lookup response leaves statistics null, so counts need the series itself."""
 

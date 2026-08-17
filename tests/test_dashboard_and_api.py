@@ -843,6 +843,179 @@ def test_series_request_uses_trusted_actor_and_exact_seasons(config: Config) -> 
         assert requests[0]["seasons"] == [1]
 
 
+def test_series_seasons_reports_counts_from_the_tracked_series(config: Config) -> None:
+    """The lookup response leaves statistics null, so counts need the series itself."""
+
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["sonarr_search_series"] = {
+        "data": [
+            {
+                "tvdbId": 371980,
+                "title": "Severance",
+                "year": 2022,
+                "id": 4,
+                "seasons": [
+                    {"seasonNumber": 0, "monitored": False},
+                    {"seasonNumber": 1, "monitored": True},
+                    {"seasonNumber": 2, "monitored": False},
+                ],
+            }
+        ]
+    }
+    fake.responses["sonarr_get_series_by_id"] = {
+        "data": {
+            "id": 4,
+            "seasons": [
+                {
+                    "seasonNumber": 0,
+                    "monitored": False,
+                    "statistics": {"episodeFileCount": 0, "totalEpisodeCount": 21},
+                },
+                {
+                    "seasonNumber": 1,
+                    "monitored": True,
+                    "statistics": {"episodeFileCount": 9, "totalEpisodeCount": 9},
+                },
+                {
+                    "seasonNumber": 2,
+                    "monitored": True,
+                    "statistics": {"episodeFileCount": 0, "totalEpisodeCount": 10},
+                },
+                {
+                    "seasonNumber": 3,
+                    "monitored": True,
+                    "statistics": {"episodeFileCount": 4, "totalEpisodeCount": 8},
+                },
+            ],
+        }
+    }
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "series_seasons",
+                "arguments": {"tvdb_id": 371980},
+            },
+        )
+
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["title"] == "Severance"
+    assert result["in_sonarr"] is True
+    by_number = {state["number"]: state for state in result["seasons"]}
+    # Specials are reported rather than hidden.
+    assert by_number[0]["episodes"] == 21
+    assert by_number[0]["complete"] is False
+    assert by_number[1]["complete"] is True
+    # Monitored with no files means it was asked for and is still searching.
+    assert by_number[2]["monitored"] is True
+    assert by_number[2]["complete"] is False
+    assert by_number[2]["partial"] is False
+    assert by_number[3]["partial"] is True
+    assert by_number[3]["complete"] is False
+
+
+def test_series_seasons_handles_an_untracked_series(config: Config) -> None:
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["sonarr_search_series"] = {
+        "data": [
+            {
+                "tvdbId": 371980,
+                "title": "Severance",
+                "year": 2022,
+                "seasons": [{"seasonNumber": 1, "monitored": False}],
+            }
+        ]
+    }
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "series_seasons",
+                "arguments": {"tvdb_id": 371980},
+            },
+        )
+
+    result = response.json()["result"]
+    assert result["in_sonarr"] is False
+    assert result["seasons"] == [
+        {
+            "number": 1,
+            "files": 0,
+            "episodes": 0,
+            "monitored": False,
+            "complete": False,
+            "partial": False,
+        }
+    ]
+    # Nothing is tracked, so there is no series to fetch statistics for.
+    assert [name for name, _ in fake.calls] == ["sonarr_search_series"]
+
+
+def test_specials_can_be_requested(config: Config) -> None:
+    """Season 0 is a real season, so request_series must accept it."""
+
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["sonarr_search_series"] = {
+        "data": [
+            {
+                "tvdbId": 371980,
+                "title": "Severance",
+                "year": 2022,
+                "id": 4,
+                "seasons": [{"seasonNumber": 0}, {"seasonNumber": 1}],
+            }
+        ]
+    }
+    fake.responses["sonarr_get_series_by_id"] = {
+        "data": {"id": 4, "seasons": [{"seasonNumber": 0}, {"seasonNumber": 1}]}
+    }
+    fake.responses["sonarr_get_episodes"] = {"data": [{"id": 55}]}
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "request_series",
+                "arguments": {"tvdb_id": 371980, "seasons": [0]},
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["result"]["series"]["seasons"] == [0]
+    searched = [args for name, args in fake.calls if name == "sonarr_search_season"]
+    assert searched == [{"seriesId": 4, "seasonNumber": 0}]
+
+
+def test_request_series_still_rejects_a_negative_season(config: Config) -> None:
+    app = create_app(config)
+    fake = FakeUpstream()
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "request_series",
+                "arguments": {"tvdb_id": 371980, "seasons": [-1]},
+            },
+        )
+
+    assert response.status_code == 400
+
+
 def test_existing_series_enables_the_season_and_searches_it(config: Config) -> None:
     app = create_app(config)
     fake = FakeUpstream()

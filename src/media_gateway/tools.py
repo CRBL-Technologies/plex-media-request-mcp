@@ -39,6 +39,12 @@ def _positive(value: object, name: str) -> int:
     return value
 
 
+def _season_argument(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > 1000:
+        raise ToolError("season must be a non-negative integer")
+    return value
+
+
 def _short_text(value: object, name: str, *, minimum: int = 1, maximum: int = 120) -> str:
     if not isinstance(value, str):
         raise ToolError(f"{name} must be a string")
@@ -133,6 +139,8 @@ def _poster_url(item: dict[str, Any]) -> str | None:
 
 
 def _season_numbers(item: dict[str, Any]) -> list[int]:
+    """Every season Sonarr knows, including 0 for specials."""
+
     raw = item.get("seasons")
     if not isinstance(raw, list):
         return []
@@ -141,9 +149,45 @@ def _season_numbers(item: dict[str, Any]) -> list[int]:
         if not isinstance(season, dict):
             continue
         number = _first(season, "seasonNumber", "season_number")
-        if isinstance(number, int) and number > 0:
+        if isinstance(number, int) and not isinstance(number, bool) and number >= 0:
             result.append(number)
     return sorted(set(result))
+
+
+def _season_states(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """Per-season episode counts, so a caller can tell complete from missing.
+
+    ``monitored`` alone is not availability: a season can be monitored with no
+    files at all, which means it was asked for and is still searching.
+    """
+
+    raw = item.get("seasons")
+    if not isinstance(raw, list):
+        return []
+    states: list[dict[str, Any]] = []
+    for season in raw:
+        if not isinstance(season, dict):
+            continue
+        number = _first(season, "seasonNumber", "season_number")
+        if not isinstance(number, int) or isinstance(number, bool) or number < 0:
+            continue
+        stats = season.get("statistics")
+        stats = stats if isinstance(stats, dict) else {}
+        files = stats.get("episodeFileCount")
+        total = _first(stats, "totalEpisodeCount", "episodeCount")
+        files = files if isinstance(files, int) and files >= 0 else 0
+        total = total if isinstance(total, int) and total >= 0 else 0
+        states.append(
+            {
+                "number": number,
+                "files": files,
+                "episodes": total,
+                "monitored": season.get("monitored") is True,
+                "complete": total > 0 and files >= total,
+                "partial": 0 < files < total,
+            }
+        )
+    return sorted(states, key=lambda state: int(state["number"]))
 
 
 def _movie_candidate(item: dict[str, Any]) -> dict[str, Any] | None:
@@ -245,14 +289,16 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
         },
     },
     "request_series": {
-        "description": "Request one or more seasons of a series by TVDB ID.",
+        "description": (
+            "Request one or more seasons of a series by TVDB ID. Season 0 is the specials season."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "tvdb_id": {"type": "integer", "minimum": 1},
                 "seasons": {
                     "type": "array",
-                    "items": {"type": "integer", "minimum": 1},
+                    "items": {"type": "integer", "minimum": 0},
                     "minItems": 1,
                     "maxItems": 50,
                     "uniqueItems": True,
@@ -260,6 +306,20 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
                 "anime": {"type": "boolean"},
             },
             "required": ["tvdb_id", "seasons"],
+            "additionalProperties": False,
+        },
+    },
+    "series_seasons": {
+        "description": (
+            "Report every season of a series with how many episodes Sonarr holds, so a "
+            "reply can say which seasons are complete, partial, or missing. Season 0 is "
+            "the specials season. Use this instead of guessing availability from a search "
+            "result, which carries no per-season counts."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"tvdb_id": {"type": "integer", "minimum": 1}},
+            "required": ["tvdb_id"],
             "additionalProperties": False,
         },
     },
@@ -611,13 +671,50 @@ class ToolService:
                         return True
         return False
 
+    async def _series_seasons(
+        self, arguments: object, _actor: Actor, _role: Role
+    ) -> dict[str, Any]:
+        args = _exact(arguments, {"tvdb_id"})
+        tvdb_id = _positive(args.get("tvdb_id"), "tvdb_id")
+        lookup = await self.upstream.call(
+            "sonarr_search_series", {"term": f"tvdb:{tvdb_id}", "limit": 10}
+        )
+        source = next(
+            (item for item in _rows(lookup) if _first(item, "tvdbId", "tvdb_id") == tvdb_id),
+            None,
+        )
+        if source is None:
+            raise ToolError("TVDB ID was not found by Sonarr")
+        candidate = _series_candidate(source)
+        if candidate is None:
+            raise ToolError("Sonarr returned incomplete series metadata")
+        sonarr_id = source.get("id")
+        record = source
+        if isinstance(sonarr_id, int) and sonarr_id > 0:
+            # The lookup response carries season numbers but leaves statistics
+            # null, so episode counts need the tracked series itself.
+            current = _record(
+                await self.upstream.call("sonarr_get_series_by_id", {"id": sonarr_id})
+            )
+            if current is not None:
+                record = current
+        return {
+            "tvdb_id": tvdb_id,
+            "title": candidate["title"],
+            "year": candidate["year"],
+            "in_sonarr": isinstance(sonarr_id, int) and sonarr_id > 0,
+            "seasons": _season_states(record),
+        }
+
     async def _request_series(self, arguments: object, actor: Actor, _role: Role) -> dict[str, Any]:
         args = _exact(arguments, {"tvdb_id", "seasons", "anime"})
         tvdb_id = _positive(args.get("tvdb_id"), "tvdb_id")
         raw_seasons = args.get("seasons")
         if not isinstance(raw_seasons, list) or not raw_seasons or len(raw_seasons) > 50:
             raise ToolError("seasons must be a non-empty array")
-        seasons = tuple(sorted({_positive(item, "season") for item in raw_seasons}))
+        # Season 0 is the specials season, so a season number is non-negative
+        # rather than positive.
+        seasons = tuple(sorted({_season_argument(item) for item in raw_seasons}))
         anime = args.get("anime", False)
         if not isinstance(anime, bool):
             raise ToolError("anime must be a boolean")

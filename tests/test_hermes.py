@@ -556,24 +556,215 @@ async def test_single_result_text_card_closes_as_text_not_caption(
     assert query.texts and query.texts[-1]["reply_markup"] is None
 
 
-async def test_single_result_series_callback_asks_for_seasons(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class Query:
-        data = "md:req:s67890"
-        from_user = SimpleNamespace(id=1001)
-        message = SimpleNamespace(chat_id=1001, photo=None)
+SEVERANCE_SEASONS = {
+    "tvdb_id": 371980,
+    "title": "Severance",
+    "year": 2022,
+    "in_sonarr": True,
+    "seasons": [
+        {
+            "number": 0,
+            "files": 0,
+            "episodes": 21,
+            "monitored": False,
+            "complete": False,
+            "partial": False,
+        },
+        {
+            "number": 1,
+            "files": 9,
+            "episodes": 9,
+            "monitored": True,
+            "complete": True,
+            "partial": False,
+        },
+        {
+            "number": 2,
+            "files": 0,
+            "episodes": 10,
+            "monitored": False,
+            "complete": False,
+            "partial": False,
+        },
+    ],
+}
 
-        def __init__(self) -> None:
-            self.answers: list[str | None] = []
 
-        async def answer(self, text: str | None = None) -> None:
-            self.answers.append(text)
+class SeasonButton:
+    def __init__(self, text: str, *, callback_data: str = "", url: str = "") -> None:
+        self.text = text
+        self.callback_data = callback_data
+        self.url = url
 
-    query = Query()
-    update = SimpleNamespace(callback_query=query)
-    assert await plugin._handle_media_picker_callback(update, None)
-    assert query.answers == ["Which seasons do you want?"]
+
+class SeasonMarkup:
+    def __init__(self, rows: list[list[SeasonButton]]) -> None:
+        self.inline_keyboard = rows
+
+
+class SeasonQuery:
+    """One tap on a season picker, recording what the card became."""
+
+    from_user = SimpleNamespace(id=1001)
+
+    def __init__(self, data: str, *, message_id: int = 500) -> None:
+        self.data = data
+        self.message = SimpleNamespace(chat_id=1001, message_id=message_id, photo=())
+        self.answers: list[str | None] = []
+        self.markups: list[Any] = []
+        self.closed: list[dict[str, Any]] = []
+
+    async def answer(self, text: str | None = None) -> None:
+        self.answers.append(text)
+
+    async def edit_message_reply_markup(self, **values: Any) -> None:
+        self.markups.append(values.get("reply_markup"))
+
+    async def edit_message_text(self, **values: Any) -> None:
+        self.closed.append(values)
+
+
+class SeasonAdapter:
+    def __init__(self) -> None:
+        self._media_delivery_loop = asyncio.get_running_loop()
+        self.sent: list[dict[str, Any]] = []
+        self.cleared: list[dict[str, Any]] = []
+        self._bot = SimpleNamespace(
+            send_message=self.send_message,
+            edit_message_reply_markup=self.edit_message_reply_markup,
+        )
+
+    async def send_message(self, **values: Any) -> SimpleNamespace:
+        self.sent.append(values)
+        return SimpleNamespace(message_id=900)
+
+    async def edit_message_reply_markup(self, **values: Any) -> None:
+        self.cleared.append(values)
+
+
+class SeasonGateway:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def call(self, _actor: Actor, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append((name, arguments))
+        if name == "series_seasons":
+            return SEVERANCE_SEASONS
+        return {"status": "monitoring_updated", "request_id": 3}
+
+
+@pytest.fixture
+async def season_env(monkeypatch: pytest.MonkeyPatch) -> Any:
+    telegram = ModuleType("telegram")
+    telegram.InlineKeyboardButton = SeasonButton  # type: ignore[attr-defined]
+    telegram.InlineKeyboardMarkup = SeasonMarkup  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "telegram", telegram)
+    monkeypatch.setattr(plugin, "_season_pickers", {})
+    monkeypatch.setattr(plugin, "_single_cards", {})
+    gateway = SeasonGateway()
+    adapter = SeasonAdapter()
+    monkeypatch.setattr(plugin, "_client", gateway)
+    monkeypatch.setattr(plugin, "_active_adapter", adapter)
+    return SimpleNamespace(gateway=gateway, adapter=adapter)
+
+
+async def _open_picker(season_env: Any) -> tuple[str, list[SeasonButton]]:
+    query = SeasonQuery("md:req:s371980")
+    assert await plugin._handle_media_picker_callback(SimpleNamespace(callback_query=query), None)
+    assert season_env.gateway.calls[0] == ("series_seasons", {"tvdb_id": 371980})
+    markup = season_env.adapter.sent[0]["reply_markup"]
+    buttons = [b for row in markup.inline_keyboard for b in row]
+    picker_id = next(iter(plugin._season_pickers))
+    return picker_id, buttons
+
+
+async def test_series_tap_opens_a_season_picker_with_availability(season_env: Any) -> None:
+    """Complete seasons read as done; specials come last and are selectable."""
+
+    picker_id, buttons = await _open_picker(season_env)
+    labels = [b.text for b in buttons]
+
+    # Numbered seasons first, specials last, then the shortcut and actions.
+    assert labels[0].startswith("☑  S1  ·  complete")
+    assert labels[1] == "☐  S2  ·  0/10"
+    assert labels[2] == "☐  Specials  ·  0/21"
+    assert labels[3] == "＋ All missing"
+    assert labels[4] == "Request (0)"
+    assert labels[5] == "Cancel"
+    assert buttons[2].callback_data == f"md:{picker_id}:s0"
+    # Nothing is pre-ticked, and the series card's spent button is cleared.
+    assert plugin._season_pickers[picker_id].selected == set()
+    assert season_env.adapter.cleared == [
+        {"chat_id": 1001, "message_id": 500, "reply_markup": None}
+    ]
+
+
+async def test_tapping_a_complete_season_only_explains_itself(season_env: Any) -> None:
+    picker_id, _ = await _open_picker(season_env)
+
+    query = SeasonQuery(f"md:{picker_id}:s1")
+    assert await plugin._handle_media_picker_callback(SimpleNamespace(callback_query=query), None)
+
+    assert query.answers == ["Season 1 is already complete"]
+    assert query.markups == []
+    assert plugin._season_pickers[picker_id].selected == set()
+    assert [name for name, _ in season_env.gateway.calls] == ["series_seasons"]
+
+
+async def test_season_picker_requests_only_the_ticked_seasons(season_env: Any) -> None:
+    picker_id, _ = await _open_picker(season_env)
+
+    # Tick season 2 and the specials, then untick the specials again.
+    for action in (f"md:{picker_id}:s2", f"md:{picker_id}:s0", f"md:{picker_id}:s0"):
+        query = SeasonQuery(action)
+        assert await plugin._handle_media_picker_callback(
+            SimpleNamespace(callback_query=query), None
+        )
+    assert plugin._season_pickers[picker_id].selected == {2}
+
+    go = SeasonQuery(f"md:{picker_id}:go")
+    assert await plugin._handle_media_picker_callback(SimpleNamespace(callback_query=go), None)
+
+    assert season_env.gateway.calls[-1] == (
+        "request_series",
+        {"tvdb_id": 371980, "seasons": [2]},
+    )
+    assert "S2" in go.closed[-1]["text"]
+    assert go.closed[-1]["reply_markup"] is None
+    # The picker is spent, so a second tap cannot request again.
+    assert picker_id not in plugin._season_pickers
+
+
+async def test_all_missing_shortcut_skips_complete_seasons(season_env: Any) -> None:
+    picker_id, _ = await _open_picker(season_env)
+
+    query = SeasonQuery(f"md:{picker_id}:all")
+    assert await plugin._handle_media_picker_callback(SimpleNamespace(callback_query=query), None)
+
+    assert plugin._season_pickers[picker_id].selected == {0, 2}
+    assert query.answers == ["All missing seasons selected"]
+
+
+async def test_season_picker_refuses_an_empty_request(season_env: Any) -> None:
+    picker_id, _ = await _open_picker(season_env)
+
+    query = SeasonQuery(f"md:{picker_id}:go")
+    assert await plugin._handle_media_picker_callback(SimpleNamespace(callback_query=query), None)
+
+    assert query.answers == ["Pick at least one season first"]
+    assert [name for name, _ in season_env.gateway.calls] == ["series_seasons"]
+    assert picker_id in plugin._season_pickers
+
+
+async def test_season_picker_rejects_another_users_tap(season_env: Any) -> None:
+    picker_id, _ = await _open_picker(season_env)
+
+    query = SeasonQuery(f"md:{picker_id}:s2")
+    query.from_user = SimpleNamespace(id=7777)
+    assert await plugin._handle_media_picker_callback(SimpleNamespace(callback_query=query), None)
+
+    assert query.answers == ["⛔ This media card belongs to another request."]
+    assert plugin._season_pickers[picker_id].selected == set()
 
 
 async def test_media_card_switches_poster_then_requests_active_movie(

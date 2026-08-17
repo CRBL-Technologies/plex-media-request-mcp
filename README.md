@@ -72,12 +72,21 @@ its availability and offers to add the missing ones, so a casual suggestion requ
 never blocks on a modal prompt. The user asks for any title by name to request it.
 
 A search that resolves to exactly one result posts that poster with a single
-action button underneath. A title already on Plex links straight to its
-`watch.plex.tv` page; one that is not offers Request, which performs the movie
-request from the tap itself and asks a series for its seasons. A title that is
-available but exposes no Plex slug shows no button, because offering Request for
-something already watchable is worse than offering nothing. Results carry `in_plex`
-and `plex_url` so the model can state availability without a second lookup.
+action button underneath. A downloaded movie links to its `watch.plex.tv` page,
+which is the only link form the Plex apps open natively; one that is not
+downloaded offers Request, which performs the request from the tap itself. A
+downloaded movie with no Plex slug shows no button, because offering Request for
+something already watchable is worse than offering nothing.
+
+A series always offers Request, which opens a season picker instead of
+requesting anything. The picker reports each season's episode counts from
+`series_seasons`, because a Sonarr search result carries no per-season
+statistics. A complete season renders as ticked and inert — Telegram has no
+disabled button, so tapping one only says it is already complete rather than
+re-searching it. Missing seasons start unticked, `＋ All missing` selects them
+all, and specials appear last as season 0. The picker holds the TVDB id and the
+tick state itself, so a tap needs no model turn, and it performs the request
+once and then retires.
 Every title lookup, availability check, and request must refresh `search_media`
 in the current turn; conversation history is never a valid substitute for a
 current provider result. That guidance has exactly one copy,

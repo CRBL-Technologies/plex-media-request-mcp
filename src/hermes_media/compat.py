@@ -336,6 +336,116 @@ async def edit_media_picker(
     return next_has_photo
 
 
+def _season_label(state: Mapping[str, Any], *, selected: bool) -> str:
+    number = state.get("number")
+    name = "Specials" if number == 0 else f"S{number}"
+    files = state.get("files")
+    episodes = state.get("episodes")
+    if state.get("complete"):
+        # Telegram has no disabled button, so a complete season reads as done
+        # and its tap only explains itself.
+        return f"☑  {name}  ·  complete"
+    counts = f"{files}/{episodes}" if isinstance(episodes, int) and episodes else "no episodes"
+    if state.get("monitored") and not state.get("partial"):
+        counts += " · searching"
+    box = "☑" if selected else "☐"
+    return f"{box}  {name}  ·  {counts}"
+
+
+def season_picker_markup(
+    *,
+    picker_id: str,
+    states: Sequence[Mapping[str, Any]],
+    selected: Sequence[int],
+) -> object:
+    """Build the season picker: specials last, complete seasons inert."""
+
+    from telegram import (  # type: ignore[import-not-found,unused-ignore]
+        InlineKeyboardButton,
+        InlineKeyboardMarkup,
+    )
+
+    chosen = set(selected)
+    rows = [
+        [
+            InlineKeyboardButton(
+                _season_label(state, selected=int(state["number"]) in chosen),
+                callback_data=f"{MEDIA_CALLBACK_PREFIX}:{picker_id}:s{state['number']}",
+            )
+        ]
+        for state in states
+    ]
+    missing = [int(state["number"]) for state in states if not state.get("complete")]
+    if missing:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "＋ All missing",
+                    callback_data=f"{MEDIA_CALLBACK_PREFIX}:{picker_id}:all",
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                f"Request ({len(chosen)})",
+                callback_data=f"{MEDIA_CALLBACK_PREFIX}:{picker_id}:go",
+            ),
+            InlineKeyboardButton(
+                "Cancel", callback_data=f"{MEDIA_CALLBACK_PREFIX}:{picker_id}:cancel"
+            ),
+        ]
+    )
+    return InlineKeyboardMarkup(rows)
+
+
+async def send_season_picker(
+    adapter: object,
+    *,
+    chat_id: int,
+    picker_id: str,
+    poster_url: str | None,
+    caption: str,
+    states: Sequence[Mapping[str, Any]],
+    selected: Sequence[int],
+) -> object:
+    markup = season_picker_markup(picker_id=picker_id, states=states, selected=selected)
+    bot = getattr(adapter, "_bot", None)
+    if bot is None:
+        return SimpleNamespace(success=False)
+    if poster_url is not None:
+        message = await bot.send_photo(
+            chat_id=chat_id,
+            photo=poster_url,
+            caption=caption,
+            parse_mode="HTML",
+            reply_markup=markup,
+        )
+        return SimpleNamespace(success=True, message_id=str(message.message_id), has_photo=True)
+    message = await bot.send_message(
+        chat_id=chat_id,
+        text=caption,
+        parse_mode="HTML",
+        reply_markup=markup,
+        disable_web_page_preview=True,
+    )
+    return SimpleNamespace(success=True, message_id=str(message.message_id), has_photo=False)
+
+
+async def edit_season_selection(
+    query: Any,
+    *,
+    picker_id: str,
+    states: Sequence[Mapping[str, Any]],
+    selected: Sequence[int],
+) -> None:
+    """Redraw only the keyboard, so ticking a season does not resend the poster."""
+
+    await query.edit_message_reply_markup(
+        reply_markup=season_picker_markup(picker_id=picker_id, states=states, selected=selected)
+    )
+
+
 async def clear_card_buttons(adapter: object, *, chat_id: int, message_id: int) -> None:
     """Drop one card's buttons, leaving its poster and caption in place.
 

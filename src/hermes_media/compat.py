@@ -555,8 +555,8 @@ async def send_single_result_card(
 def verify_pinned_runtime(*, manager: object, expected_tools: set[str], platform_hint: str) -> None:
     """Fail closed when any private pinned-Hermes integration contract moves."""
 
+    from agent import system_prompt  # type: ignore[import-not-found,unused-ignore]
     from agent.prompt_builder import PLATFORM_HINTS  # type: ignore[import-not-found]
-    from agent.system_prompt import _resolve_platform_hint  # type: ignore[import-not-found]
     from agent.web_search_registry import (  # type: ignore[import-not-found]
         get_active_extract_provider,
         get_active_search_provider,
@@ -605,14 +605,20 @@ def verify_pinned_runtime(*, manager: object, expected_tools: set[str], platform
         raise RuntimeError("CRBL role-aware tool resolver is not active")
     if TOOLSETS.get("search", {}).get("tools") != ["web_search"]:
         raise RuntimeError("Hermes search-only toolset contract changed")
-    if not getattr(_resolve_platform_hint, "__crbl_media__", False):
+    # Read the resolver off the module, never through a name imported at the
+    # top of this function: the plugin -- and therefore the patch -- is only
+    # loaded by the platform_registry.get() call above, so an imported name
+    # still points at the unpatched original and would fail this check even
+    # though the installer ran.
+    resolve_hint = getattr(system_prompt, "_resolve_platform_hint", None)
+    if not callable(resolve_hint) or not getattr(resolve_hint, "__crbl_media__", False):
         raise RuntimeError("CRBL platform-hint installer is not active")
     if "telegram" not in PLATFORM_HINTS:
         raise RuntimeError("Hermes no longer resolves a built-in Telegram hint")
     # Resolve with no config override at all: the guidance must reach the
     # assembled prompt from the code constant alone, or the single source of
     # truth is not actually installed.
-    effective = _resolve_platform_hint(
+    effective = resolve_hint(
         SimpleNamespace(_platform_hint_overrides={}),
         "telegram",
         PLATFORM_HINTS["telegram"],

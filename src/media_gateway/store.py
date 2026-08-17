@@ -482,7 +482,11 @@ class Store:
         result: set[int] = set()
         for row in rows:
             result.update(
-                item for item in json.loads(row["seasons"]) if isinstance(item, int) and item > 0
+                item
+                for item in json.loads(row["seasons"])
+                # Season 0 is the specials season; dropping it would make a
+                # specials notification match every requester of the show.
+                if isinstance(item, int) and not isinstance(item, bool) and item >= 0
             )
         return result
 

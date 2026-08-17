@@ -31,6 +31,25 @@ def _positive(value: object) -> int | None:
     return None
 
 
+def _season_index(value: object) -> int | None:
+    """A season number, where 0 is the specials season rather than absent.
+
+    Episode numbers stay strictly positive; only seasons reach zero.
+    """
+
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+def _season_label(season: object) -> str:
+    if season is None:
+        return ""
+    return "Specials" if season == 0 else f"Season {season}"
+
+
 def _external_id(metadata: dict[str, Any], provider: str) -> int | None:
     guides: list[str] = []
     raw = metadata.get("Guid")
@@ -94,7 +113,7 @@ class Notifications:
             show_title = (
                 str(metadata.get("parentTitle"))[:300] if metadata.get("parentTitle") else None
             )
-            season = _positive(metadata.get("index"))
+            season = _season_index(metadata.get("index"))
             episode = None
         else:
             external_id = _guide_id(metadata.get("grandparentGuid"), "tvdb")
@@ -105,7 +124,7 @@ class Notifications:
                 if metadata.get("grandparentTitle")
                 else None
             )
-            season = _positive(metadata.get("parentIndex"))
+            season = _season_index(metadata.get("parentIndex"))
             episode = _positive(metadata.get("index"))
         title = str(metadata.get("title") or "Untitled")[:300]
         # A watch.plex.tv link opens the Plex app; the server route below opens
@@ -339,10 +358,10 @@ class Notifications:
         season = first["season_number"]
         episodes = [item for item in batch if item["episode_number"] is not None]
         if not episodes:
-            label = f"Season {season}" if season is not None else "New series"
+            label = _season_label(season) or "New series"
             return f"📺 <b>Available in Plex</b>\n{show} · {label}"
         if len(batch) > 1:
-            label = f"Season {season}" if season is not None else "New episodes"
+            label = _season_label(season) or "New episodes"
             return f"📺 <b>Available in Plex</b>\n{show} · {label} ({len(episodes)} episodes)"
         episode = first["episode_number"]
         marker = ""

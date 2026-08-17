@@ -201,6 +201,7 @@ class _PendingSeasonPicker:
 
 _season_picker_lock = threading.Lock()
 _season_pickers: dict[str, _PendingSeasonPicker] = {}
+_claimed_pickers: dict[str, float] = {}
 SEASON_PICKER_TTL_SECONDS = 1800
 
 
@@ -225,6 +226,35 @@ def _get_season_picker(picker_id: str) -> _PendingSeasonPicker | None:
 def _drop_season_picker(picker_id: str) -> None:
     with _season_picker_lock:
         _season_pickers.pop(picker_id, None)
+
+
+def _claim_season_picker(picker_id: str) -> _PendingSeasonPicker | None:
+    """Take sole ownership of a picker's submission, or return None.
+
+    The submit path awaits the gateway, so two taps arriving together would
+    otherwise both pass the selection check and request the same seasons twice.
+    Removing the picker under the lock, before any await, makes the second tap
+    a no-op instead.
+    """
+
+    now = time.monotonic()
+    with _season_picker_lock:
+        pending = _season_pickers.pop(picker_id, None)
+        if pending is not None:
+            # Remember the claim so the losing tap can be told what happened
+            # instead of being reported as an expired card.
+            for key in [k for k, deadline in _claimed_pickers.items() if deadline <= now]:
+                _claimed_pickers.pop(key, None)
+            _claimed_pickers[picker_id] = now + SEASON_PICKER_TTL_SECONDS
+    if pending is None or pending.expires_at <= now:
+        return None
+    return pending
+
+
+def _season_picker_was_claimed(picker_id: str) -> bool:
+    with _season_picker_lock:
+        deadline = _claimed_pickers.get(picker_id)
+    return deadline is not None and deadline > time.monotonic()
 
 
 _pending_picker_lock = threading.Lock()
@@ -889,6 +919,13 @@ async def _handle_season_picker_callback(
         await answer_media_callback(query, "Pick at least one season first")
         return True
 
+    # Claim before the first await, so a double tap cannot run the Sonarr
+    # update and season search twice.
+    claimed = _claim_season_picker(pending.picker_id)
+    if claimed is None:
+        await answer_media_callback(query, "Already requested")
+        return True
+    pending = claimed
     seasons = sorted(pending.selected)
     await answer_media_callback(query, "Requesting…")
     actor = Actor(user_id=pending.actor_user_id, chat_id=pending.actor_chat_id)
@@ -929,6 +966,9 @@ async def _handle_media_picker_callback(update: object, adapter: object) -> bool
     season = _get_season_picker(callback.picker_id) if callback.picker_id else None
     if season is not None and callback.action:
         return await _handle_season_picker_callback(query, season, callback.action)
+    if callback.picker_id and _season_picker_was_claimed(callback.picker_id):
+        await answer_media_callback(query, "Already requested")
+        return True
 
     if not callback.picker_id or not callback.action:
         await answer_media_callback(query, "Invalid media card.")

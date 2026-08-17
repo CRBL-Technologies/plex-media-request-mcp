@@ -9,6 +9,7 @@ from typing import Any, ClassVar
 
 import pytest
 
+from hermes_media import compat as compat_module
 from hermes_media import plugin
 from hermes_media.client import GatewayError
 from hermes_media.trusted import TrustError, actor_from_event, actor_scope
@@ -650,6 +651,9 @@ class SeasonGateway:
         self.calls.append((name, arguments))
         if name == "series_seasons":
             return SEVERANCE_SEASONS
+        # Yield, so concurrent taps genuinely interleave here rather than each
+        # running to completion before the next starts.
+        await asyncio.sleep(0)
         return {"status": "monitoring_updated", "request_id": 3}
 
 
@@ -660,6 +664,7 @@ async def season_env(monkeypatch: pytest.MonkeyPatch) -> Any:
     telegram.InlineKeyboardMarkup = SeasonMarkup  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "telegram", telegram)
     monkeypatch.setattr(plugin, "_season_pickers", {})
+    monkeypatch.setattr(plugin, "_claimed_pickers", {})
     monkeypatch.setattr(plugin, "_single_cards", {})
     gateway = SeasonGateway()
     adapter = SeasonAdapter()
@@ -732,6 +737,32 @@ async def test_season_picker_requests_only_the_ticked_seasons(season_env: Any) -
     assert "S2" in go.closed[-1]["text"]
     assert go.closed[-1]["reply_markup"] is None
     # The picker is spent, so a second tap cannot request again.
+    assert picker_id not in plugin._season_pickers
+
+
+async def test_double_tapped_request_runs_once(season_env: Any) -> None:
+    """Two go taps in flight together must not request the same seasons twice.
+
+    The submit path awaits the gateway, so both taps would otherwise pass the
+    selection check and run Sonarr's update and season search twice.
+    """
+
+    picker_id, _ = await _open_picker(season_env)
+    tick = SeasonQuery(f"md:{picker_id}:s2")
+    await plugin._handle_media_picker_callback(SimpleNamespace(callback_query=tick), None)
+
+    first = SeasonQuery(f"md:{picker_id}:go")
+    second = SeasonQuery(f"md:{picker_id}:go")
+    await asyncio.gather(
+        plugin._handle_media_picker_callback(SimpleNamespace(callback_query=first), None),
+        plugin._handle_media_picker_callback(SimpleNamespace(callback_query=second), None),
+    )
+
+    requests = [args for name, args in season_env.gateway.calls if name == "request_series"]
+    assert requests == [{"tvdb_id": 371980, "seasons": [2]}]
+    # The loser is told why nothing happened rather than silently ignored.
+    answers = first.answers + second.answers
+    assert "Already requested" in answers
     assert picker_id not in plugin._season_pickers
 
 
@@ -1558,3 +1589,102 @@ def test_platform_hint_is_installed_from_code_without_any_config(
 
     # The hint is no longer mirrored into any config file.
     assert not hasattr(plugin, "validate_platform_hint")
+
+
+def _fake_hermes(monkeypatch: pytest.MonkeyPatch, *, on_registry_get: Any) -> ModuleType:
+    """Install a minimal stand-in for the pinned Hermes runtime.
+
+    ``on_registry_get`` runs when the verifier resolves the Telegram platform,
+    mirroring the real runtime where that call is what loads the CRBL plugin
+    and installs its patches.
+    """
+
+    def module(name: str, **values: Any) -> ModuleType:
+        made = ModuleType(name)
+        for key, value in values.items():
+            setattr(made, key, value)
+        monkeypatch.setitem(sys.modules, name, made)
+        return made
+
+    system_prompt = module(
+        "agent.system_prompt",
+        _resolve_platform_hint=lambda _agent, _key, default: default,
+    )
+    module("agent", system_prompt=system_prompt)
+    module("agent.prompt_builder", PLATFORM_HINTS={"telegram": "BUILTIN"})
+    module(
+        "agent.web_search_registry",
+        get_active_search_provider=lambda: SimpleNamespace(name="ddgs", is_available=lambda: True),
+        get_active_extract_provider=lambda: None,
+    )
+
+    class Registry:
+        @staticmethod
+        def get(_name: str) -> object:
+            on_registry_get(system_prompt)
+            return SimpleNamespace(plugin_name="crbl-media")
+
+    module("gateway.platform_registry", platform_registry=Registry())
+    module("gateway", platform_registry=sys.modules["gateway.platform_registry"])
+    module("gateway.platforms.base", BasePlatformAdapter=type("B", (), {"gateway_runner": None}))
+    module("gateway.platforms")
+    module("gateway.run", GatewayRunner=type("R", (), {"_running_agents": property(lambda s: {})}))
+    module("run_agent", AIAgent=type("A", (), {"interrupt": lambda self: None}))
+    module("toolsets", TOOLSETS={"search": {"tools": ["web_search"]}})
+
+    def resolver(_config: Any, _platform: str) -> object:
+        return set()
+
+    resolver.__crbl_media__ = True  # type: ignore[attr-defined]
+    module("hermes_cli", tools_config=None)
+    module("hermes_cli.tools_config", _get_platform_tools=resolver)
+    sys.modules["hermes_cli"].tools_config = sys.modules["hermes_cli.tools_config"]
+
+    adapter = type("TelegramAdapter", (), {"_handle_callback_query": lambda self, u, c: None})
+    module("plugins.platforms.telegram.adapter", TelegramAdapter=adapter)
+    module("plugins.platforms.telegram")
+    module("plugins.platforms")
+    module("plugins")
+    monkeypatch.setattr(
+        "hermes_media.compat.importlib.metadata.version",
+        lambda _name: compat_module.PINNED_HERMES_PACKAGE_VERSION,
+    )
+    return system_prompt
+
+
+def test_startup_gate_sees_a_patch_installed_while_it_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hint installer runs during the verifier, not before it.
+
+    Registration -- and therefore the patch -- happens when the verifier
+    resolves the Telegram platform. Reading the resolver through a name
+    imported at the top of the verifier would still see the original function
+    and fail the check, exiting the container.
+    """
+
+    def install(system_prompt: ModuleType) -> None:
+        compat_module.install_platform_hint(platform="telegram", platform_hint=plugin.PLATFORM_HINT)
+
+    _fake_hermes(monkeypatch, on_registry_get=install)
+    manager = SimpleNamespace(_plugin_tool_names=set(SHARED_TOOLS) | ADMIN_UPSTREAM_TOOLS)
+
+    compat_module.verify_pinned_runtime(
+        manager=manager,
+        expected_tools=set(SHARED_TOOLS) | ADMIN_UPSTREAM_TOOLS,
+        platform_hint=plugin.PLATFORM_HINT,
+    )
+
+
+def test_startup_gate_fails_closed_when_the_installer_never_ran(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fake_hermes(monkeypatch, on_registry_get=lambda _system_prompt: None)
+    manager = SimpleNamespace(_plugin_tool_names=set(SHARED_TOOLS) | ADMIN_UPSTREAM_TOOLS)
+
+    with pytest.raises(RuntimeError, match="platform-hint installer is not active"):
+        compat_module.verify_pinned_runtime(
+            manager=manager,
+            expected_tools=set(SHARED_TOOLS) | ADMIN_UPSTREAM_TOOLS,
+            platform_hint=plugin.PLATFORM_HINT,
+        )

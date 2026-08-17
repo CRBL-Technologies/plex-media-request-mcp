@@ -843,6 +843,72 @@ def test_series_request_uses_trusted_actor_and_exact_seasons(config: Config) -> 
         assert requests[0]["seasons"] == [1]
 
 
+def test_specials_notify_only_the_specials_requester(config: Config) -> None:
+    """A season-0 event must not reach everyone who asked for other seasons.
+
+    Season 0 used to be parsed as "no season", and a missing season number
+    matches every outstanding requester of the show.
+    """
+
+    app = create_app(config)
+    with TestClient(app) as client:
+        runtime = app.state.runtime
+        runtime.store.record_request(
+            media_type="series",
+            external_id=371980,
+            seasons=(0,),
+            title="Severance",
+            year=2022,
+            actor=Actor(user_id=1001, chat_id=1001),
+        )
+        runtime.store.record_request(
+            media_type="series",
+            external_id=371980,
+            seasons=(1,),
+            title="Severance",
+            year=2022,
+            actor=Actor(user_id=2002, chat_id=2002),
+        )
+
+        assert runtime.store.requested_seasons(371980) == {0, 1}
+
+        specials = runtime.store.request_destinations(
+            media_type="series", external_id=371980, season_number=0
+        )
+        season_one = runtime.store.request_destinations(
+            media_type="series", external_id=371980, season_number=1
+        )
+
+        assert specials == {(1001, 1001)}
+        assert season_one == {(2002, 2002)}
+        assert client.get("/login").status_code == 200
+
+
+def test_specials_webhook_keeps_its_season_number(config: Config) -> None:
+    app = create_app(config)
+    payload = {
+        "event": "library.new",
+        "Metadata": {
+            "type": "episode",
+            "ratingKey": "3001",
+            "title": "The Lexington Letter",
+            "index": 1,
+            "parentIndex": 0,
+            "grandparentTitle": "Severance",
+            "grandparentGuid": "tvdb://371980",
+            "grandparentRatingKey": "1757",
+        },
+    }
+    token = "plex-hook-secret-with-at-least-32-bytes"
+    with TestClient(app) as client:
+        assert client.post(f"/private/plex/{token}", json=payload).json() == {"accepted": True}
+        event = app.state.runtime.store.pending_media_events(int(time.time()) + 10)[0]
+
+    # 0 is the specials season, not a missing season.
+    assert event["season_number"] == 0
+    assert event["episode_number"] == 1
+
+
 def test_series_seasons_reports_counts_from_the_tracked_series(config: Config) -> None:
     """The lookup response leaves statistics null, so counts need the series itself."""
 

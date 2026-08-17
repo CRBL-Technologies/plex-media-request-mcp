@@ -10,6 +10,7 @@ import pytest
 from conftest import FakeUpstream
 from starlette.testclient import TestClient
 
+from media_gateway import plex_watch
 from media_gateway.app import COOKIE, create_app
 from media_gateway.config import Config
 from media_gateway.constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
@@ -224,13 +225,33 @@ def slug_client(config: Config, monkeypatch: pytest.MonkeyPatch) -> type[_SlugCl
     return _SlugClient
 
 
-def test_lone_downloaded_movie_resolves_its_slug_in_one_request(
+def test_lone_downloaded_movie_links_straight_to_the_server_item(
     config: Config, slug_client: type[_SlugClient]
 ) -> None:
+    """The card must open the file on this server, not a "where to watch" page.
+
+    Two bounded calls: one GUID match for the canonical slug, one search whose
+    results already carry the rating key. Identity comes from slug equality, so
+    no per-candidate metadata calls are needed.
+    """
+
     app = create_app(config)
     fake = FakeUpstream()
     fake.responses["radarr_search_movie"] = {
         "data": [{"tmdbId": 693134, "title": "Dune: Part Two", "year": 2024, "hasFile": True}]
+    }
+    fake.responses["plex_search"] = {
+        "MediaContainer": {
+            "Hub": [
+                {
+                    "Metadata": [
+                        # A different film in the same search must be ignored.
+                        {"type": "movie", "ratingKey": 999, "slug": "dune"},
+                        {"type": "movie", "ratingKey": 1446, "slug": "dune-part-two"},
+                    ]
+                }
+            ]
+        }
     }
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
@@ -246,11 +267,40 @@ def test_lone_downloaded_movie_resolves_its_slug_in_one_request(
 
     assert response.status_code == 200
     result = response.json()["result"]["results"][0]
-    assert result["plex_url"] == "https://watch.plex.tv/movie/dune-part-two"
-    # Exactly one request, by GUID, and never a library traversal.
+    assert result["plex_url"] == (
+        "https://app.plex.tv/desktop/#!/server/machine-123/details?key=%2Flibrary%2Fmetadata%2F1446"
+    )
     assert len(slug_client.requests) == 1
     assert slug_client.requests[0]["params"] == {"guid": "tmdb://693134", "type": 1}
-    assert [name for name, _ in fake.calls if name.startswith("plex_")] == []
+    plex_calls = [name for name, _ in fake.calls if name.startswith("plex_")]
+    assert plex_calls == ["plex_search"]
+
+
+def test_movie_absent_from_the_library_falls_back_to_the_catalogue_page(
+    config: Config, slug_client: type[_SlugClient]
+) -> None:
+    """Nothing on this server to open, so the public entry is the honest link."""
+
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["radarr_search_movie"] = {
+        "data": [{"tmdbId": 693134, "title": "Dune: Part Two", "year": 2024, "hasFile": True}]
+    }
+    fake.responses["plex_search"] = {"MediaContainer": {"Hub": []}}
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "search_media",
+                "arguments": {"query": "Dune Part Two", "media_type": "movie", "limit": 1},
+            },
+        )
+
+    result = response.json()["result"]["results"][0]
+    assert result["plex_url"] == "https://watch.plex.tv/movie/dune-part-two"
 
 
 def test_multi_result_search_resolves_no_slugs(
@@ -872,7 +922,9 @@ def test_plex_webhook_requires_capability_and_deduplicates(config: Config) -> No
         assert first.json() == {"accepted": True}
         assert second.json() == {"accepted": False}
         event = app.state.runtime.store.pending_media_events(int(time.time()) + 10)[0]
-        assert event["plex_url"] == "https://watch.plex.tv/movie/a-movie"
+        assert event["plex_url"] == (
+            "https://app.plex.tv/desktop/#!/server/machine-123/details?key=%2Flibrary%2Fmetadata%2F42"
+        )
 
 
 def test_plex_webhook_accepts_existing_capability_path(config: Config) -> None:
@@ -912,7 +964,9 @@ def test_plex_webhook_accepts_new_show(config: Config) -> None:
         assert event["media_type"] == "series"
         assert event["external_id"] == 411959
         assert event["show_title"] == "3 Body Problem"
-        assert event["plex_url"] == "https://watch.plex.tv/show/3-body-problem"
+        assert event["plex_url"] == (
+            "https://app.plex.tv/desktop/#!/server/machine-123/details?key=%2Flibrary%2Fmetadata%2F10537"
+        )
 
 
 def test_plex_webhook_maps_season_parent_fields(config: Config) -> None:
@@ -939,7 +993,9 @@ def test_plex_webhook_maps_season_parent_fields(config: Config) -> None:
         assert event["parent_rating_key"] == "10537"
         assert event["show_title"] == "3 Body Problem"
         assert event["season_number"] == 1
-        assert event["plex_url"] == "https://watch.plex.tv/show/3-body-problem/season/1"
+        assert event["plex_url"] == (
+            "https://app.plex.tv/desktop/#!/server/machine-123/details?key=%2Flibrary%2Fmetadata%2F10538"
+        )
 
 
 def test_plex_webhook_links_an_episode_to_the_mobile_app_route(config: Config) -> None:
@@ -963,7 +1019,12 @@ def test_plex_webhook_links_an_episode_to_the_mobile_app_route(config: Config) -
         response = client.post(f"/private/plex/{token}", json=payload)
         assert response.json() == {"accepted": True}
         event = app.state.runtime.store.pending_media_events(int(time.time()) + 10)[0]
-        assert event["plex_url"] == ("https://watch.plex.tv/show/3-body-problem/season/1/episode/2")
+        # The episode's own rating key, so the link opens that episode on this
+        # server rather than the show's public catalogue page.
+        assert event["plex_url"] == (
+            "https://app.plex.tv/desktop/#!/server/machine-123"
+            "/details?key=%2Flibrary%2Fmetadata%2F10539"
+        )
 
 
 def test_rejects_oversized_request_before_parsing(config: Config) -> None:
@@ -1247,12 +1308,20 @@ async def test_new_show_without_guid_enriches_from_its_own_rating_key(
         assert set(sent) == {1001, 9001}
 
 
-async def test_notification_enrichment_persists_universal_plex_link(
-    config: Config, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_notification_enrichment_keeps_the_direct_server_link(config: Config) -> None:
+    """Enrichment must not downgrade a server link to a catalogue page.
+
+    It used to overwrite the stored link with a watch.plex.tv entry, which made
+    the recipient choose a streaming service for a file already on the server.
+    """
+
     app = create_app(config)
     with TestClient(app):
         runtime = app.state.runtime
+        direct = (
+            "https://app.plex.tv/desktop/#!/server/machine-123"
+            "/details?key=%2Flibrary%2Fmetadata%2F19"
+        )
         runtime.store.add_media_event(
             event_key="episode:19",
             media_type="series",
@@ -1262,21 +1331,41 @@ async def test_notification_enrichment_persists_universal_plex_link(
             show_title="One Piece",
             season_number=2,
             episode_number=19,
-            plex_url="https://app.plex.tv/fallback",
+            plex_url=direct,
             observed_at=int(time.time()) - 10,
         )
 
-        async def lookup(_media_type: str, _external_id: int) -> str:
-            return "one-piece"
-
-        monkeypatch.setattr(runtime.notifications, "_lookup_plex_slug", lookup)
         events = runtime.store.pending_media_events(int(time.time()) + 10)
         enriched = await runtime.notifications._enrich(events)
 
-        expected = "https://watch.plex.tv/show/one-piece/season/2/episode/19"
-        assert enriched[0]["plex_url"] == expected
-        persisted = runtime.store.pending_media_events(int(time.time()) + 10)
-        assert persisted[0]["plex_url"] == expected
+        assert enriched[0]["plex_url"] == direct
+        assert runtime.store.pending_media_events(int(time.time()) + 10)[0]["plex_url"] == direct
+
+
+async def test_notification_enrichment_repairs_a_missing_link(config: Config) -> None:
+    app = create_app(config)
+    with TestClient(app):
+        runtime = app.state.runtime
+        runtime.store.add_media_event(
+            event_key="movie:77",
+            media_type="movie",
+            external_id=693134,
+            rating_key="77",
+            title="Dune: Part Two",
+            show_title=None,
+            season_number=None,
+            episode_number=None,
+            plex_url="",
+            observed_at=int(time.time()) - 10,
+        )
+
+        events = runtime.store.pending_media_events(int(time.time()) + 10)
+        enriched = await runtime.notifications._enrich(events)
+
+        assert enriched[0]["plex_url"] == (
+            "https://app.plex.tv/desktop/#!/server/machine-123"
+            "/details?key=%2Flibrary%2Fmetadata%2F77"
+        )
 
 
 async def test_plex_slug_lookup_keeps_token_out_of_the_url(
@@ -1305,15 +1394,25 @@ async def test_plex_slug_lookup_keeps_token_out_of_the_url(
             captured.update({"url": url, **values})
             return Response()
 
-    monkeypatch.setattr("media_gateway.notifications.httpx.AsyncClient", lambda **_kwargs: Client())
-    app = create_app(config)
-    with TestClient(app):
-        slug = await app.state.runtime.notifications._lookup_plex_slug("series", 81797)
+    monkeypatch.setattr("media_gateway.plex_watch.httpx.AsyncClient", lambda **_kwargs: Client())
+    slug = await plex_watch.lookup_slug(
+        token_file=config.upstream_token_file, media_type="series", external_id=81797
+    )
 
     assert slug == "one-piece"
     assert captured["params"] == {"guid": "tvdb://81797", "type": 2}
     assert "plex-secret" not in str(captured["url"])
     assert captured["headers"]["X-Plex-Token"] == "plex-secret"
+
+    # The second ask is served from cache rather than repeating the request.
+    captured.clear()
+    assert (
+        await plex_watch.lookup_slug(
+            token_file=config.upstream_token_file, media_type="series", external_id=81797
+        )
+        == "one-piece"
+    )
+    assert captured == {}
 
 
 async def test_season_batch_waits_until_the_latest_episode_is_quiet(config: Config) -> None:

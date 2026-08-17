@@ -14,6 +14,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -51,6 +52,19 @@ def watch_url(
         if isinstance(episode_number, int) and episode_number > 0:
             result += f"/episode/{episode_number}"
     return result
+
+
+def server_details_url(*, machine_id: str, rating_key: str) -> str:
+    """Link straight to one item on this server, skipping Plex's discovery page.
+
+    ``watch.plex.tv`` is a public catalogue entry, so it opens a "where to
+    watch" chooser even for a file that is already on the server. This route
+    opens the item itself. It requires the viewer to have access to the server,
+    which every allowlisted user of this bot does.
+    """
+
+    key = quote(f"/library/metadata/{rating_key}", safe="")
+    return f"https://app.plex.tv/desktop/#!/server/{quote(machine_id, safe='')}/details?key={key}"
 
 
 def _metadata_objects(value: dict[str, Any]) -> list[dict[str, Any]]:

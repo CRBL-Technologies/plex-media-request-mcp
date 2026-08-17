@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from contextlib import suppress
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -395,15 +396,58 @@ class ToolService:
         if candidate.get("media_type") != "movie" or not candidate.get("downloaded"):
             return
         tmdb_id = candidate.get("tmdb_id")
-        if not isinstance(tmdb_id, int) or tmdb_id <= 0:
+        title = candidate.get("title")
+        if not isinstance(tmdb_id, int) or tmdb_id <= 0 or not isinstance(title, str):
             return
         slug = await plex_watch.lookup_slug(
             token_file=self.config.upstream_token_file,
             media_type="movie",
             external_id=tmdb_id,
         )
-        if slug is not None:
+        if slug is None:
+            return
+        rating_key = None
+        with suppress(UpstreamError):
+            rating_key = await self._plex_rating_key(title=title, slug=slug)
+        if rating_key is not None:
+            candidate["plex_url"] = plex_watch.server_details_url(
+                machine_id=self.config.plex_machine_id, rating_key=rating_key
+            )
+        else:
+            # No item on this server to open, so the public catalogue entry is
+            # the only honest link left.
             candidate["plex_url"] = plex_watch.watch_url(media_type="movie", slug=slug)
+
+    async def _plex_rating_key(self, *, title: str, slug: str) -> str | None:
+        """Find this server's id for a title, in one search and no metadata calls.
+
+        Search results carry both ``ratingKey`` and ``slug``, and the slug is
+        canonical for the title, so matching on it identifies the item without
+        the per-candidate metadata calls an id comparison would need.
+        """
+
+        raw = await self.upstream.call(
+            "plex_search", {"query": title, "limit": 20, "searchTypes": ["movies"]}
+        )
+        if not isinstance(raw, dict):
+            raise UpstreamError("Plex search returned an invalid response")
+        container = raw.get("MediaContainer")
+        if not isinstance(container, dict) or not isinstance(container.get("Hub"), list):
+            return None
+        for hub in container["Hub"]:
+            if not isinstance(hub, dict) or not isinstance(hub.get("Metadata"), list):
+                continue
+            for item in hub["Metadata"]:
+                if not isinstance(item, dict) or item.get("type") != "movie":
+                    continue
+                if plex_watch.valid_slug(item.get("slug")) != slug:
+                    continue
+                rating_key = item.get("ratingKey")
+                if isinstance(rating_key, int) and rating_key > 0:
+                    return str(rating_key)
+                if isinstance(rating_key, str) and rating_key.isdigit():
+                    return rating_key
+        return None
 
     async def _search_media(self, arguments: object, _actor: Actor, _role: Role) -> dict[str, Any]:
         args = _exact(arguments, {"query", "media_type", "limit"})

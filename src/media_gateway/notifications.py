@@ -108,13 +108,21 @@ class Notifications:
             season = _positive(metadata.get("parentIndex"))
             episode = _positive(metadata.get("index"))
         title = str(metadata.get("title") or "Untitled")[:300]
-        # The webhook already carries this server's id for the item, so the
-        # link opens it directly. A watch.plex.tv entry is the public catalogue
-        # page and makes the recipient pick a streaming service for a file that
-        # is sitting on the server, so it is only the fallback.
-        url = plex_watch.server_details_url(
-            machine_id=self.config.plex_machine_id, rating_key=rating_key
-        )
+        # A watch.plex.tv link opens the Plex app; the server route below opens
+        # the browser client instead, so it is only for a title with no slug.
+        # See plex_watch's docstring before changing this preference.
+        slug = plex_watch.metadata_slug(metadata, kind)
+        if slug is not None:
+            url = plex_watch.watch_url(
+                media_type="movie" if kind == "movie" else "series",
+                slug=slug,
+                season_number=season,
+                episode_number=episode,
+            )
+        else:
+            url = plex_watch.server_details_url(
+                machine_id=self.config.plex_machine_id, rating_key=rating_key
+            )
         return self.store.add_media_event(
             event_key=f"{kind}:{rating_key}",
             media_type="movie" if kind == "movie" else "series",
@@ -223,6 +231,7 @@ class Notifications:
 
     async def _enrich(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         ready: list[dict[str, Any]] = []
+        resolved_slugs: dict[tuple[str, int], str | None] = {}
         for event in events:
             if event.get("external_id") is None:
                 is_series = event.get("media_type") == "series"
@@ -257,17 +266,28 @@ class Notifications:
                     # the notification even though Plex omits it from the
                     # top-level webhook payload.
                     event["season_number"] = next(iter(requested))
-            # A stored link already points at this server's copy of the item,
-            # built from the rating key the webhook carried. Rewriting it to a
-            # watch.plex.tv entry would send the recipient to a "where to
-            # watch" chooser for a file they already have, so an event that
-            # somehow reached the store without a link is the only one repaired.
-            if not event.get("plex_url"):
-                rating_key = event.get("rating_key")
-                if isinstance(rating_key, str) and rating_key:
-                    plex_url = plex_watch.server_details_url(
-                        machine_id=self.config.plex_machine_id, rating_key=rating_key
+            # Upgrade a stored server-route link once the id is known, because
+            # only a watch.plex.tv link opens the Plex app.
+            slug = plex_watch.watch_slug(event.get("plex_url"))
+            external_id = event.get("external_id")
+            media_type = str(event.get("media_type") or "")
+            if slug is None and isinstance(external_id, int) and media_type in {"movie", "series"}:
+                key = media_type, external_id
+                if key not in resolved_slugs:
+                    resolved_slugs[key] = await plex_watch.lookup_slug(
+                        token_file=self.config.upstream_token_file,
+                        media_type=media_type,
+                        external_id=external_id,
                     )
+                slug = resolved_slugs[key]
+            if slug is not None and media_type in {"movie", "series"}:
+                plex_url = plex_watch.watch_url(
+                    media_type=media_type,
+                    slug=slug,
+                    season_number=event.get("season_number"),
+                    episode_number=event.get("episode_number"),
+                )
+                if event.get("plex_url") != plex_url:
                     event["plex_url"] = plex_url
                     self.store.set_media_plex_url(str(event["event_key"]), plex_url)
             ready.append(event)

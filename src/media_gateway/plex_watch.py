@@ -1,20 +1,31 @@
 """Public Plex watch links, resolved with one request per title.
 
-A ``watch.plex.tv`` link needs the canonical slug for a TMDB or TVDB id, which
-Plex's metadata provider answers directly. Searching the library and walking
-its results costs one call per candidate and answers a different question --
-whether the title sits in *this* library -- so it must not be used to build a
-link. Availability is Radarr's and Sonarr's to report; this module only turns
-an id into a URL.
+``watch.plex.tv`` is the link to send. The Plex mobile apps register it as a
+universal link, so it opens the app, and its Universal Details screen lists
+every source for the title including this server. Reaching the file does cost
+one extra tap there.
+
+Do not "improve" that by sending ``app.plex.tv/desktop/#!/server/...`` instead.
+It names the exact item, but it is a web-client route that no Plex app claims,
+so it opens the browser client rather than the app -- which was tried, and is
+worse. There is no https form that opens the app on a specific server item;
+Plex tracks that as an open feature request. ``server_details_url`` therefore
+stays a last resort for a title with no slug, where the alternative is no link.
+
+A slug comes from Plex's metadata provider for a TMDB or TVDB id. Searching the
+library and walking its results costs one call per candidate and answers a
+different question -- whether the title sits in *this* library -- so it must not
+be used to build a link. Availability is Radarr's and Sonarr's to report.
 """
 
 from __future__ import annotations
 
 import re
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 
@@ -54,13 +65,34 @@ def watch_url(
     return result
 
 
-def server_details_url(*, machine_id: str, rating_key: str) -> str:
-    """Link straight to one item on this server, skipping Plex's discovery page.
+def metadata_slug(metadata: Mapping[str, Any], kind: str) -> str | None:
+    """Read the slug a Plex webhook payload already carries for its own item."""
 
-    ``watch.plex.tv`` is a public catalogue entry, so it opens a "where to
-    watch" chooser even for a file that is already on the server. This route
-    opens the item itself. It requires the viewer to have access to the server,
-    which every allowlisted user of this bot does.
+    key = {"movie": "slug", "show": "slug", "season": "parentSlug", "episode": "grandparentSlug"}[
+        kind
+    ]
+    return valid_slug(metadata.get(key))
+
+
+def watch_slug(value: object) -> str | None:
+    """Recover the slug from a link this module built, or None for any other."""
+
+    if not isinstance(value, str):
+        return None
+    parsed = urlsplit(value)
+    parts = [part for part in parsed.path.split("/") if part]
+    if parsed.scheme != "https" or parsed.hostname != "watch.plex.tv" or len(parts) < 2:
+        return None
+    if parts[0] not in {"movie", "show"}:
+        return None
+    return valid_slug(parts[1])
+
+
+def server_details_url(*, machine_id: str, rating_key: str) -> str:
+    """Name one item on this server, for when no slug exists.
+
+    Opens Plex's browser client, not the app, so this is strictly the fallback
+    -- see this module's docstring. It is still better than sending no link.
     """
 
     key = quote(f"/library/metadata/{rating_key}", safe="")

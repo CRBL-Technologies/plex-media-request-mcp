@@ -52,41 +52,20 @@ deliberate product decision: only explicit administrators see it, while regular
 users remain limited to eight normalized tools. No selection token is used:
 requests take the TMDB or TVDB ID returned by a current search.
 
-Search results retain the provider's public poster URL. The Hermes adapter
-presents up to four matches in one tabbed Telegram card with the best match open
-by default. Each labeled row opens that result and swaps the card's poster and
-caption in place; no album or numbered legend is posted. A movie tab offers a
-direct Request movie action that performs the gateway request from the tap
-itself — the card then shows the recorded outcome and the agent only confirms
-it — while a series tab selects the exact TVDB result before asking for
-seasons. Only that selected result is returned to the model,
-so a typed number or button click cannot become a second bare query. Remote
-poster URLs are never sent through Hermes' local-file `MEDIA:` convention.
-An exact number, unique year, or exact title still selects a result, while
-other text supersedes the old card and starts a fresh request.
+Search results retain the provider's public poster URL. A search that resolves
+to exactly one result is posted as that poster, carrying an `Open in Plex` link
+when the title is already held and no button at all otherwise. That link is the
+only control a card has ever offered: there is no picker and no button that
+acts. When several titles match, the model lists them with year, media type and
+availability and asks which was meant; adding a title, and naming the seasons of
+a series, are answered in the same conversation. Remote poster URLs are never
+sent through Hermes' local-file `MEDIA:` convention.
+
 Recommendation research uses `recommend_media` once with four distinct titles
-instead of opening one ambiguity picker per suggestion. Recommendation turns
-reject model-generated single-title lookups before a card is sent. Recommendations
-answer conversationally and post no card at all: the model states each title with
-its availability and offers to add the missing ones, so a casual suggestion request
-never blocks on a modal prompt. The user asks for any title by name to request it.
+instead of searching per suggestion, and reports any it could not match so a
+batch never quietly shrinks. Recommendation turns reject model-generated
+single-title lookups.
 
-A search that resolves to exactly one result posts that poster with a single
-action button underneath. A downloaded movie links to its `watch.plex.tv` page,
-which is the only link form the Plex apps open natively; one that is not
-downloaded offers Request, which performs the request from the tap itself. A
-downloaded movie with no Plex slug shows no button, because offering Request for
-something already watchable is worse than offering nothing.
-
-A series always offers Request, which opens a season picker instead of
-requesting anything. The picker reports each season's episode counts from
-`series_seasons`, because a Sonarr search result carries no per-season
-statistics. A complete season renders as ticked and inert — Telegram has no
-disabled button, so tapping one only says it is already complete rather than
-re-searching it. Missing seasons start unticked, `＋ All missing` selects them
-all, and specials appear last as season 0. The picker holds the TVDB id and the
-tick state itself, so a tap needs no model turn, and it performs the request
-once and then retires.
 Every title lookup, availability check, and request must refresh `search_media`
 in the current turn; conversation history is never a valid substitute for a
 current provider result. That guidance has exactly one copy,
@@ -102,13 +81,6 @@ hint survived beside it.
 Upstream 2.3.0 lists `radarr_get_queue` in its full profile but does not register
 the tool. The gateway therefore contains one narrow read-only Radarr queue call;
 all other provider operations go through upstream MCP.
-
-The picker is interruptible. A reply containing a result number, a unique
-result year, or an exact title selects it. Any other normal message cancels the
-old picker and continues as a fresh request; unanswered media pickers expire
-after two minutes and interrupt their exact Hermes turn without queuing a new
-message. This prevents a new title search from waiting behind an abandoned
-selection prompt or silently continuing into another search.
 
 ## Notifications
 

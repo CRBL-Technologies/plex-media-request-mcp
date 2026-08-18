@@ -97,12 +97,6 @@ jobs:
           docker build --build-arg HERMES_BASE_IMAGE="$HERMES_BASE_IMAGE"
           --build-arg SOURCE_COMMIT="$GITHUB_SHA"
           -f deployment/Dockerfile.hermes -t crbl-hermes-media:ci .
-      - name: Verify native Telegram media picker contract
-        run: >-
-          docker run --rm
-          --entrypoint /opt/hermes/.venv/bin/python
-          -v "$GITHUB_WORKSPACE/tests/hermes_picker_smoke.py:/tmp/hermes_picker_smoke.py:ro"
-          crbl-hermes-media:ci /tmp/hermes_picker_smoke.py
       - name: Verify Hermes adapter under s6-overlay
         shell: bash
         run: |

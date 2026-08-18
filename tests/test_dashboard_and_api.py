@@ -35,6 +35,18 @@ def _headers() -> dict[str, str]:
     return {"Authorization": "Bearer gateway-secret-with-at-least-32-bytes"}
 
 
+def call_tool(
+    client: TestClient, name: str, arguments: dict[str, Any], *, user_id: int = 1001
+) -> Any:
+    """Invoke one gateway tool as a trusted actor."""
+
+    return client.post(
+        "/api/tools/call",
+        headers=_headers(),
+        json={"actor": _actor(user_id), "name": name, "arguments": arguments},
+    )
+
+
 def _login(client: TestClient) -> str:
     response = client.post(
         "/login",
@@ -174,15 +186,7 @@ def test_roles_and_no_selection_token(config: Config) -> None:
         assert "radarr_get_movies" in {tool["name"] for tool in admin_tools["tools"]}
         assert "unexpected_tool" not in {tool["name"] for tool in admin_tools["tools"]}
 
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "search_media",
-                "arguments": {"query": "A Movie", "media_type": "movie"},
-            },
-        )
+        response = call_tool(client, "search_media", {"query": "A Movie", "media_type": "movie"})
         assert response.status_code == 200
         candidate = response.json()["result"]["results"][0]
         assert candidate["tmdb_id"] == 123
@@ -249,14 +253,8 @@ def test_lone_downloaded_movie_links_with_the_form_that_opens_the_app(
     }
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "search_media",
-                "arguments": {"query": "Dune Part Two", "media_type": "movie", "limit": 1},
-            },
+        response = call_tool(
+            client, "search_media", {"query": "Dune Part Two", "media_type": "movie", "limit": 1}
         )
 
     assert response.status_code == 200
@@ -281,14 +279,8 @@ def test_movie_without_a_plex_slug_gets_no_link(
     }
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "search_media",
-                "arguments": {"query": "Dune Part Two", "media_type": "movie", "limit": 1},
-            },
+        response = call_tool(
+            client, "search_media", {"query": "Dune Part Two", "media_type": "movie", "limit": 1}
         )
 
     assert "plex_url" not in response.json()["result"]["results"][0]
@@ -310,14 +302,8 @@ def test_multi_result_search_resolves_no_slugs(
     }
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "search_media",
-                "arguments": {"query": "Dune", "media_type": "movie", "limit": 3},
-            },
+        response = call_tool(
+            client, "search_media", {"query": "Dune", "media_type": "movie", "limit": 3}
         )
 
     assert len(response.json()["result"]["results"]) == 3
@@ -347,21 +333,17 @@ def test_recommendations_resolve_no_slugs(config: Config, slug_client: type[_Slu
     fake.responses["radarr_search_movie"] = movies
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "recommend_media",
-                "arguments": {
-                    "titles": [
-                        "Arrival (2016)",
-                        "Ex Machina (2014)",
-                        "Annihilation (2018)",
-                        "Dark City (1998)",
-                    ],
-                    "media_type": "movie",
-                },
+        response = call_tool(
+            client,
+            "recommend_media",
+            {
+                "titles": [
+                    "Arrival (2016)",
+                    "Ex Machina (2014)",
+                    "Annihilation (2018)",
+                    "Dark City (1998)",
+                ],
+                "media_type": "movie",
             },
         )
 
@@ -379,14 +361,8 @@ def test_series_search_resolves_no_slugs(config: Config, slug_client: type[_Slug
     }
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "search_media",
-                "arguments": {"query": "3 Body Problem", "media_type": "series", "limit": 1},
-            },
+        response = call_tool(
+            client, "search_media", {"query": "3 Body Problem", "media_type": "series", "limit": 1}
         )
 
     result = response.json()["result"]["results"][0]
@@ -405,14 +381,8 @@ def test_undownloaded_movie_resolves_no_slug(
     }
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "search_media",
-                "arguments": {"query": "Dune Part Two", "media_type": "movie", "limit": 1},
-            },
+        response = call_tool(
+            client, "search_media", {"query": "Dune Part Two", "media_type": "movie", "limit": 1}
         )
 
     assert "plex_url" not in response.json()["result"]["results"][0]
@@ -433,15 +403,7 @@ def test_mixed_search_keeps_movie_and_series_results(config: Config) -> None:
     }
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "search_media",
-                "arguments": {"query": "One", "limit": 2},
-            },
-        )
+        response = call_tool(client, "search_media", {"query": "One", "limit": 2})
         assert response.status_code == 200
         assert [item["media_type"] for item in response.json()["result"]["results"]] == [
             "movie",
@@ -475,21 +437,17 @@ def test_recommendations_return_one_distinct_exact_match_per_title(config: Confi
     fake.responses["radarr_search_movie"] = movies
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "recommend_media",
-                "arguments": {
-                    "titles": [
-                        "Arrival (2016)",
-                        "Ex Machina (2014)",
-                        "Annihilation (2018)",
-                        "Dark City (1998)",
-                    ],
-                    "media_type": "movie",
-                },
+        response = call_tool(
+            client,
+            "recommend_media",
+            {
+                "titles": [
+                    "Arrival (2016)",
+                    "Ex Machina (2014)",
+                    "Annihilation (2018)",
+                    "Dark City (1998)",
+                ],
+                "media_type": "movie",
             },
         )
 
@@ -508,21 +466,17 @@ def test_recommendations_return_one_distinct_exact_match_per_title(config: Confi
 def test_recommendations_reject_the_same_title_with_different_years(config: Config) -> None:
     app = create_app(config)
     with TestClient(app) as client:
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "recommend_media",
-                "arguments": {
-                    "titles": [
-                        "Arrival (2016)",
-                        "Arrival (2025)",
-                        "Ex Machina (2014)",
-                        "Dark City (1998)",
-                    ],
-                    "media_type": "movie",
-                },
+        response = call_tool(
+            client,
+            "recommend_media",
+            {
+                "titles": [
+                    "Arrival (2016)",
+                    "Arrival (2025)",
+                    "Ex Machina (2014)",
+                    "Dark City (1998)",
+                ],
+                "media_type": "movie",
             },
         )
 
@@ -538,21 +492,17 @@ def test_recommendations_omit_inexact_provider_matches(config: Config) -> None:
     }
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "recommend_media",
-                "arguments": {
-                    "titles": [
-                        "Arrival (2016)",
-                        "Ex Machina (2014)",
-                        "Annihilation (2018)",
-                        "Dark City (1998)",
-                    ],
-                    "media_type": "movie",
-                },
+        response = call_tool(
+            client,
+            "recommend_media",
+            {
+                "titles": [
+                    "Arrival (2016)",
+                    "Ex Machina (2014)",
+                    "Annihilation (2018)",
+                    "Dark City (1998)",
+                ],
+                "media_type": "movie",
             },
         )
 
@@ -576,15 +526,7 @@ def test_existing_missing_movie_starts_a_search(config: Config) -> None:
     }
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "request_movie",
-                "arguments": {"tmdb_id": 123},
-            },
-        )
+        response = call_tool(client, "request_movie", {"tmdb_id": 123})
         assert response.status_code == 200
         assert response.json()["result"]["status"] == "search_started"
         assert ("radarr_search_movie_releases", {"id": 77}) in fake.calls
@@ -604,15 +546,7 @@ def test_movie_is_available_only_after_exact_plex_match(config: Config) -> None:
     }
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "request_movie",
-                "arguments": {"tmdb_id": 123},
-            },
-        )
+        response = call_tool(client, "request_movie", {"tmdb_id": 123})
         assert response.status_code == 200, response.text
         assert response.json()["result"]["status"] == "available"
         assert app.state.runtime.store.requests_for(1001)[0]["state"] == "available"
@@ -627,15 +561,7 @@ def test_downloaded_movie_not_in_plex_remains_pending(config: Config) -> None:
     fake.responses["plex_search"] = {"MediaContainer": {"Hub": []}}
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "request_movie",
-                "arguments": {"tmdb_id": 123},
-            },
-        )
+        response = call_tool(client, "request_movie", {"tmdb_id": 123})
         assert response.status_code == 200, response.text
         assert response.json()["result"]["status"] == "awaiting_plex"
         assert app.state.runtime.store.requests_for(1001)[0]["state"] == "requested"
@@ -658,15 +584,7 @@ async def test_movie_intent_is_durable_before_mutation_and_reconciles(config: Co
             raise UpstreamError("interrupted after provider call")
 
         fake.responses["radarr_add_movie"] = fail_add
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "request_movie",
-                "arguments": {"tmdb_id": 123},
-            },
-        )
+        response = call_tool(client, "request_movie", {"tmdb_id": 123})
         assert response.status_code == 502
         assert runtime.store.requests_for(1001)[0]["state"] == "unknown"
 
@@ -702,14 +620,8 @@ def test_series_intent_is_durable_when_provider_mutation_fails(config: Config) -
     fake.responses["sonarr_add_series"] = fail_add
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "request_series",
-                "arguments": {"tvdb_id": 411959, "seasons": [1], "anime": False},
-            },
+        response = call_tool(
+            client, "request_series", {"tvdb_id": 411959, "seasons": [1], "anime": False}
         )
 
         assert response.status_code == 502
@@ -731,15 +643,7 @@ def test_download_status_includes_both_queues_for_regular_users(config: Config) 
     fake.responses["radarr_get_movies"] = {"data": []}
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "download_status",
-                "arguments": {},
-            },
-        )
+        response = call_tool(client, "download_status", {})
         assert response.status_code == 200, response.text
         result = response.json()["result"]
         assert result["movie_downloads"][0]["title"] == "Movie download"
@@ -757,15 +661,7 @@ def test_upstream_errors_do_not_leak_provider_details(config: Config) -> None:
     fake.responses["radarr_search_movie"] = fail
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "search_media",
-                "arguments": {"query": "Movie", "media_type": "movie"},
-            },
-        )
+        response = call_tool(client, "search_media", {"query": "Movie", "media_type": "movie"})
         assert response.status_code == 502
         assert response.json()["error"] == "media service is temporarily unavailable"
         assert "secret" not in response.text
@@ -801,15 +697,7 @@ def test_admin_proxy_preserves_nested_upstream_results(config: Config) -> None:
     }
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(9001),
-                "name": "radarr_get_movies",
-                "arguments": {"limit": 1},
-            },
-        )
+        response = call_tool(client, "radarr_get_movies", {"limit": 1}, user_id=9001)
         assert response.status_code == 200
         assert response.json()["result"]["result"]["data"][0]["quality"] == {
             "profile": {"name": "HD"}
@@ -939,14 +827,8 @@ def test_availability_comes_from_the_radarr_library_not_the_lookup(config: Confi
     }
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "search_media",
-                "arguments": {"query": "Avengers", "media_type": "movie", "limit": 2},
-            },
+        response = call_tool(
+            client, "search_media", {"query": "Avengers", "media_type": "movie", "limit": 2}
         )
 
     results = {item["title"]: item for item in response.json()["result"]["results"]}
@@ -989,14 +871,8 @@ def test_recommendations_report_owned_titles_as_available(config: Config) -> Non
     fake.responses["radarr_get_movie"] = library
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "recommend_media",
-                "arguments": {"titles": list(owned), "media_type": "movie"},
-            },
+        response = call_tool(
+            client, "recommend_media", {"titles": list(owned), "media_type": "movie"}
         )
 
     results = response.json()["result"]["results"]
@@ -1015,14 +891,8 @@ def test_untracked_movies_cost_no_library_reads(config: Config) -> None:
     }
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "search_media",
-                "arguments": {"query": "Unowned", "media_type": "movie", "limit": 2},
-            },
+        response = call_tool(
+            client, "search_media", {"query": "Unowned", "media_type": "movie", "limit": 2}
         )
 
     assert all(item["downloaded"] is False for item in response.json()["result"]["results"])
@@ -1049,21 +919,17 @@ def test_recommendations_name_the_titles_they_could_not_find(config: Config) -> 
     fake.responses["radarr_search_movie"] = lookup
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "recommend_media",
-                "arguments": {
-                    "titles": [
-                        "Arrival (2016)",
-                        "Ex Machina (2014)",
-                        "Some Film That Does Not Exist (2019)",
-                        "Dark City (1998)",
-                    ],
-                    "media_type": "movie",
-                },
+        response = call_tool(
+            client,
+            "recommend_media",
+            {
+                "titles": [
+                    "Arrival (2016)",
+                    "Ex Machina (2014)",
+                    "Some Film That Does Not Exist (2019)",
+                    "Dark City (1998)",
+                ],
+                "media_type": "movie",
             },
         )
 
@@ -1099,14 +965,8 @@ def test_series_results_report_which_seasons_are_held(config: Config) -> None:
     }
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "search_media",
-                "arguments": {"query": "Severance", "media_type": "series", "limit": 1},
-            },
+        response = call_tool(
+            client, "search_media", {"query": "Severance", "media_type": "series", "limit": 1}
         )
 
     result = response.json()["result"]["results"][0]
@@ -1140,14 +1000,8 @@ def test_fully_held_series_is_reported_as_downloaded(config: Config) -> None:
     }
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "search_media",
-                "arguments": {"query": "Severance", "media_type": "series", "limit": 1},
-            },
+        response = call_tool(
+            client, "search_media", {"query": "Severance", "media_type": "series", "limit": 1}
         )
 
     result = response.json()["result"]["results"][0]
@@ -1165,14 +1019,8 @@ def test_untracked_series_costs_no_library_read(config: Config) -> None:
     }
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "search_media",
-                "arguments": {"query": "Severance", "media_type": "series", "limit": 1},
-            },
+        response = call_tool(
+            client, "search_media", {"query": "Severance", "media_type": "series", "limit": 1}
         )
 
     assert "seasons_complete" not in response.json()["result"]["results"][0]
@@ -1215,14 +1063,8 @@ def test_an_unaired_season_is_not_reported_missing(config: Config) -> None:
     }
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "search_media",
-                "arguments": {"query": "Ongoing", "media_type": "series", "limit": 1},
-            },
+        response = call_tool(
+            client, "search_media", {"query": "Ongoing", "media_type": "series", "limit": 1}
         )
 
     result = response.json()["result"]["results"][0]
@@ -1266,14 +1108,8 @@ def test_mixed_search_keeps_tmdb_and_tvdb_library_ids_separate(config: Config) -
 
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "search_media",
-                "arguments": {"query": "42", "media_type": "all", "limit": 2},
-            },
+        response = call_tool(
+            client, "search_media", {"query": "42", "media_type": "all", "limit": 2}
         )
 
     results = {item["media_type"]: item for item in response.json()["result"]["results"]}
@@ -1332,15 +1168,7 @@ def test_series_seasons_reports_counts_from_the_tracked_series(config: Config) -
     }
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "series_seasons",
-                "arguments": {"tvdb_id": 371980},
-            },
-        )
+        response = call_tool(client, "series_seasons", {"tvdb_id": 371980})
 
     assert response.status_code == 200
     result = response.json()["result"]
@@ -1374,15 +1202,7 @@ def test_series_seasons_handles_an_untracked_series(config: Config) -> None:
     }
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "series_seasons",
-                "arguments": {"tvdb_id": 371980},
-            },
-        )
+        response = call_tool(client, "series_seasons", {"tvdb_id": 371980})
 
     result = response.json()["result"]
     assert result["in_sonarr"] is False
@@ -1422,15 +1242,7 @@ def test_specials_can_be_requested(config: Config) -> None:
     fake.responses["sonarr_get_episodes"] = {"data": [{"id": 55}]}
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "request_series",
-                "arguments": {"tvdb_id": 371980, "seasons": [0]},
-            },
-        )
+        response = call_tool(client, "request_series", {"tvdb_id": 371980, "seasons": [0]})
 
     assert response.status_code == 200
     assert response.json()["result"]["series"]["seasons"] == [0]
@@ -1443,15 +1255,7 @@ def test_request_series_still_rejects_a_negative_season(config: Config) -> None:
     fake = FakeUpstream()
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "request_series",
-                "arguments": {"tvdb_id": 371980, "seasons": [-1]},
-            },
-        )
+        response = call_tool(client, "request_series", {"tvdb_id": 371980, "seasons": [-1]})
 
     assert response.status_code == 400
 
@@ -1479,15 +1283,7 @@ def test_existing_series_enables_the_season_and_searches_it(config: Config) -> N
     fake.responses["sonarr_get_episodes"] = {"data": [{"id": 101}, {"id": 102}]}
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "request_series",
-                "arguments": {"tvdb_id": 411959, "seasons": [1]},
-            },
-        )
+        response = call_tool(client, "request_series", {"tvdb_id": 411959, "seasons": [1]})
         assert response.status_code == 200, response.text
         update = next(arguments for name, arguments in fake.calls if name == "sonarr_update_series")
         assert update["series"]["seasons"][0]["monitored"] is True

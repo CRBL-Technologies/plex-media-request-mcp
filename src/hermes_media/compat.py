@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
+from media_gateway.tools import season_is_missing
+
 PINNED_HERMES_RELEASE = "v2026.8.3"
 PINNED_HERMES_PACKAGE_VERSION = "0.20.0"
 NATIVE_MODULE = "plugins.platforms.telegram.adapter"
@@ -198,6 +200,42 @@ def interrupt_running_turn(adapter: object, session_key: str, reason: str) -> bo
     return True
 
 
+async def _deliver_card(
+    adapter: object,
+    *,
+    chat_id: int,
+    poster_url: str | None,
+    caption: str,
+    markup: object | None,
+) -> object:
+    """Post one card, as a poster when there is one and as text otherwise.
+
+    Telegram cannot turn a text message into a photo later, so callers that
+    edit a card in place need to know which kind was sent.
+    """
+
+    bot = getattr(adapter, "_bot", None)
+    if bot is None:
+        return SimpleNamespace(success=False)
+    if poster_url is not None:
+        message = await bot.send_photo(
+            chat_id=chat_id,
+            photo=poster_url,
+            caption=caption,
+            parse_mode="HTML",
+            reply_markup=markup,
+        )
+        return SimpleNamespace(success=True, message_id=str(message.message_id), has_photo=True)
+    message = await bot.send_message(
+        chat_id=chat_id,
+        text=caption,
+        parse_mode="HTML",
+        reply_markup=markup,
+        disable_web_page_preview=True,
+    )
+    return SimpleNamespace(success=True, message_id=str(message.message_id), has_photo=False)
+
+
 def _media_picker_markup(
     *,
     picker_id: str,
@@ -246,32 +284,18 @@ async def send_media_picker(
 ) -> object:
     """Send one tabbed media card through the pinned Telegram bot."""
 
-    bot = getattr(adapter, "_bot", None)
-    if bot is None:
-        return SimpleNamespace(success=False)
-    markup = _media_picker_markup(
-        picker_id=picker_id,
-        labels=labels,
-        active_index=active_index,
-        active_is_movie=active_is_movie,
-    )
-    if poster_url is not None:
-        message = await bot.send_photo(
-            chat_id=chat_id,
-            photo=poster_url,
-            caption=caption,
-            parse_mode="HTML",
-            reply_markup=markup,
-        )
-        return SimpleNamespace(success=True, message_id=str(message.message_id), has_photo=True)
-    message = await bot.send_message(
+    return await _deliver_card(
+        adapter,
         chat_id=chat_id,
-        text=caption,
-        parse_mode="HTML",
-        reply_markup=markup,
-        disable_web_page_preview=True,
+        poster_url=poster_url,
+        caption=caption,
+        markup=_media_picker_markup(
+            picker_id=picker_id,
+            labels=labels,
+            active_index=active_index,
+            active_is_movie=active_is_movie,
+        ),
     )
-    return SimpleNamespace(success=True, message_id=str(message.message_id), has_photo=False)
 
 
 async def edit_media_picker(
@@ -377,11 +401,7 @@ def season_picker_markup(
     ]
     # A season with no episodes yet is still shown, and can be ticked to
     # monitor it, but the shortcut only grabs seasons that actually exist.
-    missing = [
-        int(state["number"])
-        for state in states
-        if not state.get("complete") and int(state.get("episodes") or 0) > 0
-    ]
+    missing = [int(state["number"]) for state in states if season_is_missing(state)]
     if missing:
         rows.append(
             [
@@ -415,27 +435,13 @@ async def send_season_picker(
     states: Sequence[Mapping[str, Any]],
     selected: Sequence[int],
 ) -> object:
-    markup = season_picker_markup(picker_id=picker_id, states=states, selected=selected)
-    bot = getattr(adapter, "_bot", None)
-    if bot is None:
-        return SimpleNamespace(success=False)
-    if poster_url is not None:
-        message = await bot.send_photo(
-            chat_id=chat_id,
-            photo=poster_url,
-            caption=caption,
-            parse_mode="HTML",
-            reply_markup=markup,
-        )
-        return SimpleNamespace(success=True, message_id=str(message.message_id), has_photo=True)
-    message = await bot.send_message(
+    return await _deliver_card(
+        adapter,
         chat_id=chat_id,
-        text=caption,
-        parse_mode="HTML",
-        reply_markup=markup,
-        disable_web_page_preview=True,
+        poster_url=poster_url,
+        caption=caption,
+        markup=season_picker_markup(picker_id=picker_id, states=states, selected=selected),
     )
-    return SimpleNamespace(success=True, message_id=str(message.message_id), has_photo=False)
 
 
 async def edit_season_selection(
@@ -537,27 +543,13 @@ async def send_single_result_card(
 ) -> object:
     """Send a single search result with an optional action button."""
 
-    bot = getattr(adapter, "_bot", None)
-    if bot is None:
-        return SimpleNamespace(success=False)
-    markup = _single_result_markup(candidate=candidate)
-    if poster_url is not None:
-        message = await bot.send_photo(
-            chat_id=chat_id,
-            photo=poster_url,
-            caption=caption,
-            parse_mode="HTML",
-            reply_markup=markup,
-        )
-    else:
-        message = await bot.send_message(
-            chat_id=chat_id,
-            text=caption,
-            parse_mode="HTML",
-            reply_markup=markup,
-            disable_web_page_preview=True,
-        )
-    return SimpleNamespace(success=True, message_id=str(message.message_id))
+    return await _deliver_card(
+        adapter,
+        chat_id=chat_id,
+        poster_url=poster_url,
+        caption=caption,
+        markup=_single_result_markup(candidate=candidate),
+    )
 
 
 def verify_pinned_runtime(*, manager: object, expected_tools: set[str], platform_hint: str) -> None:

@@ -20,6 +20,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from media_gateway.constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
+from media_gateway.tools import season_is_missing
 from media_gateway.types import Actor, Role
 
 from .client import GatewayClient, GatewayError
@@ -890,9 +891,7 @@ async def _handle_season_picker_callback(
 
     if action == "all":
         pending.selected = {
-            int(state["number"])
-            for state in pending.states
-            if not state.get("complete") and int(state.get("episodes") or 0) > 0
+            int(state["number"]) for state in pending.states if season_is_missing(state)
         }
         await answer_media_callback(query, "All missing seasons selected")
         with suppress(Exception):

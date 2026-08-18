@@ -120,6 +120,9 @@ async def test_plugin_registers_closed_inventory_and_binds_actor(
     assert "search_media in the current turn" in platform_hint
     assert "never reuse results from conversation history" in platform_hint
     assert "There are no buttons to choose with" in platform_hint
+    # A list must route to one bulk call rather than a search per title.
+    assert "call request_titles once with all of them" in platform_hint
+    assert "never ask which match was meant" in platform_hint
     assert (
         "call\n    recommend_media once" in platform_hint or "recommend_media once" in platform_hint
     )

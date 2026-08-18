@@ -1370,6 +1370,115 @@ def test_mixed_search_keeps_tmdb_and_tvdb_library_ids_separate(config: Config) -
     assert [args for name, args in fake.calls if name == "sonarr_get_series_by_id"] == [{"id": 200}]
 
 
+def test_a_list_of_titles_is_requested_without_asking(config: Config) -> None:
+    """A list is an instruction: everything resolvable is requested in one call."""
+
+    app = create_app(config)
+    fake = FakeUpstream()
+    library = {
+        "Arrival (2016)": (11, "Arrival", 2016),
+        "Ex Machina (2014)": (12, "Ex Machina", 2014),
+        "Dark City (1998)": (13, "Dark City", 1998),
+    }
+
+    def movies(arguments: dict[str, Any]) -> dict[str, Any]:
+        term = str(arguments.get("term", ""))
+        if term.startswith("tmdb:"):
+            wanted = int(term.split(":")[1])
+            for tmdb, title, year in library.values():
+                if tmdb == wanted:
+                    return {"data": [{"tmdbId": tmdb, "title": title, "year": year}]}
+            return {"data": []}
+        if term not in library:
+            return {"data": []}
+        tmdb, title, year = library[term]
+        return {"data": [{"tmdbId": tmdb, "title": title, "year": year}]}
+
+    fake.responses["radarr_search_movie"] = movies
+    fake.responses["sonarr_search_series"] = {"data": []}
+    fake.responses["plex_search"] = {"MediaContainer": {"Hub": []}}
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "request_titles",
+                "arguments": {
+                    "titles": [
+                        "Arrival (2016)",
+                        "Ex Machina (2014)",
+                        "Dark City (1998)",
+                        "A Film Nobody Has (2019)",
+                    ],
+                    "media_type": "movie",
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["counts"]["asked"] == 4
+    assert result["counts"]["requested"] == 3
+    assert result["unmatched"] == ["A Film Nobody Has (2019)"]
+    # Three films were actually added, not merely looked up.
+    added = [args["title"] for name, args in fake.calls if name == "radarr_add_movie"]
+    assert sorted(added) == ["Arrival", "Dark City", "Ex Machina"]
+    # And each is recorded, so notifications can find the requester later.
+    assert (
+        len(
+            app.state.runtime.store.request_destinations(
+                media_type="movie", external_id=11, season_number=None
+            )
+        )
+        == 1
+    )
+
+
+def test_a_bulk_request_reports_what_it_could_not_do(config: Config) -> None:
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["radarr_search_movie"] = {"data": []}
+    fake.responses["sonarr_search_series"] = {"data": []}
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "request_titles",
+                "arguments": {"titles": ["Nothing Here", "Also Missing"]},
+            },
+        )
+
+    result = response.json()["result"]
+    assert result["counts"] == {
+        "asked": 2,
+        "requested": 0,
+        "already_available": 0,
+        "unmatched": 2,
+        "failed": 0,
+    }
+    assert sorted(result["unmatched"]) == ["Also Missing", "Nothing Here"]
+
+
+def test_a_bulk_request_is_capped(config: Config) -> None:
+    app = create_app(config)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "request_titles",
+                "arguments": {"titles": [f"Film {n}" for n in range(101)]},
+            },
+        )
+    assert response.status_code == 400
+
+
 def test_series_seasons_reports_counts_from_the_tracked_series(config: Config) -> None:
     """The lookup response leaves statistics null, so counts need the series itself."""
 

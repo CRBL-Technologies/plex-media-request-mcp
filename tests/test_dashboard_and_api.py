@@ -294,6 +294,93 @@ def test_movie_without_a_plex_slug_gets_no_link(
     assert "plex_url" not in response.json()["result"]["results"][0]
 
 
+def test_a_held_series_gets_an_open_in_plex_link(
+    config: Config, slug_client: type[_SlugClient]
+) -> None:
+    """A lone series card links to Plex once any season is complete."""
+
+    slug_client.slug = "severance"
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["sonarr_search_series"] = {
+        "data": [
+            {
+                "tvdbId": 371980,
+                "title": "Severance",
+                "year": 2022,
+                "id": 4,
+                "seasons": [{"seasonNumber": 1}, {"seasonNumber": 2}],
+            }
+        ]
+    }
+    fake.responses["sonarr_get_series_by_id"] = {
+        "data": {
+            "id": 4,
+            "seasons": [
+                {"seasonNumber": 1, "statistics": {"episodeFileCount": 9, "totalEpisodeCount": 9}},
+                {"seasonNumber": 2, "statistics": {"episodeFileCount": 0, "totalEpisodeCount": 10}},
+            ],
+        }
+    }
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "search_media",
+                "arguments": {"query": "Severance", "media_type": "series", "limit": 1},
+            },
+        )
+
+    result = response.json()["result"]["results"][0]
+    # Partly held is still watchable, so the link is offered.
+    assert result["seasons_complete"] == [1]
+    assert result["plex_url"] == "https://watch.plex.tv/show/severance"
+    assert slug_client.requests[0]["params"] == {"guid": "tvdb://371980", "type": 2}
+
+
+def test_a_series_with_nothing_held_gets_no_link(
+    config: Config, slug_client: type[_SlugClient]
+) -> None:
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["sonarr_search_series"] = {
+        "data": [
+            {
+                "tvdbId": 371980,
+                "title": "Severance",
+                "year": 2022,
+                "id": 4,
+                "seasons": [{"seasonNumber": 1}],
+            }
+        ]
+    }
+    fake.responses["sonarr_get_series_by_id"] = {
+        "data": {
+            "id": 4,
+            "seasons": [
+                {"seasonNumber": 1, "statistics": {"episodeFileCount": 0, "totalEpisodeCount": 9}},
+            ],
+        }
+    }
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={
+                "actor": _actor(1001),
+                "name": "search_media",
+                "arguments": {"query": "Severance", "media_type": "series", "limit": 1},
+            },
+        )
+
+    assert "plex_url" not in response.json()["result"]["results"][0]
+    assert slug_client.requests == []
+
+
 def test_multi_result_search_resolves_no_slugs(
     config: Config, slug_client: type[_SlugClient]
 ) -> None:

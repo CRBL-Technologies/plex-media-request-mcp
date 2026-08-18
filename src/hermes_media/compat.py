@@ -197,10 +197,6 @@ def verify_pinned_runtime(*, manager: object, expected_tools: set[str], platform
     # Importing gateway.run can activate Hermes' lazy Telegram platform. Do it
     # only after platform_registry.get() above has loaded CRBL through this
     # manager, or the verifier observes another manager's tool inventory.
-    from gateway.platforms.base import BasePlatformAdapter  # type: ignore[import-not-found]
-
-    if not hasattr(BasePlatformAdapter, "gateway_runner"):
-        raise RuntimeError("native platform adapter no longer exposes its gateway runner")
     resolver = getattr(tools_config, "_get_platform_tools", None)
     if not getattr(resolver, "__crbl_media__", False):
         raise RuntimeError("CRBL role-aware tool resolver is not active")

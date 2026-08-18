@@ -26,9 +26,9 @@ from .compat import (
 from .trusted import (
     actor_from_event,
     actor_scope,
+    claim_card_slot,
     current_role,
     require_actor,
-    require_session_key,
     session_key_from_event,
 )
 
@@ -124,14 +124,6 @@ class MediaTelegramAdapter(_NativeAdapter):  # type: ignore[misc, valid-type]
 
 
 _active_adapter: MediaTelegramAdapter | None = None
-
-
-def _event_text(event: object) -> str:
-    value = getattr(event, "text", None)
-    if not isinstance(value, str):
-        raw_message = getattr(event, "raw_message", None)
-        value = getattr(raw_message, "text", None)
-    return value.strip() if isinstance(value, str) else ""
 
 
 def _candidate_label(candidate: object) -> str | None:
@@ -256,7 +248,6 @@ async def _on_adapter_loop(
 
 async def _decorate_search_result(
     actor_chat_id: int,
-    session_key: str,
     result: dict[str, Any],
 ) -> dict[str, Any]:
     """Deliver a poster for a lone result and hand everything else to the model.
@@ -302,7 +293,9 @@ async def _decorate_search_result(
     adapter = _active_adapter
     candidate = candidates[0]
     poster = posters[0] if posters else None
-    if adapter is not None:
+    # A card is unsolicited, so one message earns one. A model that searches
+    # several titles in a turn must not post a poster for each.
+    if adapter is not None and claim_card_slot():
 
         async def deliver_single() -> bool:
             response = await send_single_result_card(
@@ -364,10 +357,9 @@ def _handler(name: str) -> Callable[..., Coroutine[Any, Any, str]]:
     async def call(arguments: Mapping[str, Any], **runtime: Any) -> str:
         del runtime
         actor = require_actor()
-        session_key = require_session_key()
         result = await _gateway().call(actor, name, dict(arguments))
         if name in {"search_media", "recommend_media"} and isinstance(result.get("results"), list):
-            result = await _decorate_search_result(actor.chat_id, session_key, result)
+            result = await _decorate_search_result(actor.chat_id, result)
         return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
 
     return call

@@ -54,7 +54,9 @@ requests take the TMDB or TVDB ID returned by a current search.
 
 Search results retain the provider's public poster URL. A search that resolves
 to exactly one result is posted as that poster, carrying an `Open in Plex` link
-when the title is already held and no button at all otherwise. That link is the
+when the title is already held -- a movie Radarr has, or a series with at least
+one complete season -- and no button at all otherwise. A card is unsolicited,
+so one user message earns at most one, however many searches the model runs. That link is the
 only control a card has ever offered: there is no picker and no button that
 acts. When several titles match, the model lists them with year, media type and
 availability and asks which was meant; adding a title, and naming the seasons of

@@ -544,37 +544,42 @@ class ToolService:
                 raise outcome
 
     async def _enrich_plex_urls(self, results: list[dict[str, Any]]) -> None:
-        """Attach ``plex_url`` to a lone downloaded movie, at a cost of one call.
+        """Attach ``plex_url`` to a lone held result, at a cost of one call.
 
-        Only the single-result card renders a watch link, so a multi-result set
-        and a recommendation batch resolve nothing: enriching them would spend
-        one request per title on a field no caller reads. Radarr reports
+        Only a single-result card renders a link, so a multi-result set and a
+        recommendation batch resolve nothing: enriching them would spend one
+        request per title on a field no caller reads. Radarr and Sonarr report
         availability, so no Plex library traversal is involved -- the lookup
-        turns a TMDB id into a slug and nothing more.
+        turns an external id into a slug and nothing more.
 
-        Series are excluded on purpose. Their card opens the season picker,
-        which reports per-season availability from Sonarr instead.
+        A series qualifies once any season is complete, because a link to a
+        partly held show still opens something watchable.
         """
 
         if len(results) != 1:
             return
         candidate = results[0]
-        if candidate.get("media_type") != "movie" or not candidate.get("downloaded"):
+        media_type = candidate.get("media_type")
+        if media_type == "movie":
+            external_id = candidate.get("tmdb_id")
+            held = bool(candidate.get("downloaded"))
+        elif media_type == "series":
+            external_id = candidate.get("tvdb_id")
+            held = bool(candidate.get("seasons_complete"))
+        else:
             return
-        tmdb_id = candidate.get("tmdb_id")
-        if not isinstance(tmdb_id, int) or tmdb_id <= 0:
+        if not held or not isinstance(external_id, int) or external_id <= 0:
             return
         slug = await plex_watch.lookup_slug(
             token_file=self.config.upstream_token_file,
-            media_type="movie",
-            external_id=tmdb_id,
+            media_type=media_type,
+            external_id=external_id,
         )
         if slug is None:
             return
         # Deliberately the watch.plex.tv form: it opens the Plex app, where the
-        # server appears as a source. A link naming this server's item opens the
-        # browser client instead. See plex_watch's docstring.
-        candidate["plex_url"] = plex_watch.watch_url(media_type="movie", slug=slug)
+        # server appears as a source. See plex_watch's docstring.
+        candidate["plex_url"] = plex_watch.watch_url(media_type=media_type, slug=slug)
 
     async def _search_media(self, arguments: object, _actor: Actor, _role: Role) -> dict[str, Any]:
         args = _exact(arguments, {"query", "media_type", "limit"})

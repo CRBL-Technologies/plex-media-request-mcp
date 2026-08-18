@@ -534,3 +534,79 @@ def test_startup_gate_fails_closed_when_the_installer_never_ran(
             expected_tools=set(SHARED_TOOLS) | ADMIN_UPSTREAM_TOOLS,
             platform_hint=plugin.PLATFORM_HINT,
         )
+
+
+async def test_only_one_card_is_pushed_per_user_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A model that searches several titles must not post a poster for each.
+
+    Cards are unsolicited: nobody asked for the second one, and it can land
+    long after the user moved on.
+    """
+
+    class OneResultGateway(FakeGateway):
+        async def call(self, actor: Actor, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            self.calls.append((actor.user_id, name, arguments))
+            title = str(arguments.get("query"))
+            return {
+                "query": title,
+                "results": [
+                    {
+                        "media_type": "movie",
+                        "tmdb_id": abs(hash(title)) % 9999,
+                        "title": title,
+                        "year": 2024,
+                        "poster_url": "https://image.tmdb.org/x.jpg",
+                    }
+                ],
+                "unavailable_sources": [],
+            }
+
+    class CountingAdapter:
+        def __init__(self) -> None:
+            self._media_delivery_loop = asyncio.get_running_loop()
+            self.sent: list[dict[str, Any]] = []
+            self._bot = SimpleNamespace(send_photo=self.send_photo)
+
+        async def send_photo(self, **values: Any) -> SimpleNamespace:
+            self.sent.append(values)
+            return SimpleNamespace(message_id=len(self.sent))
+
+    telegram = ModuleType("telegram")
+    telegram.InlineKeyboardButton = object  # type: ignore[attr-defined]
+    telegram.InlineKeyboardMarkup = object  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "telegram", telegram)
+    adapter = CountingAdapter()
+    monkeypatch.setattr(plugin, "_client", OneResultGateway())
+    monkeypatch.setattr(plugin, "_active_adapter", adapter)
+    actor = Actor(user_id=1001, chat_id=1001)
+
+    with actor_scope(actor, Role.USER, "agent:main:telegram:dm:1001"):
+        first = json.loads(await plugin._handler("search_media")({"query": "Arrival"}))
+        second = json.loads(await plugin._handler("search_media")({"query": "Ex Machina"}))
+
+    assert len(adapter.sent) == 1
+    assert first["telegram_presentation"]["poster_cards_delivered"] is True
+    assert second["telegram_presentation"]["poster_cards_delivered"] is False
+    # The next message earns its own card.
+    with actor_scope(actor, Role.USER, "agent:main:telegram:dm:1001"):
+        await plugin._handler("search_media")({"query": "Dark City"})
+    assert len(adapter.sent) == 2
+
+
+def test_media_caption_stays_within_the_telegram_limit_after_escaping() -> None:
+    """Telegram rejects a caption over 1024 characters, escaping included."""
+
+    candidate = {
+        "media_type": "movie",
+        "tmdb_id": 11,
+        "title": "<b>" + "Title " * 60,
+        "year": 2026,
+        "overview": "<i>" + "Overview " * 300,
+    }
+
+    caption = plugin._candidate_caption(candidate)
+
+    assert len(caption) <= 1024
+    # The title's angle brackets must arrive escaped, not as live markup.
+    assert "&lt;b&gt;" in caption
+    assert "<b>Title" not in caption

@@ -8,9 +8,6 @@ import inspect
 import json
 import logging
 import os
-import re
-import threading
-import time
 from collections.abc import Callable, Coroutine, Mapping
 from concurrent.futures import Future
 from typing import Any
@@ -30,8 +27,6 @@ from .trusted import (
     actor_from_event,
     actor_scope,
     current_role,
-    current_turn_text,
-    is_recommendation_turn,
     require_actor,
     require_session_key,
     session_key_from_event,
@@ -42,27 +37,22 @@ SHARED_TOOLSET = "crbl-media-shared"
 ADMIN_TOOLSET = "crbl-media-admin"
 SEARCH_TOOLSET = "search"
 WEB_SEARCH_CAP = 10
-RECOMMENDATION_CONTEXT_SECONDS = 30 * 60
 SEARCH_PRESENTATION_LIMIT = 4
 CAPTION_HEADING_LIMIT = 200
 CAPTION_OVERVIEW_LIMIT = 420
 PLATFORM_HINT = (
     "Telegram identity is trusted automatically; never request user IDs. "
-    "For every direct movie or series title lookup, availability check, or request, call "
-    "search_media in the current turn before answering or changing anything. Never "
-    "reuse search results from conversation history. For a recommendation request, use "
-    "web_search to choose exactly 4 distinct titles, then call recommend_media exactly once "
-    "with those exact titles and years; never call search_media separately for each one. "
-    "Name any title in unmatched_titles as one you could not find, so a batch never quietly "
-    "shrinks. There are no buttons to choose with: when several titles match, list them with "
-    "year, media type and availability and ask which was meant, and request nothing until the "
-    "user answers. A downloaded title is already available: say so plainly and never offer to "
-    "add it, and for a series name the seasons in seasons_missing rather than calling the "
-    "whole show unavailable. To answer a season question, call series_seasons rather than "
-    "inferring availability from a search result, which carries no per-season counts. Season 0 "
-    "is the specials season. A single result is posted as a poster carrying an Open in Plex "
-    "link when it is available; that link starts nothing, so a title-only lookup remains "
-    "read-only until the user asks for the request in the same message."
+    "For every movie or series lookup, availability check, or request, call search_media in "
+    "the current turn before answering; never reuse results from conversation history. For a "
+    "recommendation, use web_search to choose exactly 4 distinct titles, then call "
+    "recommend_media once with them, and name anything in unmatched_titles that you could not "
+    "find. There are no buttons to choose with: when several titles match, list them with year, "
+    "media type and availability, ask which was meant, and request nothing until answered. A "
+    "downloaded title is already available: say so and never offer to add it; for a series name "
+    "the seasons in seasons_missing instead of calling the whole show unavailable, and call "
+    "series_seasons for a season question. Season 0 is specials. A lone result is posted as a "
+    "poster whose only link opens Plex, so a title-only lookup stays read-only until the user "
+    "asks for it in the same message."
 )
 logger = logging.getLogger(__name__)
 
@@ -79,62 +69,11 @@ _NativeAdapter = native_adapter(_FallbackAdapter)
 _client: GatewayClient | None = None
 
 
-_recommendation_context_lock = threading.Lock()
-_recommendation_contexts: dict[str, float] = {}
-
-
-_RECOMMENDATION_PATTERNS = (
-    re.compile(r"\b(?:recommend|recommendation|suggest|suggestion)s?\b", re.IGNORECASE),
-    re.compile(r"\bsomething\b", re.IGNORECASE),
-    re.compile(r"\b(?:what|which)\b.{0,40}\bwatch\b", re.IGNORECASE),
-    re.compile(r"\b(?:movie|show|series|film)s?\b.{0,30}\bfor tonight\b", re.IGNORECASE),
-    re.compile(r"\b(?:watch|watching)\b.{0,20}\btonight\b", re.IGNORECASE),
-    re.compile(r"\bsimilar to\b", re.IGNORECASE),
-)
-
-
 def _gateway() -> GatewayClient:
     global _client
     if _client is None:
         _client = GatewayClient.from_env()
     return _client
-
-
-def _looks_like_recommendation(text: str) -> bool:
-    return any(pattern.search(text) for pattern in _RECOMMENDATION_PATTERNS)
-
-
-def _recommendation_context(session_key: str, text: str) -> bool:
-    now = time.monotonic()
-    with _recommendation_context_lock:
-        expired = [key for key, deadline in _recommendation_contexts.items() if deadline <= now]
-        for key in expired:
-            _recommendation_contexts.pop(key, None)
-        if _looks_like_recommendation(text):
-            _recommendation_contexts[session_key] = now + RECOMMENDATION_CONTEXT_SECONDS
-        return session_key in _recommendation_contexts
-
-
-def _clear_recommendation_context(session_key: str) -> None:
-    with _recommendation_context_lock:
-        _recommendation_contexts.pop(session_key, None)
-
-
-def _normalized_words(value: str) -> list[str]:
-    return re.findall(r"[a-z0-9]+", value.casefold())
-
-
-def _query_is_from_current_message(query: object, message: str) -> bool:
-    if not isinstance(query, str):
-        return False
-    query_words = _normalized_words(query)
-    message_words = _normalized_words(message)
-    if not query_words or not message_words:
-        return False
-    width = len(query_words)
-    return any(
-        message_words[index : index + width] == query_words for index in range(len(message_words))
-    )
 
 
 class MediaTelegramAdapter(_NativeAdapter):  # type: ignore[misc, valid-type]
@@ -175,14 +114,10 @@ class MediaTelegramAdapter(_NativeAdapter):  # type: ignore[misc, valid-type]
         role = await _gateway().observe(actor)
         if role is Role.BLOCKED:
             raise PermissionError("Telegram user is not allowed")
-        text = _event_text(event)
-        recommendation_turn = _recommendation_context(session_key, text)
         with actor_scope(
             actor,
             role,
             session_key,
-            turn_text=text,
-            recommendation_turn=recommendation_turn,
         ):
             result = super().handle_message(event)
             return await result if inspect.isawaitable(result) else result
@@ -340,7 +275,6 @@ async def _decorate_search_result(
     decorated["results"] = candidates
 
     if recommendation_mode:
-        _clear_recommendation_context(session_key)
         decorated["telegram_presentation"] = {
             "poster_cards_delivered": False,
             "selection_status": "conversational",
@@ -431,40 +365,9 @@ def _handler(name: str) -> Callable[..., Coroutine[Any, Any, str]]:
         del runtime
         actor = require_actor()
         session_key = require_session_key()
-        if name == "search_media" and is_recommendation_turn():
-            turn_text = current_turn_text()
-            query = arguments.get("query")
-            if _looks_like_recommendation(turn_text) or not _query_is_from_current_message(
-                query, turn_text
-            ):
-                logger.info(
-                    "Redirected single-title search to recommendation batch for session %s",
-                    session_key,
-                )
-                return json.dumps(
-                    {
-                        "query": query,
-                        "results": [],
-                        "telegram_presentation": {
-                            "poster_cards_delivered": False,
-                            "selection_status": "recommendation_batch_required",
-                            "instruction": (
-                                "This is a recommendation turn. Choose exactly 4 distinct titles "
-                                "and call recommend_media once; do not call search_media again."
-                            ),
-                        },
-                    },
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
-            _clear_recommendation_context(session_key)
         result = await _gateway().call(actor, name, dict(arguments))
         if name in {"search_media", "recommend_media"} and isinstance(result.get("results"), list):
-            result = await _decorate_search_result(
-                actor.chat_id,
-                session_key,
-                result,
-            )
+            result = await _decorate_search_result(actor.chat_id, session_key, result)
         return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
 
     return call

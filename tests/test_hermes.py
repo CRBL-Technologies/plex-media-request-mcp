@@ -118,9 +118,11 @@ async def test_plugin_registers_closed_inventory_and_binds_actor(
     platform_hint = context.platforms[0]["platform_hint"]
     assert platform_hint == plugin.PLATFORM_HINT
     assert "search_media in the current turn" in platform_hint
-    assert "Never reuse search results from conversation history" in platform_hint
+    assert "never reuse results from conversation history" in platform_hint
     assert "There are no buttons to choose with" in platform_hint
-    assert "call recommend_media exactly once" in platform_hint
+    assert (
+        "call\n    recommend_media once" in platform_hint or "recommend_media once" in platform_hint
+    )
     assert {item["name"] for item in context.tools} == set(SHARED_TOOLS) | ADMIN_UPSTREAM_TOOLS
     search = next(item for item in context.tools if item["name"] == "search_media")
     actor = Actor(user_id=1001, chat_id=1001)
@@ -128,53 +130,6 @@ async def test_plugin_registers_closed_inventory_and_binds_actor(
         result = await search["handler"]({"query": "test"})
     assert result == '{"called":"search_media"}'
     assert gateway.calls == [(1001, "search_media", {"query": "test"})]
-
-
-async def test_recommendation_turn_redirects_single_title_search_before_delivery(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    gateway = FakeGateway()
-    monkeypatch.setattr(plugin, "_client", gateway)
-    actor = Actor(user_id=1001, chat_id=1001)
-    with actor_scope(
-        actor,
-        Role.USER,
-        "agent:main:telegram:dm:1001",
-        turn_text="Something for tonight",
-        recommendation_turn=True,
-    ):
-        raw = await plugin._handler("search_media")({"query": "Source Code", "media_type": "movie"})
-
-    result = json.loads(raw)
-    assert result["results"] == []
-    assert result["telegram_presentation"]["selection_status"] == "recommendation_batch_required"
-    assert "exactly 4 distinct titles" in result["telegram_presentation"]["instruction"]
-    assert gateway.calls == []
-
-
-async def test_direct_title_still_uses_search_during_lingering_recommendation_context(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    gateway = FakeGateway()
-    monkeypatch.setattr(plugin, "_client", gateway)
-    monkeypatch.setattr(
-        plugin,
-        "_recommendation_contexts",
-        {"agent:main:telegram:dm:1001": float("inf")},
-    )
-    actor = Actor(user_id=1001, chat_id=1001)
-    with actor_scope(
-        actor,
-        Role.USER,
-        "agent:main:telegram:dm:1001",
-        turn_text="Avengers",
-        recommendation_turn=True,
-    ):
-        raw = await plugin._handler("search_media")({"query": "Avengers"})
-
-    assert json.loads(raw) == {"called": "search_media"}
-    assert gateway.calls == [(1001, "search_media", {"query": "Avengers"})]
-    assert plugin._recommendation_contexts == {}
 
 
 async def test_recommendations_return_conversational_status_without_picker(

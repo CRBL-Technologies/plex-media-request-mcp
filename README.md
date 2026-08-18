@@ -192,9 +192,9 @@ complete. The queue is therefore only ever read to keep a quiet season waiting
 while Sonarr is still fetching it, never to release one early, and an
 unreachable Sonarr delivers on quiet alone.
 
-The worker re-evaluates every pending batch once every 15 seconds, so the quiet
-window is a threshold that pass tests, not a timer that fires. A window shorter
-than that cycle is bounded by it in practice.
+The worker re-evaluates every pending batch once every 5 seconds, so the quiet
+window is a threshold that pass tests, not a timer that fires, and that cycle
+sets the floor on how soon an arrival can be announced.
 
 The gateway database advances through numbered, transactional migrations and
 fails closed on an incompatible schema. Deployment takes and verifies a SQLite

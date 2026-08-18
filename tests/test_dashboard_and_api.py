@@ -2331,3 +2331,11 @@ def test_request_table_keeps_status_on_one_line(config: Config) -> None:
         assert "Searching for a release" in page.text
         assert '<td class="cell-title">' in page.text
         assert "white-space:nowrap" in client.get("/assets/app.css").text
+
+
+def test_the_flush_cycle_bounds_notification_latency() -> None:
+    """The window cannot deliver sooner than the loop that tests it."""
+
+    from media_gateway.notifications import FLUSH_INTERVAL_SECONDS
+
+    assert FLUSH_INTERVAL_SECONDS <= 5

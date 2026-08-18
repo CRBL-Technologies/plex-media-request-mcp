@@ -21,6 +21,10 @@ from .types import Actor
 from .upstream import Upstream
 
 LOGGER = logging.getLogger(__name__)
+# How often pending batches are re-evaluated. The quiet window is a threshold
+# each pass tests rather than a timer that fires, so this cycle sets the floor
+# on how soon an arrival can be announced.
+FLUSH_INTERVAL_SECONDS = 5
 
 
 def _positive(value: object) -> int | None:
@@ -191,7 +195,7 @@ class Notifications:
                 # Pending rows remain durable and are retried next cycle.
                 LOGGER.exception("notification flush failed")
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=15)
+                await asyncio.wait_for(self._stop.wait(), timeout=FLUSH_INTERVAL_SECONDS)
             except TimeoutError:
                 continue
 

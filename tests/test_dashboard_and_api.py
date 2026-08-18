@@ -19,6 +19,14 @@ from media_gateway.types import Actor
 from media_gateway.upstream import UpstreamError
 
 
+def _idle_queue() -> FakeUpstream:
+    """An upstream whose Sonarr queue is empty: nothing is still downloading."""
+
+    fake = FakeUpstream()
+    fake.responses["sonarr_get_queue"] = {"data": {"records": []}}
+    return fake
+
+
 def _actor(user_id: int, **extra: Any) -> dict[str, Any]:
     return {"user_id": user_id, "chat_id": user_id, **extra}
 
@@ -1649,6 +1657,9 @@ async def test_notifications_group_bulk_season_and_reach_admin_and_requester(
     sent: list[tuple[int, str, str]] = []
     with TestClient(app):
         runtime = app.state.runtime
+        # Flushing a series batch consults the Sonarr queue; stub it so the
+        # test does not reach for a real upstream.
+        runtime.notifications.upstream = _idle_queue()
         runtime.store.record_request(
             media_type="series",
             external_id=411959,
@@ -1717,6 +1728,9 @@ async def test_notifications_filter_revoked_requesters_but_preserve_allowed_chat
     sent: list[int] = []
     with TestClient(app):
         runtime = app.state.runtime
+        # Flushing a series batch consults the Sonarr queue; stub it so the
+        # test does not reach for a real upstream.
+        runtime.notifications.upstream = _idle_queue()
         runtime.store.record_request(
             media_type="movie",
             external_id=100,
@@ -1813,6 +1827,9 @@ async def test_new_show_webhook_reaches_admin_and_requester(config: Config) -> N
     sent: list[tuple[int, str]] = []
     with TestClient(app):
         runtime = app.state.runtime
+        # Flushing a series batch consults the Sonarr queue; stub it so the
+        # test does not reach for a real upstream.
+        runtime.notifications.upstream = _idle_queue()
         runtime.store.record_request(
             media_type="series",
             external_id=411959,
@@ -2005,6 +2022,123 @@ async def test_plex_slug_lookup_keeps_token_out_of_the_url(
         == "one-piece"
     )
     assert captured == {}
+
+
+def _quiet_series_event(runtime: Any, *, title: str = "Severance", tvdb: int = 371980) -> None:
+    runtime.store.add_media_event(
+        event_key=f"episode:{tvdb}",
+        media_type="series",
+        external_id=tvdb,
+        rating_key=str(tvdb),
+        title="Episode 1",
+        show_title=title,
+        season_number=1,
+        episode_number=1,
+        plex_url="https://watch.plex.tv/show/severance/season/1/episode/1",
+        # Older than the quiet window, so only the queue can hold it back.
+        observed_at=int(time.time()) - 600,
+    )
+
+
+async def test_a_quiet_season_waits_while_sonarr_is_still_fetching(config: Config) -> None:
+    """An empty window is not proof the season finished arriving."""
+
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["sonarr_get_queue"] = {
+        "data": {
+            "records": [
+                {
+                    "seriesId": 4,
+                    "seasonNumber": 1,
+                    "series": {"tvdbId": 371980, "title": "Severance"},
+                }
+            ]
+        }
+    }
+    sent: list[str] = []
+    with TestClient(app):
+        runtime = app.state.runtime
+        runtime.upstream = fake
+        runtime.notifications.upstream = fake
+
+        async def send(chat_id: int, text: str, plex_url: str) -> None:
+            sent.append(plex_url)
+
+        runtime.notifications._send = send  # type: ignore[method-assign]
+        _quiet_series_event(runtime)
+        await runtime.notifications.flush()
+
+    assert sent == []
+    assert [e["event_key"] for e in runtime.store.pending_media_events(int(time.time()) + 10)] == [
+        "episode:371980"
+    ]
+
+
+async def test_a_quiet_season_is_sent_once_the_queue_is_clear(config: Config) -> None:
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["sonarr_get_queue"] = {"data": {"records": []}}
+    sent: list[str] = []
+    with TestClient(app):
+        runtime = app.state.runtime
+        runtime.notifications.upstream = fake
+
+        async def send(chat_id: int, text: str, plex_url: str) -> None:
+            sent.append(plex_url)
+
+        runtime.notifications._send = send  # type: ignore[method-assign]
+        _quiet_series_event(runtime)
+        await runtime.notifications.flush()
+
+    assert sent == ["https://watch.plex.tv/show/severance/season/1/episode/1"]
+
+
+async def test_a_different_show_in_the_queue_does_not_hold_this_one(config: Config) -> None:
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["sonarr_get_queue"] = {
+        "data": {"records": [{"series": {"tvdbId": 81797, "title": "One Piece"}}]}
+    }
+    sent: list[str] = []
+    with TestClient(app):
+        runtime = app.state.runtime
+        runtime.notifications.upstream = fake
+
+        async def send(chat_id: int, text: str, plex_url: str) -> None:
+            sent.append(plex_url)
+
+        runtime.notifications._send = send  # type: ignore[method-assign]
+        _quiet_series_event(runtime)
+        await runtime.notifications.flush()
+
+    assert len(sent) == 1
+
+
+async def test_an_unreachable_sonarr_queue_still_delivers(config: Config) -> None:
+    """A provider that cannot be reached must not hold notifications for ever."""
+
+    app = create_app(config)
+
+    class BrokenQueue(FakeUpstream):
+        async def call(self, name: str, arguments: dict[str, Any]) -> Any:
+            if name == "sonarr_get_queue":
+                raise UpstreamError("sonarr is unavailable")
+            return await super().call(name, arguments)
+
+    sent: list[str] = []
+    with TestClient(app):
+        runtime = app.state.runtime
+        runtime.notifications.upstream = BrokenQueue()
+
+        async def send(chat_id: int, text: str, plex_url: str) -> None:
+            sent.append(plex_url)
+
+        runtime.notifications._send = send  # type: ignore[method-assign]
+        _quiet_series_event(runtime)
+        await runtime.notifications.flush()
+
+    assert len(sent) == 1
 
 
 async def test_a_movie_is_notified_without_waiting_for_the_batch_window(

@@ -50,6 +50,19 @@ def _season_label(season: object) -> str:
     return "Specials" if season == 0 else f"Season {season}"
 
 
+def _queue_rows(value: object) -> list[dict[str, Any]]:
+    """Rows from a Sonarr queue response, whatever envelope it arrives in."""
+
+    for candidate in (value, isinstance(value, dict) and value.get("data")):
+        if isinstance(candidate, list):
+            return [item for item in candidate if isinstance(item, dict)]
+        if isinstance(candidate, dict):
+            records = candidate.get("records")
+            if isinstance(records, list):
+                return [item for item in records if isinstance(item, dict)]
+    return []
+
+
 def _external_id(metadata: dict[str, Any], provider: str) -> int | None:
     guides: list[str] = []
     raw = metadata.get("Guid")
@@ -223,6 +236,48 @@ class Notifications:
             record_activity=False,
         )
 
+    async def _series_still_arriving(self) -> set[tuple[str, object]] | None:
+        """Series Sonarr is still fetching, or None when it cannot be asked.
+
+        This can only ever hold a notification back, never release one. The
+        queue empties when Sonarr finishes importing, which happens before Plex
+        scans the files and emits the webhooks these events come from, so an
+        empty queue is not evidence that an arrival is complete -- a season
+        pack is a single queue item that becomes many webhooks after it drains.
+        Waiting for quiet is what actually groups them.
+        """
+
+        try:
+            raw = await self.upstream.call("sonarr_get_queue", {"limit": 50})
+        except Exception:
+            # Fail open: the quiet window has already elapsed, and a provider
+            # that cannot be reached must not hold notifications for ever.
+            LOGGER.warning("Sonarr queue is unavailable; delivering on quiet alone")
+            return None
+        identities: set[tuple[str, object]] = set()
+        for item in _queue_rows(raw):
+            series = item.get("series")
+            if isinstance(series, dict):
+                tvdb = _positive(series.get("tvdbId"))
+                if tvdb is not None:
+                    identities.add(("tvdb", tvdb))
+                nested = series.get("title")
+                if isinstance(nested, str) and nested.strip():
+                    identities.add(("title", nested.strip().casefold()))
+            for key in ("seriesTitle", "title"):
+                value = item.get(key)
+                if isinstance(value, str) and value.strip():
+                    identities.add(("title", value.strip().casefold()))
+        return identities
+
+    @staticmethod
+    def _matches_queue(event: dict[str, Any], identities: set[tuple[str, object]]) -> bool:
+        external_id = event.get("external_id")
+        if isinstance(external_id, int) and ("tvdb", external_id) in identities:
+            return True
+        title = event.get("show_title") or event.get("title")
+        return isinstance(title, str) and ("title", title.strip().casefold()) in identities
+
     async def flush(self) -> None:
         now = int(time.time())
         before = now - self.config.notification_delay_seconds
@@ -242,12 +297,22 @@ class Notifications:
             else:
                 key = ("movie", event["event_key"])
             grouped[key].append(event)
+        arriving: set[tuple[str, object]] | None = None
+        asked_sonarr = False
         for key, batch in grouped.items():
             # The delay exists so a season import arrives as one message rather
             # than one per episode. A movie is its own batch and has nothing to
             # wait for, so making it sit out the window only delays the news.
-            if key[0] == "series" and max(int(item["observed_at"]) for item in batch) > before:
-                continue
+            if key[0] == "series":
+                if max(int(item["observed_at"]) for item in batch) > before:
+                    continue
+                # Quiet, but Sonarr may still be fetching the rest of the
+                # season. One queue read serves every batch in this pass.
+                if not asked_sonarr:
+                    arriving = await self._series_still_arriving()
+                    asked_sonarr = True
+                if arriving and self._matches_queue(batch[0], arriving):
+                    continue
             batch = await self._enrich(batch)
             await self._deliver_batch(batch)
 

@@ -179,10 +179,18 @@ tool_loop_guardrails:
 This is a native Hermes setting, not a second CRBL configuration source.
 
 A Plex arrival is announced once the title has been quiet for
-`MEDIA_GATEWAY_NOTIFICATION_DELAY_SECONDS`, so a season import is one message
-rather than one per episode. A movie is its own batch with nothing to group
-with, so it is sent on the next pass instead of serving out a window that can
-only delay it.
+`MEDIA_GATEWAY_NOTIFICATION_DELAY_SECONDS` (30 seconds), so a season import is
+one message rather than one per episode. A movie is its own batch with nothing
+to group with, so it is sent on the next pass instead of serving out a window
+that can only delay it.
+
+The window absorbs the spread between Plex webhooks, not download time. Sonarr's
+queue drains when it finishes importing, which is before Plex scans the files
+and emits those webhooks -- a season pack is one queue item that becomes many
+webhooks after it drains -- so an empty queue never proves an arrival is
+complete. The queue is therefore only ever read to keep a quiet season waiting
+while Sonarr is still fetching it, never to release one early, and an
+unreachable Sonarr delivers on quiet alone.
 
 The gateway database advances through numbered, transactional migrations and
 fails closed on an incompatible schema. Deployment takes and verifies a SQLite

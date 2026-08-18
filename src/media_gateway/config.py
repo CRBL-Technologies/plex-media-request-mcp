@@ -137,7 +137,7 @@ class Config:
             sonarr_root=os.environ["MEDIA_GATEWAY_SONARR_ROOT"],
             sonarr_tags=_tags("MEDIA_GATEWAY_SONARR_TAG_IDS"),
             plex_machine_id=os.environ["MEDIA_GATEWAY_PLEX_MACHINE_ID"],
-            notification_delay_seconds=_int("MEDIA_GATEWAY_NOTIFICATION_DELAY_SECONDS", 300),
+            notification_delay_seconds=_int("MEDIA_GATEWAY_NOTIFICATION_DELAY_SECONDS", 5),
             telegram_identity_sync=_bool("MEDIA_GATEWAY_TELEGRAM_IDENTITY_SYNC", True),
         )
 

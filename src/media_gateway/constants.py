@@ -14,6 +14,7 @@ SHARED_TOOLS: Final = (
     "recommend_media",
     "request_movie",
     "request_series",
+    "request_titles",
     "series_seasons",
     "request_status",
     "download_status",

@@ -307,6 +307,31 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
             "additionalProperties": False,
         },
     },
+    "request_titles": {
+        "description": (
+            "Request every title in a list the user supplied, in one call. Each title is "
+            "resolved to an exact Radarr or Sonarr match and requested; a series is requested "
+            "for all of its seasons. Nothing is guessed and nothing is asked: a title that "
+            "cannot be matched exactly comes back in unmatched, and one already held comes back "
+            "as available. Use this whenever the user gives more than one title -- never search "
+            "or request them one at a time, and never ask which match was meant. Include a year "
+            "in a title when it is known, as 'Title (2016)'."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "titles": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 2, "maxLength": 120},
+                    "minItems": 1,
+                    "maxItems": 100,
+                },
+                "media_type": {"type": "string", "enum": ["all", "movie", "series"]},
+            },
+            "required": ["titles"],
+            "additionalProperties": False,
+        },
+    },
     "series_seasons": {
         "description": (
             "Report every season of a series with how many episodes Sonarr holds, so a "
@@ -666,6 +691,91 @@ class ToolService:
             "results": results,
             "unavailable_sources": sorted(errors),
             "presentation": "recommendations",
+        }
+
+    async def _request_titles(self, arguments: object, actor: Actor, role: Role) -> dict[str, Any]:
+        """Request a whole list at once, reporting rather than asking.
+
+        Sending a list is a bulk instruction, not thirty separate questions, so
+        every title is resolved by the same exact match a recommendation uses
+        and requested straight away. Anything ambiguous or unknown is named in
+        the result instead of interrupting the run.
+        """
+
+        args = _exact(arguments, {"titles", "media_type"})
+        raw = args.get("titles")
+        if not isinstance(raw, list) or not raw or len(raw) > 100:
+            raise ToolError("titles must be an array of 1 to 100 items")
+        titles = [_short_text(item, "title", minimum=2) for item in raw]
+        media_type = args.get("media_type", "all")
+        if media_type not in {"all", "movie", "series"}:
+            raise ToolError("media_type must be all, movie, or series")
+
+        # Providers are shared with the rest of the household, so a long list
+        # is walked a few at a time rather than opened all at once.
+        gate = asyncio.Semaphore(4)
+        seen: set[tuple[str, int]] = set()
+        lock = asyncio.Lock()
+
+        async def handle(title: str) -> dict[str, Any]:
+            async with gate:
+                try:
+                    candidates, _errors = await self._search_candidates(title, media_type, 5)
+                except UpstreamError:
+                    return {"title": title, "state": "failed", "detail": "provider unavailable"}
+                async with lock:
+                    choice = self._recommendation_choice(title, candidates, seen)
+                if choice is None:
+                    return {"title": title, "state": "unmatched"}
+                name = (
+                    f"{choice['title']} ({choice['year']})"
+                    if choice.get("year")
+                    else choice["title"]
+                )
+                try:
+                    if choice["media_type"] == "movie":
+                        done = await self._request_movie(
+                            {"tmdb_id": choice["tmdb_id"]}, actor, role
+                        )
+                    else:
+                        seasons = [n for n in (choice.get("seasons") or []) if isinstance(n, int)]
+                        if not seasons:
+                            return {"title": title, "matched": name, "state": "unmatched"}
+                        done = await self._request_series(
+                            {"tvdb_id": choice["tvdb_id"], "seasons": seasons}, actor, role
+                        )
+                except (ToolError, UpstreamError) as exc:
+                    return {
+                        "title": title,
+                        "matched": name,
+                        "state": "failed",
+                        "detail": str(exc)[:120],
+                    }
+                status = str(done.get("status") or "requested")
+                return {
+                    "title": title,
+                    "matched": name,
+                    "media_type": choice["media_type"],
+                    "state": "available" if status == "available" else "requested",
+                    "status": status,
+                }
+
+        outcomes = await asyncio.gather(*(handle(title) for title in titles))
+        buckets: dict[str, list[dict[str, Any]]] = {}
+        for outcome in outcomes:
+            buckets.setdefault(outcome["state"], []).append(outcome)
+        return {
+            "requested": buckets.get("requested", []),
+            "already_available": buckets.get("available", []),
+            "unmatched": [o["title"] for o in buckets.get("unmatched", [])],
+            "failed": buckets.get("failed", []),
+            "counts": {
+                "asked": len(titles),
+                "requested": len(buckets.get("requested", [])),
+                "already_available": len(buckets.get("available", [])),
+                "unmatched": len(buckets.get("unmatched", [])),
+                "failed": len(buckets.get("failed", [])),
+            },
         }
 
     async def _request_movie(self, arguments: object, actor: Actor, _role: Role) -> dict[str, Any]:

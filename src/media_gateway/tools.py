@@ -232,17 +232,12 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
         "description": (
             "Search Radarr and Sonarr for a movie or series. Results include poster_url "
             "when available, and plex_url on a lone downloaded movie. downloaded reports "
-            "whether the file is held: for a series it means every known season is complete, "
-            "and seasons_complete and seasons_missing list them. "
-            "On Telegram, the media adapter presents up to four results in one "
-            "tabbed poster card; opening a tab swaps its poster in place before the tool returns. "
-            "Never use MEDIA for a remote poster URL, repeat the candidate list, or call clarify "
-            "for the same results. Pressing Request movie performs the request through the "
-            "gateway before the tool returns; when the result reports it already happened, only "
-            "confirm the recorded outcome and never call request_movie for it. Choosing a series "
-            "identifies it but still requires the desired seasons. Answer "
-            "only about the returned result. If in_sonarr is false, say the series is not yet "
-            "managed in Sonarr rather than saying episode availability was not reported."
+            "whether the file is held: for a series it means every aired season is complete, "
+            "and seasons_complete and seasons_missing list them. On Telegram a lone result is "
+            "posted as a poster; when several match, present them in your reply and ask which "
+            "was meant. Answer only about the returned results. If in_sonarr is false, say the "
+            "series is not yet managed in Sonarr rather than saying episode availability was "
+            "not reported."
         ),
         "inputSchema": {
             "type": "object",

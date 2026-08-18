@@ -58,6 +58,7 @@ def _text(value: object) -> str | None:
 _ACTOR: ContextVar[Actor | None] = ContextVar("crbl_media_actor", default=None)
 _ROLE: ContextVar[Role | None] = ContextVar("crbl_media_role", default=None)
 _SESSION_KEY: ContextVar[str | None] = ContextVar("crbl_media_session_key", default=None)
+_CARD_BUDGET: ContextVar[list[int] | None] = ContextVar("crbl_media_card_budget", default=None)
 
 
 def session_key_from_event(
@@ -96,6 +97,7 @@ def actor_scope(
     role: Role,
     session_key: str | None = None,
 ) -> Iterator[None]:
+    budget_token = _CARD_BUDGET.set([])
     actor_token = _ACTOR.set(actor)
     role_token = _ROLE.set(role)
     session_token = _SESSION_KEY.set(session_key or f"agent:main:telegram:dm:{actor.chat_id}")
@@ -105,6 +107,7 @@ def actor_scope(
         _SESSION_KEY.reset(session_token)
         _ROLE.reset(role_token)
         _ACTOR.reset(actor_token)
+        _CARD_BUDGET.reset(budget_token)
 
 
 def require_actor() -> Actor:
@@ -114,12 +117,24 @@ def require_actor() -> Actor:
     return actor
 
 
-def require_session_key() -> str:
-    session_key = _SESSION_KEY.get()
-    if session_key is None:
-        raise TrustError("no trusted Telegram session is active")
-    return session_key
-
-
 def current_role() -> Role | None:
     return _ROLE.get()
+
+
+def claim_card_slot() -> bool:
+    """Allow at most one unsolicited card per user message.
+
+    A card is pushed into the chat without being asked for, so a model that
+    searches several titles in one turn would post one poster per search --
+    long after the user has moved on. One message earns one card, whatever the
+    model does with its tools, and without guessing at the user's intent from
+    the words they used.
+    """
+
+    budget = _CARD_BUDGET.get()
+    if budget is None:
+        return True
+    if budget:
+        return False
+    budget.append(1)
+    return True

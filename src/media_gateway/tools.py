@@ -230,14 +230,11 @@ def _series_candidate(item: dict[str, Any]) -> dict[str, Any] | None:
 SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
     "search_media": {
         "description": (
-            "Search Radarr and Sonarr for a movie or series. Results include poster_url "
-            "when available, and plex_url on a lone downloaded movie. downloaded reports "
-            "whether the file is held: for a series it means every aired season is complete, "
-            "and seasons_complete and seasons_missing list them. On Telegram a lone result is "
-            "posted as a poster; when several match, present them in your reply and ask which "
-            "was meant. Answer only about the returned results. If in_sonarr is false, say the "
-            "series is not yet managed in Sonarr rather than saying episode availability was "
-            "not reported."
+            "Search Radarr and Sonarr for one movie or series. Each match reports its year, "
+            "media type, poster_url, and whether the file is held: downloaded for a movie, and "
+            "for a series seasons_complete and seasons_missing, with downloaded meaning every "
+            "aired season is present. A lone held title also carries plex_url. When exactly one "
+            "title matches, it is posted to the chat as a poster."
         ),
         "inputSchema": {
             "type": "object",
@@ -252,14 +249,11 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "recommend_media": {
         "description": (
-            "Present one exact Radarr/Sonarr match for each of exactly 4 distinct titles after "
-            "recommendation research. Use this once for discovery requests instead of calling "
-            "search_media separately for every title. Include a year in each title when known. "
-            "On Telegram the results are returned for a conversational reply; present each "
-            "title with its availability and offer to add any that are missing. Any title in "
-            "unmatched_titles could not be found by the providers: say so instead of dropping "
-            "it silently, so the reply never presents fewer suggestions than were researched. "
-            "Do not use it for a direct title lookup."
+            "Resolve several titles at once, when you already know which titles you want to "
+            "check. Each is matched exactly -- include a year as 'Title (2016)' when known -- "
+            "and returned with the same fields as search_media. Titles with no exact match come "
+            "back in unmatched_titles rather than being guessed at. Nothing is posted to the "
+            "chat, so the reply is yours to write."
         ),
         "inputSchema": {
             "type": "object",
@@ -267,8 +261,8 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
                 "titles": {
                     "type": "array",
                     "items": {"type": "string", "minLength": 2, "maxLength": 120},
-                    "minItems": 4,
-                    "maxItems": 4,
+                    "minItems": 1,
+                    "maxItems": 20,
                     "uniqueItems": True,
                 },
                 "media_type": {"type": "string", "enum": ["movie", "series", "all"]},
@@ -278,7 +272,7 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
         },
     },
     "request_movie": {
-        "description": "Request one movie by its TMDB ID from a current search result.",
+        "description": ("Request one movie by TMDB ID."),
         "inputSchema": {
             "type": "object",
             "properties": {"tmdb_id": {"type": "integer", "minimum": 1}},
@@ -287,9 +281,7 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
         },
     },
     "request_series": {
-        "description": (
-            "Request one or more seasons of a series by TVDB ID. Season 0 is the specials season."
-        ),
+        "description": ("Request specific seasons of one series by TVDB ID. Season 0 is specials."),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -309,13 +301,10 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "request_titles": {
         "description": (
-            "Request every title in a list the user supplied, in one call. Each title is "
-            "resolved to an exact Radarr or Sonarr match and requested; a series is requested "
-            "for all of its seasons. Nothing is guessed and nothing is asked: a title that "
-            "cannot be matched exactly comes back in unmatched, and one already held comes back "
-            "as available. Use this whenever the user gives more than one title -- never search "
-            "or request them one at a time, and never ask which match was meant. Include a year "
-            "in a title when it is known, as 'Title (2016)'."
+            "Request every title in a list, up to a hundred at once. Each is matched exactly "
+            "and then requested: a movie is added, a series is requested for all of its "
+            "seasons. The result reports what was requested, what was already available, what "
+            "could not be matched, and what failed, so nothing has to be asked mid-run."
         ),
         "inputSchema": {
             "type": "object",
@@ -334,10 +323,10 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "series_seasons": {
         "description": (
-            "Report every season of a series with how many episodes Sonarr holds, so a "
-            "reply can say which seasons are complete, partial, or missing. Season 0 is "
-            "the specials season. Use this instead of guessing availability from a search "
-            "result, which carries no per-season counts."
+            "Report every season of a series with how many episodes Sonarr holds, so a reply "
+            "can say which seasons are complete, partial or missing. Season 0 is specials. A "
+            "search result carries no per-season counts, so this is the way to answer a season "
+            "question."
         ),
         "inputSchema": {
             "type": "object",
@@ -654,8 +643,8 @@ class ToolService:
     ) -> dict[str, Any]:
         args = _exact(arguments, {"titles", "media_type"})
         raw_titles = args.get("titles")
-        if not isinstance(raw_titles, list) or len(raw_titles) != 4:
-            raise ToolError("titles must contain exactly 4 items")
+        if not isinstance(raw_titles, list) or not 1 <= len(raw_titles) <= 20:
+            raise ToolError("titles must contain 1 to 20 items")
         titles = [_short_text(item, "title", minimum=2) for item in raw_titles]
         if len({_recommendation_target(title)[0] for title in titles}) != len(titles):
             raise ToolError("titles must be distinct")

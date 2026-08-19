@@ -303,9 +303,11 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
     "request_titles": {
         "description": (
             "Request every title in a list, up to a hundred at once. Each is matched exactly "
-            "and then requested: a movie is added, a series is requested for all of its "
-            "seasons. The result reports what was requested, what was already available, what "
-            "could not be matched, and what failed, so nothing has to be asked mid-run."
+            "and then requested: a movie is added, a series is requested for every season "
+            "except specials. A title repeated in the list is requested once. The result "
+            "reports what was requested, what was already available, what could not be "
+            "matched, what was a duplicate, and what failed, so nothing has to be asked "
+            "mid-run."
         ),
         "inputSchema": {
             "type": "object",
@@ -703,7 +705,20 @@ class ToolService:
         raw = args.get("titles")
         if not isinstance(raw, list) or not raw or len(raw) > 100:
             raise ToolError("titles must be an array of 1 to 100 items")
-        titles = [_short_text(item, "title", minimum=2) for item in raw]
+        asked = [_short_text(item, "title", minimum=2) for item in raw]
+        # A repeated title must not become a second film. One `seen` set spans
+        # the run so two different queries cannot claim the same match, which
+        # means a duplicate falls through to the next candidate sharing that
+        # title -- "Dune" twice would add both 2021 and 1984. Collapse them
+        # here and report it, rather than rejecting a hundred-title paste over
+        # one repeat.
+        titles: list[str] = []
+        duplicates: list[str] = []
+        folded: set[str] = set()
+        for title in asked:
+            key = " ".join(title.casefold().split())
+            (duplicates if key in folded else titles).append(title)
+            folded.add(key)
         media_type = args.get("media_type", "all")
         if media_type not in {"all", "movie", "series"}:
             raise ToolError("media_type must be all, movie, or series")
@@ -735,7 +750,13 @@ class ToolService:
                             {"tmdb_id": choice["tmdb_id"]}, actor, role
                         )
                     else:
-                        seasons = [n for n in (choice.get("seasons") or []) if isinstance(n, int)]
+                        # Season 0 is specials. Asking for a whole show does
+                        # not mean asking for those, and a hundred-title list
+                        # would pull them for every series in it. They stay
+                        # available by naming them to request_series.
+                        seasons = [
+                            n for n in (choice.get("seasons") or []) if isinstance(n, int) and n > 0
+                        ]
                         if not seasons:
                             return {"title": title, "matched": name, "state": "unmatched"}
                         done = await self._request_series(
@@ -766,8 +787,10 @@ class ToolService:
             "already_available": buckets.get("available", []),
             "unmatched": [o["title"] for o in buckets.get("unmatched", [])],
             "failed": buckets.get("failed", []),
+            "duplicates": duplicates,
             "counts": {
-                "asked": len(titles),
+                "asked": len(asked),
+                "duplicates": len(duplicates),
                 "requested": len(buckets.get("requested", [])),
                 "already_available": len(buckets.get("available", [])),
                 "unmatched": len(buckets.get("unmatched", [])),

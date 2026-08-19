@@ -280,13 +280,14 @@ async def _decorate_search_result(
     delivered = False
     adapter = _active_adapter
     candidate = candidates[0]
-    # ``is_safe_url`` performs a blocking DNS resolve, so it runs here rather
-    # than on the adapter loop, and only for the one candidate a card can
-    # carry -- validating twenty posters to show at most one was wasted work.
-    poster = _safe_poster_url(candidate.get("poster_url"))
     # A card is unsolicited, so one message earns one. A model that searches
     # several titles in a turn must not post a poster for each.
     if adapter is not None and claim_card_slot():
+        # ``is_safe_url`` performs a blocking DNS resolve, so it runs here
+        # rather than on the adapter loop, and only once a card is certain to
+        # be sent -- validating twenty posters to show at most one was work
+        # spent on nothing.
+        poster = _safe_poster_url(candidate.get("poster_url"))
 
         async def deliver_single() -> bool:
             response = await send_single_result_card(

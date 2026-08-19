@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -459,103 +460,110 @@ class ToolService:
             groups.append(group)
         results = _interleave(groups, limit)
         await asyncio.gather(
-            self._enrich_downloaded(results, library_ids),
-            self._enrich_series_availability(results, library_ids),
+            self._enrich_from_library(
+                results=results,
+                library_ids=library_ids,
+                kind="movie",
+                id_field="tmdb_id",
+                tool="radarr_get_movie",
+                apply=self._apply_movie_availability,
+                # A movie the lookup already reports as held needs no read.
+                skip=lambda candidate: bool(candidate.get("downloaded")),
+            ),
+            self._enrich_from_library(
+                results=results,
+                library_ids=library_ids,
+                kind="series",
+                id_field="tvdb_id",
+                tool="sonarr_get_series_by_id",
+                apply=self._apply_series_availability,
+            ),
         )
         return results, errors
 
-    async def _enrich_series_availability(
-        self, results: list[dict[str, Any]], library_ids: dict[tuple[str, int], int]
+    async def _enrich_from_library(
+        self,
+        *,
+        results: list[dict[str, Any]],
+        library_ids: dict[tuple[str, int], int],
+        kind: str,
+        id_field: str,
+        tool: str,
+        apply: Callable[[dict[str, Any], dict[str, Any]], None],
+        skip: Callable[[dict[str, Any]], bool] = lambda _candidate: False,
     ) -> None:
+        """Read each tracked candidate's library record and fold it back in.
+
+        Both providers answer "does this exist" from their lookup and "do we
+        hold it" only from the library record, so both corrections share this
+        shape: pick the tracked candidates, read their records concurrently,
+        and never spend a call on a title the provider does not track.
+        """
+
+        targets: list[tuple[dict[str, Any], int]] = []
+        for candidate in results:
+            if candidate.get("media_type") != kind or skip(candidate):
+                continue
+            external_id = candidate.get(id_field)
+            if not isinstance(external_id, int):
+                continue
+            provider_id = library_ids.get((kind, external_id))
+            if provider_id is not None:
+                targets.append((candidate, provider_id))
+        if not targets:
+            return
+
+        async def resolve(candidate: dict[str, Any], provider_id: int) -> None:
+            record = _record(await self.upstream.call(tool, {"id": provider_id}))
+            if record is not None:
+                apply(candidate, record)
+
+        outcomes = await asyncio.gather(
+            *(resolve(candidate, provider_id) for candidate, provider_id in targets),
+            return_exceptions=True,
+        )
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException) and not isinstance(outcome, Exception):
+                raise outcome
+
+    @staticmethod
+    def _apply_series_availability(candidate: dict[str, Any], record: dict[str, Any]) -> None:
         """Say which seasons a tracked series already has.
 
         Sonarr's lookup carries season numbers but null statistics, so a search
-        result cannot tell a series that is fully held from one that is merely
-        tracked. Without this a recommendation reply can only say a series
-        exists, never whether it is watchable.
+        result cannot tell a series that is fully held from one merely tracked.
         """
 
-        targets: list[tuple[dict[str, Any], int]] = []
-        for candidate in results:
-            if candidate.get("media_type") != "series":
-                continue
-            tvdb_id = candidate.get("tvdb_id")
-            if not isinstance(tvdb_id, int):
-                continue
-            sonarr_id = library_ids.get(("series", tvdb_id))
-            if sonarr_id is not None:
-                targets.append((candidate, sonarr_id))
-        if not targets:
+        states = _season_states(record)
+        if not states:
             return
+        complete = [int(state["number"]) for state in states if state["complete"]]
+        # A season Sonarr lists with no episodes has not aired yet, so it is
+        # not missing: there is nothing to acquire, and counting it would keep
+        # every ongoing show permanently unavailable.
+        missing = [
+            int(state["number"])
+            for state in states
+            if not state["complete"] and int(state["episodes"]) > 0
+        ]
+        candidate["seasons_complete"] = complete
+        candidate["seasons_missing"] = missing
+        # "Downloaded" for a series means every aired season is complete, so
+        # the model never calls a half-held show available.
+        candidate["downloaded"] = bool(complete) and not missing
 
-        async def resolve(candidate: dict[str, Any], sonarr_id: int) -> None:
-            record = _record(await self.upstream.call("sonarr_get_series_by_id", {"id": sonarr_id}))
-            if record is None:
-                return
-            states = _season_states(record)
-            if not states:
-                return
-            complete = [int(s["number"]) for s in states if s["complete"]]
-            # A season Sonarr lists with no episodes has not aired yet, so it
-            # is not missing: there is nothing to acquire, and counting it
-            # would keep every ongoing show permanently unavailable.
-            missing = [
-                int(s["number"]) for s in states if not s["complete"] and int(s["episodes"]) > 0
-            ]
-            candidate["seasons_complete"] = complete
-            candidate["seasons_missing"] = missing
-            # "Downloaded" for a series means every season Sonarr knows is
-            # complete, so the model never calls a half-held show available.
-            candidate["downloaded"] = bool(complete) and not missing
+    @staticmethod
+    def _apply_movie_availability(candidate: dict[str, Any], record: dict[str, Any]) -> None:
+        """Correct ``downloaded`` from a movie's library record.
 
-        outcomes = await asyncio.gather(
-            *(resolve(candidate, sonarr_id) for candidate, sonarr_id in targets),
-            return_exceptions=True,
-        )
-        for outcome in outcomes:
-            if isinstance(outcome, BaseException) and not isinstance(outcome, Exception):
-                raise outcome
-
-    async def _enrich_downloaded(
-        self, results: list[dict[str, Any]], library_ids: dict[tuple[str, int], int]
-    ) -> None:
-        """Correct ``downloaded`` from each movie's library record.
-
-        Radarr's lookup answers "does this film exist", not "do we hold it":
-        it returns the catalogue entry, where ``hasFile`` is null even for a
-        film sitting on disk. Reading it there reports every title as missing,
-        which makes the bot offer to add films the user can already watch.
-
-        Only the library record carries the answer, so one is fetched per
-        tracked movie in the result set -- concurrently, and never for a title
-        Radarr does not track, which needs no call to know it has no file.
+        Radarr's lookup answers "does this film exist", not "do we hold it": it
+        returns the catalogue entry, where ``hasFile`` is null even for a film
+        on disk. Reading it there reports every title as missing, which makes
+        the bot offer to add films the user can already watch.
         """
 
-        targets: list[tuple[dict[str, Any], int]] = []
-        for candidate in results:
-            if candidate.get("media_type") != "movie" or candidate.get("downloaded"):
-                continue
-            tmdb_id = candidate.get("tmdb_id")
-            if not isinstance(tmdb_id, int):
-                continue
-            radarr_id = library_ids.get(("movie", tmdb_id))
-            if radarr_id is not None:
-                targets.append((candidate, radarr_id))
-        if not targets:
-            return
-
-        async def resolve(candidate: dict[str, Any], radarr_id: int) -> None:
-            record = _record(await self.upstream.call("radarr_get_movie", {"id": radarr_id}))
-            if record is not None and _bool(record.get("hasFile")):
-                candidate["downloaded"] = True
-
-        outcomes = await asyncio.gather(
-            *(resolve(candidate, radarr_id) for candidate, radarr_id in targets),
-            return_exceptions=True,
-        )
-        for outcome in outcomes:
-            if isinstance(outcome, BaseException) and not isinstance(outcome, Exception):
-                raise outcome
+        if _bool(record.get("hasFile")):
+            candidate["downloaded"] = True
 
     async def _enrich_plex_urls(self, results: list[dict[str, Any]]) -> None:
         """Attach ``plex_url`` to a lone held result, at a cost of one call.

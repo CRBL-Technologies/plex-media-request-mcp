@@ -783,10 +783,7 @@ class ToolService:
         if candidate is None or candidate["year"] is None:
             raise ToolError("Radarr returned incomplete movie metadata")
         existing_id = source.get("id")
-        try:
-            visible_in_plex = await self._movie_in_plex(tmdb_id, candidate["title"])
-        except UpstreamError:
-            visible_in_plex = False
+        held = await self._movie_is_held(existing_id)
         request_id = self.store.begin_request(
             media_type="movie",
             external_id=tmdb_id,
@@ -800,7 +797,7 @@ class ToolService:
                 tmdb_id=tmdb_id,
                 candidate=candidate,
                 existing_id=existing_id,
-                visible_in_plex=visible_in_plex,
+                held=held,
             )
         except Exception:
             self.store.mark_request_unknown(request_id)
@@ -816,19 +813,35 @@ class ToolService:
             },
         }
 
+    async def _movie_is_held(self, existing_id: object) -> bool:
+        """Whether Radarr already holds the file for a tracked movie.
+
+        Radarr's lookup answers "does this film exist", not "do we hold it": it
+        returns the catalogue entry, where hasFile is null even for a film on
+        disk. Only the library record carries the answer, and it is one call --
+        the alternative, searching Plex and reading metadata per candidate,
+        costs up to twenty-one and answers a question Radarr already can.
+        """
+
+        if not isinstance(existing_id, int) or existing_id <= 0:
+            return False
+        try:
+            record = _record(await self.upstream.call("radarr_get_movie", {"id": existing_id}))
+        except UpstreamError:
+            return False
+        return record is not None and _bool(record.get("hasFile"))
+
     async def _fulfill_movie_request(
         self,
         *,
         tmdb_id: int,
         candidate: dict[str, Any],
         existing_id: object,
-        visible_in_plex: bool,
+        held: bool,
     ) -> str:
-        if visible_in_plex:
+        if held:
             return "available"
         if isinstance(existing_id, int) and existing_id > 0:
-            if candidate["downloaded"]:
-                return "awaiting_plex"
             await self.upstream.call("radarr_search_movie_releases", {"id": existing_id})
             return "search_started"
         await self.upstream.call(
@@ -1115,15 +1128,11 @@ class ToolService:
         candidate = _movie_candidate(source)
         if candidate is None or candidate["year"] is None:
             raise ToolError("Radarr returned incomplete movie metadata while reconciling")
-        try:
-            visible = await self._movie_in_plex(tmdb_id, candidate["title"])
-        except UpstreamError:
-            visible = False
         return await self._fulfill_movie_request(
             tmdb_id=tmdb_id,
             candidate=candidate,
             existing_id=source.get("id"),
-            visible_in_plex=visible,
+            held=await self._movie_is_held(source.get("id")),
         )
 
     async def _reconcile_series_intent(self, intent: dict[str, Any]) -> str:

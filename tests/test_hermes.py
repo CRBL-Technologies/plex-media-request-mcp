@@ -117,15 +117,18 @@ async def test_plugin_registers_closed_inventory_and_binds_actor(
     assert len(context.platforms) == 1
     platform_hint = context.platforms[0]["platform_hint"]
     assert platform_hint == plugin.PLATFORM_HINT
-    assert "search_media in the current turn" in platform_hint
-    assert "never reuse results from conversation history" in platform_hint
-    assert "There are no buttons to choose with" in platform_hint
-    # A list must route to one bulk call rather than a search per title.
-    assert "call request_titles once with all of them" in platform_hint
-    assert "never ask which match was meant" in platform_hint
-    assert (
-        "call\n    recommend_media once" in platform_hint or "recommend_media once" in platform_hint
-    )
+    # The hint constrains what may be claimed, never which tool to reach for.
+    assert "only source of truth for this library" in platform_hint
+    assert "never report something as requested unless a tool said so" in platform_hint
+    assert "Choose the tools yourself" in platform_hint
+    for prescription in (
+        "call search_media in the current turn",
+        "one at a time",
+        "ask which was meant",
+        "exactly 4",
+        "call request_titles once",
+    ):
+        assert prescription not in platform_hint, prescription
     assert {item["name"] for item in context.tools} == set(SHARED_TOOLS) | ADMIN_UPSTREAM_TOOLS
     search = next(item for item in context.tools if item["name"] == "search_media")
     actor = Actor(user_id=1001, chat_id=1001)
@@ -334,16 +337,27 @@ def test_search_presentation_keeps_posters_aligned_after_invalid_rows() -> None:
     assert len(posters) == len(candidates)
 
 
-def test_search_tool_contract_asks_the_model_to_disambiguate() -> None:
-    text = SHARED_SCHEMAS["search_media"]["description"]
-    assert "ask which was meant" in text
-    assert "plex_url on a lone downloaded movie" in text
-    # Nothing in the contract may promise a button that acts.
-    for gone in ("Request movie", "tabbed", "picker", "clarify"):
-        assert gone not in text
-    recommendation = SHARED_SCHEMAS["recommend_media"]["description"]
-    assert "conversational reply" in recommendation
-    assert SHARED_SCHEMAS["recommend_media"]["inputSchema"]["properties"]["titles"]["minItems"] == 4
+def test_tool_contracts_describe_capability_not_procedure() -> None:
+    """Each description says what the tool does; choosing is the model's job."""
+
+    search = SHARED_SCHEMAS["search_media"]["description"]
+    assert "seasons_complete" in search and "plex_url" in search
+    assert "posted to the chat as a poster" in search
+
+    batch = SHARED_SCHEMAS["recommend_media"]
+    assert "unmatched_titles" in batch["description"]
+    # The four-title rule was the picker's tab count, not a real constraint.
+    assert batch["inputSchema"]["properties"]["titles"]["minItems"] == 1
+    assert batch["inputSchema"]["properties"]["titles"]["maxItems"] == 20
+
+    bulk = SHARED_SCHEMAS["request_titles"]["description"]
+    assert "up to a hundred at once" in bulk
+    assert "could not be matched" in bulk
+
+    for name in ("search_media", "recommend_media", "request_titles", "series_seasons"):
+        text = SHARED_SCHEMAS[name]["description"]
+        for prescription in ("never search", "Use this whenever", "never ask", "one at a time"):
+            assert prescription not in text, f"{name}: {prescription}"
 
 
 async def test_adapter_verifies_actor_before_trusting_gateway(

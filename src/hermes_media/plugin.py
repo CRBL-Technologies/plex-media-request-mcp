@@ -41,23 +41,19 @@ SEARCH_PRESENTATION_LIMIT = 4
 CAPTION_HEADING_LIMIT = 200
 CAPTION_OVERVIEW_LIMIT = 420
 PLATFORM_HINT = (
-    "Telegram identity is trusted automatically; never request user IDs. "
-    "When the user gives more than one title -- a list, or several names in one message -- "
-    "call request_titles once with all of them and then report what came back. A list is an "
-    "instruction, not a set of questions: never search or request them one at a time, and never "
-    "ask which match was meant. "
-    "For a single movie or series lookup, availability check, or request, call search_media in "
-    "the current turn before answering; never reuse results from conversation history. For a "
-    "recommendation, use web_search to choose exactly 4 distinct titles, then call "
-    "recommend_media once with them, and name anything in unmatched_titles that you could not "
-    "find. There are no buttons to choose with: when one title is asked about and several "
-    "match, list them with year, media type and availability and ask which was meant. A "
-    "downloaded title is already available: say so and never offer to add it; for a series name "
-    "the seasons in seasons_missing instead of calling the whole show unavailable, and call "
-    "series_seasons for a season question. Season 0 is specials. A lone result is posted as a "
-    "poster whose only link opens Plex, so a title-only lookup stays read-only until the user "
-    "asks for it in the same message."
+    "Telegram identity is trusted automatically; never ask for user IDs. "
+    "The media tools are the only source of truth for this library: what is in it, what is "
+    "missing, and which seasons exist. Never answer that from memory, from your own knowledge, "
+    "or from results earlier in the conversation. Anything the library cannot answer -- what a "
+    "film is about, what exists, what order to watch things in -- is yours to answer or to "
+    "research with web_search. "
+    "Adding to the library is the only thing you can change here, so do it when asked and never "
+    "report something as requested unless a tool said so. "
+    "A single search result is also posted to the chat as a poster, carrying a link that opens "
+    "Plex when the title is held; at most one poster is posted per message, so do not describe "
+    "the card or promise buttons. Choose the tools yourself."
 )
+
 
 logger = logging.getLogger(__name__)
 

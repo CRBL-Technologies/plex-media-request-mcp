@@ -54,23 +54,23 @@ requests take the TMDB or TVDB ID returned by a current search.
 
 Search results retain the provider's public poster URL. A search that resolves
 to exactly one result is posted as that poster, carrying an `Open in Plex` link
-when the title is already held -- a movie Radarr has, or a series with at least
-one complete season -- and no button at all otherwise. A card is unsolicited,
-so one user message earns at most one, however many searches the model runs. That link is the
-only control a card has ever offered: there is no picker and no button that
-acts. When several titles match, the model lists them with year, media type and
-availability and asks which was meant; adding a title, and naming the seasons of
-a series, are answered in the same conversation. Remote poster URLs are never
-sent through Hermes' local-file `MEDIA:` convention.
+when the title is held and no button at all otherwise. That link is the only
+control a card has ever offered: there is no picker and no button that acts.
+At most one poster is posted per user message, however many searches a turn
+makes. Remote poster URLs are never sent through Hermes' local-file `MEDIA:`
+convention.
 
-Recommendation research uses `recommend_media` once with four distinct titles
-instead of searching per suggestion, and reports any it could not match so a
-batch never quietly shrinks. Recommendation turns reject model-generated
-single-title lookups.
+The tools describe what they do and the model decides which to use. The
+platform hint carries only what cannot be inferred: that Telegram identity is
+trusted, that the tools are the sole source of truth for what this library
+holds, that adding is the only thing the agent can change, and that a poster
+may already have been posted. Which tool answers a question -- a library
+search, a bulk lookup, a season report, or web_search for something the
+library cannot know -- is the model's call.
 
-Every title lookup, availability check, and request must refresh `search_media`
-in the current turn; conversation history is never a valid substitute for a
-current provider result. That guidance has exactly one copy,
+Conversation history is never a valid substitute for a current provider result,
+which is why the hint names the tools as the only source of truth rather than
+prescribing when to call them. That guidance has exactly one copy,
 `hermes_media.plugin.PLATFORM_HINT`. Hermes prefers its own built-in Telegram
 hint over a plugin's registered one, so the plugin installs its text on Hermes'
 hint resolver at registration instead of mirroring it into

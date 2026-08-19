@@ -133,6 +133,8 @@ jobs:
             -v "$smoke/gateway.key:/run/media-secrets/gateway.key:ro" \
             crbl-hermes-media:ci true
           # The identity file must be installed into HERMES_HOME by the init
-          # script, byte for byte from the image. Nothing else reads SOUL.md
-          # early enough for a failed install to surface on its own.
-          diff "$GITHUB_WORKSPACE/src/hermes_media/SOUL.md" "$smoke/data/SOUL.md"
+          # script, byte for byte from the image. Compare from inside a
+          # container: the base image leaves HERMES_HOME mode 0700 owned by
+          # the agent's uid, so the runner cannot traverse into it.
+          docker run --rm -v "$smoke/data:/data:ro" -v "$GITHUB_WORKSPACE/src:/src:ro" \
+            "$PYTHON_BASE_IMAGE" python -c 'import pathlib, sys; sys.exit(0 if pathlib.Path("/src/hermes_media/SOUL.md").read_bytes() == pathlib.Path("/data/SOUL.md").read_bytes() else "SOUL.md in HERMES_HOME is not the shipped identity")'

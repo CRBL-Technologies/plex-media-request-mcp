@@ -323,20 +323,45 @@ async def test_single_search_result_sends_a_poster_without_any_action(
     assert result["telegram_presentation"]["selection_status"] == "single_result"
 
 
-def test_search_presentation_keeps_posters_aligned_after_invalid_rows() -> None:
-    """A row without a usable label is dropped from both lists together."""
+def test_presentation_drops_unnamable_rows_and_nothing_else() -> None:
+    """A row the model cannot name is dropped; a matched title never is.
 
-    result = {
+    The old limit of four was the picker's tab count. Cutting results here is
+    invisible downstream: ``unmatched_titles`` reports only what the providers
+    failed to match, so a truncated title reads as one nobody asked about.
+    """
+
+    rows: list[dict[str, Any]] = [
+        {"media_type": "movie", "tmdb_id": index, "title": f"Film {index}", "year": 2000 + index}
+        for index in range(1, 13)
+    ]
+    rows.insert(2, {"media_type": "movie"})  # No id and no title: unnamable.
+    candidates = plugin._search_presentation({"results": rows})
+
+    assert [c["title"] for c in candidates] == [f"Film {index}" for index in range(1, 13)]
+
+
+async def test_a_long_recommendation_reaches_the_model_whole() -> None:
+    """recommend_media takes up to twenty titles, so twenty must survive.
+
+    Eight of twelve matched titles used to vanish between the gateway and the
+    model. Because they matched, ``unmatched_titles`` stayed empty, so nothing
+    in the result said the reply was answering about a third of the list.
+    """
+
+    result: dict[str, Any] = {
+        "presentation": "recommendations",
+        "unmatched_titles": [],
         "results": [
-            {"media_type": "movie", "tmdb_id": 1, "title": "One", "year": 2001},
-            {"media_type": "movie"},
-            {"media_type": "movie", "tmdb_id": 3, "title": "Three", "year": 2003},
-        ]
+            {"media_type": "movie", "tmdb_id": index, "title": f"Film {index}", "year": 2010}
+            for index in range(1, 13)
+        ],
     }
-    candidates, posters = plugin._search_presentation(result)
 
-    assert [c["title"] for c in candidates] == ["One", "Three"]
-    assert len(posters) == len(candidates)
+    decorated = await plugin._decorate_search_result(1001, result)
+
+    assert [c["title"] for c in decorated["results"]] == [f"Film {i}" for i in range(1, 13)]
+    assert decorated["telegram_presentation"]["poster_cards_delivered"] is False
 
 
 def test_tool_contracts_describe_capability_not_procedure() -> None:
@@ -685,6 +710,10 @@ async def test_only_one_card_is_pushed_per_user_message(monkeypatch: pytest.Monk
     assert len(adapter.sent) == 1
     assert first["telegram_presentation"]["poster_cards_delivered"] is True
     assert second["telegram_presentation"]["poster_cards_delivered"] is False
+    # The instruction has to agree with the flag. Told a poster was sent when
+    # none was, the model answers by pointing at a card nobody can see.
+    assert "already sent" in first["telegram_presentation"]["instruction"]
+    assert "already sent" not in second["telegram_presentation"]["instruction"]
     # The next message earns its own card.
     with actor_scope(actor, Role.USER, "agent:main:telegram:dm:1001"):
         await plugin._handler("search_media")({"query": "Dark City"})

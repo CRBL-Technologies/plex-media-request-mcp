@@ -37,7 +37,6 @@ SHARED_TOOLSET = "crbl-media-shared"
 ADMIN_TOOLSET = "crbl-media-admin"
 SEARCH_TOOLSET = "search"
 WEB_SEARCH_CAP = 10
-SEARCH_PRESENTATION_LIMIT = 4
 CAPTION_HEADING_LIMIT = 200
 CAPTION_OVERVIEW_LIMIT = 420
 PLATFORM_HINT = (
@@ -198,32 +197,20 @@ def _safe_poster_url(value: object) -> str | None:
         return None
 
 
-def _search_presentation(
-    result: Mapping[str, Any],
-) -> tuple[list[dict[str, Any]], list[str | None]]:
-    """Validate every poster once, off the Telegram event loop.
+def _search_presentation(result: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Keep every row the model can name, in the order the gateway ranked them.
 
-    ``is_safe_url`` performs a blocking DNS resolve, so it must not run on the
-    adapter loop. ``posters`` stays index-aligned with ``candidates``.
+    A row without a usable label cannot be named or requested, so it is
+    dropped. Nothing else is: recommend_media takes up to twenty titles and
+    search_media a limit of ten, and a title cut here would be invisible --
+    ``unmatched_titles`` reports only what the providers failed to match, so a
+    truncated one looks exactly like a title that was never asked for.
     """
 
     rows = result.get("results")
     if not isinstance(rows, list):
-        return [], []
-    candidates: list[dict[str, Any]] = []
-    posters: list[str | None] = []
-    for candidate in rows:
-        if len(candidates) == SEARCH_PRESENTATION_LIMIT:
-            break
-        if _candidate_label(candidate) is None:
-            continue
-        candidates.append(dict(candidate))
-        posters.append(
-            _safe_poster_url(candidate.get("poster_url"))
-            if isinstance(candidate, Mapping)
-            else None
-        )
-    return candidates, posters
+        return []
+    return [dict(row) for row in rows if _candidate_label(row) is not None]
 
 
 async def _on_adapter_loop(
@@ -260,7 +247,7 @@ async def _decorate_search_result(
     """
 
     recommendation_mode = result.get("presentation") == "recommendations"
-    candidates, posters = _search_presentation(result)
+    candidates = _search_presentation(result)
     if not candidates:
         return result
     decorated = dict(result)
@@ -293,7 +280,10 @@ async def _decorate_search_result(
     delivered = False
     adapter = _active_adapter
     candidate = candidates[0]
-    poster = posters[0] if posters else None
+    # ``is_safe_url`` performs a blocking DNS resolve, so it runs here rather
+    # than on the adapter loop, and only for the one candidate a card can
+    # carry -- validating twenty posters to show at most one was wasted work.
+    poster = _safe_poster_url(candidate.get("poster_url"))
     # A card is unsolicited, so one message earns one. A model that searches
     # several titles in a turn must not post a poster for each.
     if adapter is not None and claim_card_slot():
@@ -312,13 +302,21 @@ async def _decorate_search_result(
             delivered = bool(await _on_adapter_loop(deliver_single))
         except Exception:
             logger.warning("Telegram single result card delivery failed", exc_info=True)
+    # Only one card is sent per message and delivery can fail, so the second
+    # lookup in a turn has no poster to point at. Saying otherwise invites a
+    # reply that refers the user to a card they were never shown.
+    card = (
+        "A poster for this result was already sent, carrying an Open in Plex link when "
+        "it is available. "
+        if delivered
+        else ""
+    )
     decorated["telegram_presentation"] = {
         "poster_cards_delivered": delivered,
         "selection_status": "single_result",
         "provider_mutation_performed": False,
         "instruction": (
-            "A poster for this result was already sent, carrying an Open in Plex link when "
-            "it is available. Answer only about this result. If the current user message "
+            f"{card}Answer only about this result. If the current user message "
             "explicitly asks to add or request it, call the matching request tool now; a "
             "series still needs its seasons named. Otherwise this is a read-only lookup: "
             "never imply it was requested."

@@ -868,49 +868,6 @@ class ToolService:
         )
         return "requested"
 
-    async def _movie_in_plex(self, tmdb_id: int, title: str) -> bool:
-        """Answer whether *this* library already holds the movie.
-
-        This is the expensive question -- a library search plus one metadata
-        call per candidate -- so it is asked only where a request needs to know
-        whether the file is already watchable. A watch link is a different
-        question and uses ``plex_watch.lookup_slug``, which costs one request
-        and must never be answered by walking the library.
-        """
-
-        raw = await self.upstream.call(
-            "plex_search", {"query": title, "limit": 20, "searchTypes": ["movies"]}
-        )
-        if not isinstance(raw, dict):
-            raise UpstreamError("Plex search returned an invalid response")
-        container = raw.get("MediaContainer")
-        if not isinstance(container, dict) or not isinstance(container.get("Hub"), list):
-            return False
-        candidates: list[dict[str, Any]] = []
-        for hub in container["Hub"]:
-            if not isinstance(hub, dict) or not isinstance(hub.get("Metadata"), list):
-                continue
-            candidates.extend(item for item in hub["Metadata"] if isinstance(item, dict))
-        for item in candidates[:20]:
-            if item.get("type") != "movie":
-                continue
-            rating_key = item.get("ratingKey")
-            if not isinstance(rating_key, str) or not rating_key:
-                continue
-            metadata = await self.upstream.call("plex_get_metadata", {"ratingKey": rating_key})
-            for record in self._plex_rows(metadata, "Metadata"):
-                guides = record.get("Guid")
-                if not isinstance(guides, list):
-                    continue
-                for guide in guides:
-                    value = guide.get("id") if isinstance(guide, dict) else None
-                    if not isinstance(value, str) or not value.startswith("tmdb://"):
-                        continue
-                    raw_id = value.removeprefix("tmdb://").split("?", 1)[0]
-                    if raw_id.isdigit() and int(raw_id) == tmdb_id:
-                        return True
-        return False
-
     async def _series_seasons(
         self, arguments: object, _actor: Actor, _role: Role
     ) -> dict[str, Any]:

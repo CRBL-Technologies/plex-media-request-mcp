@@ -1308,12 +1308,83 @@ def test_a_bulk_request_reports_what_it_could_not_do(config: Config) -> None:
     result = response.json()["result"]
     assert result["counts"] == {
         "asked": 2,
+        "duplicates": 0,
         "requested": 0,
         "already_available": 0,
         "unmatched": 2,
         "failed": 0,
     }
     assert sorted(result["unmatched"]) == ["Also Missing", "Nothing Here"]
+
+
+def test_a_repeated_title_is_requested_once_not_twice_over(config: Config) -> None:
+    """One `seen` set spans the run, so a repeat would claim the next match.
+
+    Radarr returns both films called "Dune" with that exact title. The first
+    ask takes 2021 and marks it seen; without collapsing, the second ask finds
+    2021 claimed, falls through to 1984, and adds a film nobody requested.
+    """
+
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["radarr_search_movie"] = {
+        "data": [
+            {"tmdbId": 438631, "title": "Dune", "year": 2021},
+            {"tmdbId": 841, "title": "Dune", "year": 1984},
+        ]
+    }
+    fake.responses["sonarr_search_series"] = {"data": []}
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = call_tool(client, "request_titles", {"titles": ["Dune", "dune  "]})
+
+    result = response.json()["result"]
+    assert result["counts"]["asked"] == 2
+    assert result["counts"]["duplicates"] == 1
+    assert result["duplicates"] == ["dune"]
+    assert [row["matched"] for row in result["requested"]] == ["Dune (2021)"]
+    added = [args for name, args in fake.calls if name == "radarr_add_movie"]
+    assert [args["tmdbId"] for args in added] == [438631]
+
+
+def test_a_bulk_series_request_leaves_the_specials_alone(config: Config) -> None:
+    """Asking for a whole show is not asking for its specials.
+
+    Season 0 stays reachable by naming it to request_series; pulling it for
+    every series in a hundred-title list is a lot of downloading nobody asked
+    for.
+    """
+
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["radarr_search_movie"] = {"data": []}
+    fake.responses["sonarr_search_series"] = {
+        "data": [
+            {
+                "tvdbId": 371980,
+                "title": "Severance",
+                "year": 2022,
+                "seasons": [
+                    {"seasonNumber": 0},
+                    {"seasonNumber": 1},
+                    {"seasonNumber": 2},
+                ],
+            }
+        ]
+    }
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = call_tool(client, "request_titles", {"titles": ["Severance"]})
+
+    assert response.status_code == 200, response.text
+    # Sonarr needs every season in the payload, so what decides whether a
+    # season is fetched is its monitored flag, not its presence.
+    added = next(args for name, args in fake.calls if name == "sonarr_add_series")
+    assert [(s["seasonNumber"], s["monitored"]) for s in added["seasons"]] == [
+        (0, False),
+        (1, True),
+        (2, True),
+    ]
 
 
 def test_a_bulk_request_is_capped(config: Config) -> None:

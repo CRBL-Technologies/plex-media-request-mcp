@@ -12,6 +12,15 @@ import httpx
 from media_gateway.secrets import read_secret
 from media_gateway.types import Actor, Role
 
+CALL_TIMEOUT_SECONDS = 45
+# request_titles walks up to a hundred titles four at a time, and each costs a
+# lookup plus a library read plus the request itself. At 45 seconds the model
+# is told the run failed while the gateway is still working through the list
+# and will finish it -- and the obvious next move, retrying, requests
+# everything twice.
+BULK_CALL_TIMEOUT_SECONDS = 300
+SLOW_TOOLS = frozenset({"request_titles"})
+
 
 class GatewayError(RuntimeError):
     pass
@@ -58,7 +67,8 @@ class GatewayClient:
             raise GatewayError("gateway returned an invalid actor role") from exc
 
     async def call(self, actor: Actor, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        async with httpx.AsyncClient(timeout=45) as client:
+        timeout = BULK_CALL_TIMEOUT_SECONDS if name in SLOW_TOOLS else CALL_TIMEOUT_SECONDS
+        async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
                 f"{self.url}/api/tools/call",
                 headers=self._headers(),

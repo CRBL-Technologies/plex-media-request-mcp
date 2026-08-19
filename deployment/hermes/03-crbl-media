@@ -41,9 +41,16 @@ PY
 /opt/hermes/.venv/bin/python - <<'PY'
 from hermes_cli.config import load_config_readonly
 from hermes_cli.plugins import PluginManager
+from hermes_constants import get_hermes_home
 from hermes_media.compat import verify_pinned_runtime
 from hermes_media.plugin import PLATFORM_HINT, validate_search_guardrail
+from hermes_media.soul import SOUL_MD, install_soul
 from media_gateway.constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
+
+# The identity file is a build artifact: whatever sits in HERMES_HOME is
+# replaced by the copy shipped in this image, so a hand edit on the host does
+# not outlive a deploy. verify_pinned_runtime then reads it back.
+install_soul(get_hermes_home())
 
 manager = PluginManager()
 manager.discover_and_load()
@@ -57,5 +64,6 @@ verify_pinned_runtime(
     manager=manager,
     expected_tools=expected,
     platform_hint=PLATFORM_HINT,
+    soul=SOUL_MD,
 )
 PY

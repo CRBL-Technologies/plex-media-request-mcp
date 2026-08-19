@@ -4,6 +4,7 @@ import asyncio
 import json
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
@@ -11,6 +12,7 @@ import pytest
 
 from hermes_media import compat as compat_module
 from hermes_media import plugin
+from hermes_media.soul import SOUL_MD, install_soul
 from hermes_media.trusted import TrustError, actor_from_event, actor_scope
 from media_gateway.constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
 from media_gateway.tools import SHARED_SCHEMAS
@@ -454,7 +456,12 @@ def test_platform_hint_is_installed_from_code_without_any_config(
     assert not hasattr(plugin, "validate_platform_hint")
 
 
-def _fake_hermes(monkeypatch: pytest.MonkeyPatch, *, on_registry_get: Any) -> ModuleType:
+def _fake_hermes(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    on_registry_get: Any,
+    soul: str | None = SOUL_MD,
+) -> ModuleType:
     """Install a minimal stand-in for the pinned Hermes runtime.
 
     ``on_registry_get`` runs when the verifier resolves the Telegram platform,
@@ -474,7 +481,11 @@ def _fake_hermes(monkeypatch: pytest.MonkeyPatch, *, on_registry_get: Any) -> Mo
         _resolve_platform_hint=lambda _agent, _key, default: default,
     )
     module("agent", system_prompt=system_prompt)
-    module("agent.prompt_builder", PLATFORM_HINTS={"telegram": "BUILTIN"})
+    module(
+        "agent.prompt_builder",
+        PLATFORM_HINTS={"telegram": "BUILTIN"},
+        load_soul_md=lambda _context_length=None: soul,
+    )
     module(
         "agent.web_search_registry",
         get_active_search_provider=lambda: SimpleNamespace(name="ddgs", is_available=lambda: True),
@@ -536,6 +547,7 @@ def test_startup_gate_sees_a_patch_installed_while_it_runs(
         manager=manager,
         expected_tools=set(SHARED_TOOLS) | ADMIN_UPSTREAM_TOOLS,
         platform_hint=plugin.PLATFORM_HINT,
+        soul=SOUL_MD,
     )
 
 
@@ -550,7 +562,76 @@ def test_startup_gate_fails_closed_when_the_installer_never_ran(
             manager=manager,
             expected_tools=set(SHARED_TOOLS) | ADMIN_UPSTREAM_TOOLS,
             platform_hint=plugin.PLATFORM_HINT,
+            soul=SOUL_MD,
         )
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [None, "# Media Request Bot\n\nAn edit somebody made on the NAS."],
+    ids=["absent", "drifted"],
+)
+def test_startup_gate_fails_closed_when_the_host_identity_is_not_ours(
+    monkeypatch: pytest.MonkeyPatch, identity: str | None
+) -> None:
+    """The install is silent by design, so only the read-back can catch it.
+
+    SOUL.md reaches the prompt as a plain file in HERMES_HOME. Hermes logs a
+    debug line and carries on when it cannot read it, so a failed install, a
+    stale host copy and a truncating context limit all look like a bot that
+    simply behaves a little differently.
+    """
+
+    def install(system_prompt: ModuleType) -> None:
+        compat_module.install_platform_hint(platform="telegram", platform_hint=plugin.PLATFORM_HINT)
+
+    _fake_hermes(monkeypatch, on_registry_get=install, soul=identity)
+    manager = SimpleNamespace(_plugin_tool_names=set(SHARED_TOOLS) | ADMIN_UPSTREAM_TOOLS)
+
+    with pytest.raises(RuntimeError, match=r"SOUL\.md is not the identity"):
+        compat_module.verify_pinned_runtime(
+            manager=manager,
+            expected_tools=set(SHARED_TOOLS) | ADMIN_UPSTREAM_TOOLS,
+            platform_hint=plugin.PLATFORM_HINT,
+            soul=SOUL_MD,
+        )
+
+
+def test_the_identity_names_no_tool_and_no_procedure() -> None:
+    """SOUL.md is the tier that must survive the tools being renamed.
+
+    Everything it said about tools is what rotted: it described
+    repair_blocked_imports, which no longer exists, arguments that would now be
+    rejected, and a numbered-reply picker that was deleted. A tool explains
+    itself in its own schema; this file explains who is calling them.
+    """
+
+    for name in set(SHARED_SCHEMAS) | {"repair_blocked_imports"}:
+        assert name not in SOUL_MD, name
+    for procedure in ("requested_by_", "Which season", "numbered", "Use `"):
+        assert procedure not in SOUL_MD, procedure
+
+    # What it must still carry: the honesty rules no tool signature expresses.
+    assert "Never invent an ETA" in SOUL_MD
+    assert "0/10 episodes" in SOUL_MD
+    assert "filesystem paths" in SOUL_MD
+
+
+def test_installing_the_identity_is_idempotent_but_overwrites_a_hand_edit(tmp_path: Path) -> None:
+    home = tmp_path / "hermes-home"
+
+    assert install_soul(home) is True
+    assert (home / "SOUL.md").read_text(encoding="utf-8") == SOUL_MD
+    # Rewriting on every boot would churn the mtime of a bind-mounted file for
+    # no reason, so an unchanged identity is left alone.
+    assert install_soul(home) is False
+
+    (home / "SOUL.md").write_text("edited on the NAS\n", encoding="utf-8")
+    assert install_soul(home) is True
+    assert (home / "SOUL.md").read_text(encoding="utf-8") == SOUL_MD
+
+    # The agent runs as a different user than the init script that writes it.
+    assert (home / "SOUL.md").stat().st_mode & 0o044
 
 
 async def test_only_one_card_is_pushed_per_user_message(monkeypatch: pytest.MonkeyPatch) -> None:

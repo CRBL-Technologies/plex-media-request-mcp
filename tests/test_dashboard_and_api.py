@@ -677,18 +677,76 @@ def test_existing_missing_movie_starts_a_search(config: Config) -> None:
         assert ("radarr_search_movie_releases", {"id": 77}) in fake.calls
 
 
-def test_movie_is_available_only_after_exact_plex_match(config: Config) -> None:
+def test_a_held_movie_is_reported_available_without_touching_plex(config: Config) -> None:
+    """Radarr's library record answers this; walking Plex to ask costs up to 21 calls."""
+
+    app = create_app(config)
+    fake = FakeUpstream()
+    # Real Radarr omits hasFile from a lookup, even for a film on disk.
+    fake.responses["radarr_search_movie"] = {
+        "data": [{"id": 77, "tmdbId": 123, "title": "A Movie", "year": 2026}]
+    }
+    fake.responses["radarr_get_movie"] = {"data": {"id": 77, "hasFile": True}}
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={"actor": _actor(1001), "name": "request_movie", "arguments": {"tmdb_id": 123}},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["status"] == "available"
+    called = [name for name, _ in fake.calls]
+    assert "radarr_get_movie" in called
+    assert not [name for name in called if name.startswith("plex_")]
+    # Nothing was added or re-searched for a film already on disk.
+    assert "radarr_add_movie" not in called
+    assert "radarr_search_movie_releases" not in called
+
+
+def test_a_tracked_movie_without_a_file_starts_a_search(config: Config) -> None:
     app = create_app(config)
     fake = FakeUpstream()
     fake.responses["radarr_search_movie"] = {
-        "data": [{"id": 77, "tmdbId": 123, "title": "A Movie", "year": 2026, "hasFile": True}]
+        "data": [{"id": 77, "tmdbId": 123, "title": "A Movie", "year": 2026}]
     }
-    fake.responses["plex_search"] = {
-        "MediaContainer": {"Hub": [{"Metadata": [{"type": "movie", "ratingKey": "42"}]}]}
-    }
-    fake.responses["plex_get_metadata"] = {
-        "MediaContainer": {"Metadata": [{"Guid": [{"id": "tmdb://123"}]}]}
-    }
+    fake.responses["radarr_get_movie"] = {"data": {"id": 77, "hasFile": False}}
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = client.post(
+            "/api/tools/call",
+            headers=_headers(),
+            json={"actor": _actor(1001), "name": "request_movie", "arguments": {"tmdb_id": 123}},
+        )
+
+    assert response.json()["result"]["status"] == "search_started"
+    assert [args for name, args in fake.calls if name == "radarr_search_movie_releases"] == [
+        {"id": 77}
+    ]
+
+
+def test_a_bulk_request_never_walks_plex(config: Config) -> None:
+    """The reason this matters: a hundred titles used to mean ~2,100 Plex calls."""
+
+    app = create_app(config)
+    fake = FakeUpstream()
+    titles = {f"Film {n}": 900 + n for n in range(12)}
+
+    def lookup(arguments: dict[str, Any]) -> dict[str, Any]:
+        term = str(arguments.get("term", ""))
+        if term.startswith("tmdb:"):
+            wanted = int(term.split(":")[1])
+            for name, tmdb in titles.items():
+                if tmdb == wanted:
+                    return {"data": [{"tmdbId": tmdb, "title": name, "year": 2020}]}
+            return {"data": []}
+        if term not in titles:
+            return {"data": []}
+        return {"data": [{"tmdbId": titles[term], "title": term, "year": 2020}]}
+
+    fake.responses["radarr_search_movie"] = lookup
+    fake.responses["sonarr_search_series"] = {"data": []}
     with TestClient(app) as client:
         app.state.runtime.tools.upstream = fake
         response = client.post(
@@ -696,36 +754,13 @@ def test_movie_is_available_only_after_exact_plex_match(config: Config) -> None:
             headers=_headers(),
             json={
                 "actor": _actor(1001),
-                "name": "request_movie",
-                "arguments": {"tmdb_id": 123},
+                "name": "request_titles",
+                "arguments": {"titles": list(titles), "media_type": "movie"},
             },
         )
-        assert response.status_code == 200, response.text
-        assert response.json()["result"]["status"] == "available"
-        assert app.state.runtime.store.requests_for(1001)[0]["state"] == "available"
 
-
-def test_downloaded_movie_not_in_plex_remains_pending(config: Config) -> None:
-    app = create_app(config)
-    fake = FakeUpstream()
-    fake.responses["radarr_search_movie"] = {
-        "data": [{"id": 77, "tmdbId": 123, "title": "A Movie", "year": 2026, "hasFile": True}]
-    }
-    fake.responses["plex_search"] = {"MediaContainer": {"Hub": []}}
-    with TestClient(app) as client:
-        app.state.runtime.tools.upstream = fake
-        response = client.post(
-            "/api/tools/call",
-            headers=_headers(),
-            json={
-                "actor": _actor(1001),
-                "name": "request_movie",
-                "arguments": {"tmdb_id": 123},
-            },
-        )
-        assert response.status_code == 200, response.text
-        assert response.json()["result"]["status"] == "awaiting_plex"
-        assert app.state.runtime.store.requests_for(1001)[0]["state"] == "requested"
+    assert response.json()["result"]["counts"]["requested"] == 12
+    assert not [name for name, _ in fake.calls if name.startswith("plex_")]
 
 
 async def test_movie_intent_is_durable_before_mutation_and_reconciles(config: Config) -> None:

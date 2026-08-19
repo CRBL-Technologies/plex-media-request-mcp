@@ -165,11 +165,16 @@ async def send_single_result_card(
     return SimpleNamespace(success=True, message_id=str(message.message_id))
 
 
-def verify_pinned_runtime(*, manager: object, expected_tools: set[str], platform_hint: str) -> None:
+def verify_pinned_runtime(
+    *, manager: object, expected_tools: set[str], platform_hint: str, soul: str
+) -> None:
     """Fail closed when any private pinned-Hermes integration contract moves."""
 
     from agent import system_prompt  # type: ignore[import-not-found,unused-ignore]
-    from agent.prompt_builder import PLATFORM_HINTS  # type: ignore[import-not-found]
+    from agent.prompt_builder import (  # type: ignore[import-not-found]
+        PLATFORM_HINTS,
+        load_soul_md,
+    )
     from agent.web_search_registry import (  # type: ignore[import-not-found]
         get_active_extract_provider,
         get_active_search_provider,
@@ -226,3 +231,11 @@ def verify_pinned_runtime(*, manager: object, expected_tools: set[str], platform
     # Telegram formatting guidance would break MarkdownV2 output.
     if PLATFORM_HINTS["telegram"] not in effective:
         raise RuntimeError("CRBL guidance replaced rather than extended the Telegram hint")
+    # The identity slot is an ordinary file read from HERMES_HOME, so a skipped
+    # install, a host copy edited by hand and a context limit that truncates the
+    # file all present identically: the agent serves without the identity it was
+    # built with. Read it back through Hermes' own loader, which is the only
+    # reader whose answer matters.
+    identity = load_soul_md()
+    if identity is None or soul.strip() not in identity:
+        raise RuntimeError("CRBL SOUL.md is not the identity Hermes loads")

@@ -21,7 +21,13 @@ Before changing the pinned digest:
    passed to `register_platform`. `verify_pinned_runtime` fails closed when the
    wrapper is inactive or when the guidance no longer reaches a prompt resolved
    with no config override.
-4. Run Ruff, strict mypy, the complete pytest suite, both hash-locked dependency
+4. Verify the identity slot still loads from a file. `hermes_constants.get_hermes_home`
+   and `agent.prompt_builder.load_soul_md` are the two names the init script uses
+   to install `SOUL.md` and to read it back; `load_soul_md` returning `None` for
+   an unreadable file is why the read-back exists at all. If Hermes gains a
+   supported way to supply the identity in process, `install_soul` and its write
+   to a bind-mounted host directory can be dropped for it.
+5. Run Ruff, strict mypy, the complete pytest suite, both hash-locked dependency
    audits, Compose validation, and the gateway container migration smoke.
-5. Publish immutable images, deploy with a verified database backup, and check
+6. Publish immutable images, deploy with a verified database backup, and check
    that Plex and unrelated agent containers retain their IDs.

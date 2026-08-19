@@ -132,3 +132,7 @@ jobs:
             -e CRBL_MEDIA_GATEWAY_TOKEN_FILE=/run/media-secrets/gateway.key \
             -v "$smoke/gateway.key:/run/media-secrets/gateway.key:ro" \
             crbl-hermes-media:ci true
+          # The identity file must be installed into HERMES_HOME by the init
+          # script, byte for byte from the image. Nothing else reads SOUL.md
+          # early enough for a failed install to surface on its own.
+          diff "$GITHUB_WORKSPACE/src/hermes_media/SOUL.md" "$smoke/data/SOUL.md"

@@ -152,6 +152,19 @@ tool_loop_guardrails:
 
 This is a native Hermes setting, not a second CRBL configuration source.
 
+The agent's prompt comes from three tiers, each versioned in this repository. A
+tool says what it does in its own `description` and `inputSchema`, so choosing
+between tools needs no instruction elsewhere. `PLATFORM_HINT` carries what is
+true of the Telegram channel whichever tools exist. `src/hermes_media/SOUL.md`
+carries what is true whichever platform and tools exist: identity, tone, and the
+rules about never claiming availability, an ETA, or a request the tools did not
+confirm. It names no tool, and a test enforces that.
+
+The init script installs `SOUL.md` into `HERMES_HOME` on every start, so the
+host copy is a build artifact and an edit made there does not outlive a deploy.
+The startup gate then reads it back through Hermes' own loader and refuses to
+serve if the identity it was built with is not the one the agent will use.
+
 A Plex arrival is announced once the title has been quiet for
 `MEDIA_GATEWAY_NOTIFICATION_DELAY_SECONDS` (5 seconds), so a season import is
 one message rather than one per episode. A movie is its own batch with nothing

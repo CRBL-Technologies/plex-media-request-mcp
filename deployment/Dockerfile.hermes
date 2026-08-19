@@ -22,6 +22,7 @@ COPY deployment/hermes/plugin /opt/hermes/plugins/platforms/zzzz-crbl-media
 COPY --chmod=0755 deployment/hermes/03-crbl-media /etc/cont-init.d/03-crbl-media
 
 RUN /opt/hermes/.venv/bin/python -c 'import httpx; import hermes_media.plugin' \
+    && /opt/hermes/.venv/bin/python -c 'from hermes_media.soul import SOUL_MD; assert SOUL_MD.strip()' \
     && test -f /opt/hermes/plugins/platforms/zzzz-crbl-media/plugin.yaml
 
 LABEL org.opencontainers.image.source="https://github.com/CRBL-Technologies/plex-media-request-mcp" \

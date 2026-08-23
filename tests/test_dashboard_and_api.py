@@ -1768,6 +1768,359 @@ async def test_notifications_group_bulk_season_and_reach_admin_and_requester(
         assert len(sent) == 2
 
 
+async def test_single_episode_notifies_all_matching_requesters_not_unrelated_admin(
+    config: Config,
+) -> None:
+    app = create_app(config)
+    sent: list[int] = []
+    with TestClient(app):
+        runtime = app.state.runtime
+        runtime.notifications.upstream = _idle_queue()
+        runtime.policy.set_allowed(2002, allowed=True)
+        runtime.policy.set_allowed(3003, allowed=True)
+        for user_id, season in ((1001, 1), (2002, 1), (3003, 2)):
+            runtime.store.record_request(
+                media_type="series",
+                external_id=411959,
+                seasons=(season,),
+                title="3 Body Problem",
+                year=2024,
+                actor=Actor(user_id=user_id, chat_id=user_id),
+            )
+        runtime.store.add_media_event(
+            event_key="episode:single",
+            media_type="series",
+            external_id=411959,
+            rating_key="single",
+            title="Episode 3",
+            show_title="3 Body Problem",
+            season_number=1,
+            episode_number=3,
+            plex_url="https://watch.plex.tv/show/3-body-problem/season/1/episode/3",
+            observed_at=int(time.time()) - 10,
+        )
+
+        async def capture(chat_id: int, _text: str, _url: str) -> None:
+            sent.append(chat_id)
+
+        runtime.notifications._send = capture  # type: ignore[method-assign]
+        await runtime.notifications.flush()
+
+    assert set(sent) == {1001, 2002}
+    assert 9001 not in sent
+    assert 3003 not in sent
+
+
+async def test_single_episode_notifies_admin_who_requested_that_season(config: Config) -> None:
+    app = create_app(config)
+    sent: list[int] = []
+    with TestClient(app):
+        runtime = app.state.runtime
+        runtime.notifications.upstream = _idle_queue()
+        for user_id in (1001, 9001):
+            runtime.store.record_request(
+                media_type="series",
+                external_id=411959,
+                seasons=(1,),
+                title="3 Body Problem",
+                year=2024,
+                actor=Actor(user_id=user_id, chat_id=user_id),
+            )
+        runtime.store.add_media_event(
+            event_key="episode:admin-request",
+            media_type="series",
+            external_id=411959,
+            rating_key="admin-request",
+            title="Episode 4",
+            show_title="3 Body Problem",
+            season_number=1,
+            episode_number=4,
+            plex_url="https://watch.plex.tv/show/3-body-problem/season/1/episode/4",
+            observed_at=int(time.time()) - 10,
+        )
+
+        async def capture(chat_id: int, _text: str, _url: str) -> None:
+            sent.append(chat_id)
+
+        runtime.notifications._send = capture  # type: ignore[method-assign]
+        await runtime.notifications.flush()
+
+    assert set(sent) == {1001, 9001}
+
+
+async def test_same_chat_requested_by_multiple_users_receives_one_episode(config: Config) -> None:
+    app = create_app(config)
+    sent: list[int] = []
+    with TestClient(app):
+        runtime = app.state.runtime
+        runtime.notifications.upstream = _idle_queue()
+        runtime.policy.set_allowed(2002, allowed=True)
+        for user_id in (1001, 2002):
+            runtime.store.record_request(
+                media_type="series",
+                external_id=411959,
+                seasons=(1,),
+                title="3 Body Problem",
+                year=2024,
+                actor=Actor(user_id=user_id, chat_id=-10001),
+            )
+        runtime.store.add_media_event(
+            event_key="episode:shared-chat",
+            media_type="series",
+            external_id=411959,
+            rating_key="shared-chat",
+            title="Episode 5",
+            show_title="3 Body Problem",
+            season_number=1,
+            episode_number=5,
+            plex_url="https://watch.plex.tv/show/3-body-problem/season/1/episode/5",
+            observed_at=int(time.time()) - 10,
+        )
+
+        async def capture(chat_id: int, _text: str, _url: str) -> None:
+            sent.append(chat_id)
+
+        runtime.notifications._send = capture  # type: ignore[method-assign]
+        await runtime.notifications.flush()
+
+    assert sent == [-10001]
+
+
+async def test_revoked_series_requester_is_excluded_without_hiding_other_requesters(
+    config: Config,
+) -> None:
+    app = create_app(config)
+    sent: list[int] = []
+    with TestClient(app):
+        runtime = app.state.runtime
+        runtime.notifications.upstream = _idle_queue()
+        runtime.policy.set_allowed(2002, allowed=True)
+        for user_id in (1001, 2002):
+            runtime.store.record_request(
+                media_type="series",
+                external_id=411959,
+                seasons=(1,),
+                title="3 Body Problem",
+                year=2024,
+                actor=Actor(user_id=user_id, chat_id=user_id),
+            )
+        runtime.policy.set_allowed(2002, allowed=False)
+        runtime.store.add_media_event(
+            event_key="episode:revoked-requester",
+            media_type="series",
+            external_id=411959,
+            rating_key="revoked-requester",
+            title="Episode 7",
+            show_title="3 Body Problem",
+            season_number=1,
+            episode_number=7,
+            plex_url="https://watch.plex.tv/show/3-body-problem/season/1/episode/7",
+            observed_at=int(time.time()) - 10,
+        )
+
+        async def capture(chat_id: int, _text: str, _url: str) -> None:
+            sent.append(chat_id)
+
+        runtime.notifications._send = capture  # type: ignore[method-assign]
+        await runtime.notifications.flush()
+
+    assert sent == [1001]
+
+
+async def test_unrequested_single_episode_is_ignored_once(config: Config) -> None:
+    app = create_app(config)
+    sent: list[int] = []
+    with TestClient(app):
+        runtime = app.state.runtime
+        runtime.notifications.upstream = _idle_queue()
+        runtime.store.add_media_event(
+            event_key="episode:unrequested",
+            media_type="series",
+            external_id=411959,
+            rating_key="unrequested",
+            title="Episode 8",
+            show_title="3 Body Problem",
+            season_number=1,
+            episode_number=8,
+            plex_url="https://watch.plex.tv/show/3-body-problem/season/1/episode/8",
+            observed_at=int(time.time()) - 10,
+        )
+
+        async def capture(chat_id: int, _text: str, _url: str) -> None:
+            sent.append(chat_id)
+
+        runtime.notifications._send = capture  # type: ignore[method-assign]
+        await runtime.notifications.flush()
+        await runtime.notifications.flush()
+
+        assert runtime.store.pending_media_events(int(time.time()) + 10) == []
+
+    assert sent == []
+
+
+async def test_multiple_movie_requesters_and_admin_are_all_notified(config: Config) -> None:
+    app = create_app(config)
+    sent: list[int] = []
+    with TestClient(app):
+        runtime = app.state.runtime
+        runtime.policy.set_allowed(2002, allowed=True)
+        for user_id in (1001, 2002):
+            runtime.store.record_request(
+                media_type="movie",
+                external_id=999,
+                seasons=(),
+                title="Shared Movie",
+                year=2026,
+                actor=Actor(user_id=user_id, chat_id=user_id),
+            )
+        runtime.store.add_media_event(
+            event_key="movie:shared",
+            media_type="movie",
+            external_id=999,
+            rating_key="shared",
+            title="Shared Movie",
+            show_title=None,
+            season_number=None,
+            episode_number=None,
+            plex_url="https://watch.plex.tv/movie/shared-movie",
+            observed_at=int(time.time()) - 10,
+        )
+
+        async def capture(chat_id: int, _text: str, _url: str) -> None:
+            sent.append(chat_id)
+
+        runtime.notifications._send = capture  # type: ignore[method-assign]
+        await runtime.notifications.flush()
+
+        assert runtime.store.requests_for(1001)[0]["state"] == "available"
+        assert runtime.store.requests_for(2002)[0]["state"] == "available"
+
+    assert set(sent) == {1001, 2002, 9001}
+
+
+async def test_partial_requester_delivery_retries_only_undelivered_chats(config: Config) -> None:
+    app = create_app(config)
+    attempts: dict[int, int] = {}
+    successes: list[int] = []
+    with TestClient(app):
+        runtime = app.state.runtime
+        runtime.notifications.upstream = _idle_queue()
+        runtime.policy.set_allowed(2002, allowed=True)
+        for user_id in (1001, 2002):
+            runtime.store.record_request(
+                media_type="series",
+                external_id=411959,
+                seasons=(1,),
+                title="3 Body Problem",
+                year=2024,
+                actor=Actor(user_id=user_id, chat_id=user_id),
+            )
+        runtime.store.add_media_event(
+            event_key="episode:retry-requesters",
+            media_type="series",
+            external_id=411959,
+            rating_key="retry-requesters",
+            title="Episode 6",
+            show_title="3 Body Problem",
+            season_number=1,
+            episode_number=6,
+            plex_url="https://watch.plex.tv/show/3-body-problem/season/1/episode/6",
+            observed_at=int(time.time()) - 10,
+        )
+
+        async def flaky(chat_id: int, _text: str, _url: str) -> None:
+            attempts[chat_id] = attempts.get(chat_id, 0) + 1
+            if chat_id == 2002 and attempts[chat_id] == 1:
+                raise RuntimeError("temporary Telegram failure")
+            successes.append(chat_id)
+
+        runtime.notifications._send = flaky  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="temporary Telegram failure"):
+            await runtime.notifications.flush()
+        await runtime.notifications.flush()
+        await runtime.notifications.flush()
+
+        assert runtime.store.pending_media_events(int(time.time()) + 10) == []
+
+    assert successes.count(1001) == 1
+    assert successes.count(2002) == 1
+    assert attempts[2002] == 2
+
+
+async def test_show_season_and_episodes_coalesce_into_one_batch(config: Config) -> None:
+    app = create_app(config)
+    sent: list[tuple[int, str]] = []
+    with TestClient(app):
+        runtime = app.state.runtime
+        runtime.notifications.upstream = _idle_queue()
+        runtime.store.record_request(
+            media_type="series",
+            external_id=411959,
+            seasons=(1,),
+            title="3 Body Problem",
+            year=2024,
+            actor=Actor(user_id=1001, chat_id=1001),
+        )
+        observed = int(time.time()) - 10
+        for values in (
+            {
+                "event_key": "show:10537",
+                "external_id": None,
+                "rating_key": "10537",
+                "title": "3 Body Problem",
+                "season_number": None,
+                "episode_number": None,
+                "parent_rating_key": None,
+            },
+            {
+                "event_key": "season:10538",
+                "external_id": 411959,
+                "rating_key": "10538",
+                "title": "Season 1",
+                "season_number": 1,
+                "episode_number": None,
+                "parent_rating_key": "10537",
+            },
+            {
+                "event_key": "episode:10539",
+                "external_id": 411959,
+                "rating_key": "10539",
+                "title": "Episode 1",
+                "season_number": 1,
+                "episode_number": 1,
+                "parent_rating_key": "10537",
+            },
+            {
+                "event_key": "episode:10540",
+                "external_id": 411959,
+                "rating_key": "10540",
+                "title": "Episode 2",
+                "season_number": 1,
+                "episode_number": 2,
+                "parent_rating_key": "10537",
+            },
+        ):
+            runtime.store.add_media_event(
+                media_type="series",
+                show_title="3 Body Problem",
+                plex_url="https://watch.plex.tv/show/3-body-problem/season/1",
+                observed_at=observed,
+                **values,
+            )
+
+        async def capture(chat_id: int, text: str, _url: str) -> None:
+            sent.append((chat_id, text))
+
+        runtime.notifications._send = capture  # type: ignore[method-assign]
+        await runtime.notifications.flush()
+
+        assert runtime.store.pending_media_events(int(time.time()) + 10) == []
+
+    assert {chat_id for chat_id, _text in sent} == {1001, 9001}
+    assert len(sent) == 2
+    assert all("Season 1 (2 episodes)" in text for _chat_id, text in sent)
+
+
 async def test_automatic_plex_addition_notifies_admin_without_request(config: Config) -> None:
     app = create_app(config)
     sent: list[int] = []
@@ -1890,9 +2243,9 @@ async def test_episode_enrichment_retries_before_requester_notification(config: 
 
         runtime.notifications._send = capture  # type: ignore[method-assign]
         await runtime.notifications.flush()
-        assert sent == [9001]
+        assert sent == []
         await runtime.notifications.flush()
-        assert sent == [9001, 1001]
+        assert sent == [1001]
 
 
 async def test_new_show_webhook_reaches_admin_and_requester(config: Config) -> None:
@@ -2113,6 +2466,17 @@ def _quiet_series_event(runtime: Any, *, title: str = "Severance", tvdb: int = 3
     )
 
 
+def _request_quiet_series(runtime: Any, *, user_id: int = 9001, tvdb: int = 371980) -> None:
+    runtime.store.record_request(
+        media_type="series",
+        external_id=tvdb,
+        seasons=(1,),
+        title="Severance",
+        year=2022,
+        actor=Actor(user_id=user_id, chat_id=user_id),
+    )
+
+
 async def test_a_quiet_season_waits_while_sonarr_is_still_fetching(config: Config) -> None:
     """An empty window is not proof the season finished arriving."""
 
@@ -2134,6 +2498,7 @@ async def test_a_quiet_season_waits_while_sonarr_is_still_fetching(config: Confi
         runtime = app.state.runtime
         runtime.upstream = fake
         runtime.notifications.upstream = fake
+        _request_quiet_series(runtime)
 
         async def send(chat_id: int, text: str, plex_url: str) -> None:
             sent.append(plex_url)
@@ -2156,6 +2521,7 @@ async def test_a_quiet_season_is_sent_once_the_queue_is_clear(config: Config) ->
     with TestClient(app):
         runtime = app.state.runtime
         runtime.notifications.upstream = fake
+        _request_quiet_series(runtime)
 
         async def send(chat_id: int, text: str, plex_url: str) -> None:
             sent.append(plex_url)
@@ -2177,6 +2543,7 @@ async def test_a_different_show_in_the_queue_does_not_hold_this_one(config: Conf
     with TestClient(app):
         runtime = app.state.runtime
         runtime.notifications.upstream = fake
+        _request_quiet_series(runtime)
 
         async def send(chat_id: int, text: str, plex_url: str) -> None:
             sent.append(plex_url)
@@ -2203,6 +2570,7 @@ async def test_an_unreachable_sonarr_queue_still_delivers(config: Config) -> Non
     with TestClient(app):
         runtime = app.state.runtime
         runtime.notifications.upstream = BrokenQueue()
+        _request_quiet_series(runtime)
 
         async def send(chat_id: int, text: str, plex_url: str) -> None:
             sent.append(plex_url)
@@ -2255,6 +2623,7 @@ async def test_a_fresh_episode_still_waits_for_its_season(config: Config) -> Non
     sent: list[str] = []
     with TestClient(app):
         runtime = app.state.runtime
+        _request_quiet_series(runtime)
 
         async def send(chat_id: int, text: str, plex_url: str) -> None:
             sent.append(plex_url)

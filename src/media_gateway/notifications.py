@@ -91,6 +91,106 @@ def _guide_id(value: object, provider: str) -> int | None:
     return _positive(value.removeprefix(prefix).split("?", 1)[0])
 
 
+def _event_kind(event: dict[str, Any]) -> str:
+    return str(event.get("event_key") or "").partition(":")[0]
+
+
+def _series_identity(
+    event: dict[str, Any], rating_to_external: dict[str, int]
+) -> tuple[str, object]:
+    """Name one show consistently across its show, season and episode events."""
+
+    external_id = event.get("external_id")
+    parent_key = event.get("parent_rating_key")
+    rating_key = event.get("rating_key")
+    if isinstance(external_id, bool) or not isinstance(external_id, int):
+        if isinstance(parent_key, str):
+            external_id = rating_to_external.get(parent_key)
+        if (isinstance(external_id, bool) or not isinstance(external_id, int)) and isinstance(
+            rating_key, str
+        ):
+            external_id = rating_to_external.get(rating_key)
+    if isinstance(external_id, int) and not isinstance(external_id, bool):
+        return "external", external_id
+    if isinstance(parent_key, str) and parent_key:
+        return "rating", parent_key
+    if _event_kind(event) == "show" and isinstance(rating_key, str) and rating_key:
+        return "rating", rating_key
+    title = str(event.get("show_title") or event.get("title") or event.get("event_key") or "")
+    return "title", " ".join(title.casefold().split())
+
+
+def _group_pending_events(
+    events: list[dict[str, Any]],
+) -> dict[tuple[object, ...], list[dict[str, Any]]]:
+    """Coalesce Plex's show, season and episode events into season batches.
+
+    A newly discovered series normally emits a show event followed by season
+    and episode events. Grouping the show before its season is known sends a
+    redundant "new series" message beside the season notification. Use the
+    parent rating key and provider ID to identify the show, then attach a
+    seasonless show event to the first explicit season in the same pending
+    window. A standalone show event remains its own notification.
+    """
+
+    rating_to_external: dict[str, int] = {}
+    for event in events:
+        if event.get("media_type") != "series":
+            continue
+        external_id = event.get("external_id")
+        if isinstance(external_id, bool) or not isinstance(external_id, int):
+            continue
+        parent_key = event.get("parent_rating_key")
+        if isinstance(parent_key, str) and parent_key:
+            rating_to_external[parent_key] = external_id
+        rating_key = event.get("rating_key")
+        if _event_kind(event) == "show" and isinstance(rating_key, str) and rating_key:
+            rating_to_external[rating_key] = external_id
+
+    seasons: dict[tuple[str, object], set[int]] = defaultdict(set)
+    for event in events:
+        if event.get("media_type") != "series":
+            continue
+        season = event.get("season_number")
+        if isinstance(season, int) and not isinstance(season, bool):
+            seasons[_series_identity(event, rating_to_external)].add(season)
+
+    grouped: dict[tuple[object, ...], list[dict[str, Any]]] = defaultdict(list)
+    for source in events:
+        event = dict(source)
+        if event.get("media_type") != "series":
+            grouped["movie", event["event_key"]].append(event)
+            continue
+        identity = _series_identity(event, rating_to_external)
+        if identity[0] == "external" and (
+            isinstance(event.get("external_id"), bool)
+            or not isinstance(event.get("external_id"), int)
+        ):
+            # A sibling season/episode often carries the provider ID that the
+            # top-level show webhook omitted. Share it inside this delivery
+            # batch so requester matching does not depend on which event is
+            # ordered first.
+            event["external_id"] = identity[1]
+        if event.get("season_number") is None and seasons[identity]:
+            # With several seasons, attaching the one show event to the first
+            # avoids a redundant general notification while keeping one batch
+            # per season.
+            ordinary = [season for season in seasons[identity] if season > 0]
+            event["season_number"] = min(ordinary or seasons[identity])
+        grouped["series", identity, event.get("season_number")].append(event)
+    return grouped
+
+
+def _is_single_episode(batch: list[dict[str, Any]]) -> bool:
+    return (
+        len(batch) == 1
+        and batch[0].get("media_type") == "series"
+        and _event_kind(batch[0]) == "episode"
+        and isinstance(batch[0].get("episode_number"), int)
+        and not isinstance(batch[0].get("episode_number"), bool)
+    )
+
+
 class Notifications:
     def __init__(self, config: Config, store: Store, policy: Policy, upstream: Upstream):
         self.config = config
@@ -289,18 +389,7 @@ class Notifications:
         # entire group has been quiet for the configured delay. Filtering in
         # SQL first would send early episodes while later ones were arriving.
         events = self.store.pending_media_events(now, limit=500)
-        grouped: dict[tuple[object, ...], list[dict[str, Any]]] = defaultdict(list)
-        for event in events:
-            key: tuple[object, ...]
-            if event["media_type"] == "series":
-                key = (
-                    "series",
-                    event["external_id"] or event["parent_rating_key"] or event["show_title"],
-                    event["season_number"],
-                )
-            else:
-                key = ("movie", event["event_key"])
-            grouped[key].append(event)
+        grouped = _group_pending_events(events)
         arriving: set[tuple[str, object]] | None = None
         asked_sonarr = False
         for key, batch in grouped.items():
@@ -388,7 +477,6 @@ class Notifications:
         first = batch[0]
         keys = [str(item["event_key"]) for item in batch]
         policy = self.policy.snapshot()
-        recipients = set(policy.admins)
         requester_destinations = self.store.request_destinations(
             media_type=str(first["media_type"]),
             external_id=first["external_id"],
@@ -397,10 +485,21 @@ class Notifications:
         # A removed user keeps historical request state for audit, but must no
         # longer receive messages. Filter by trusted requester identity while
         # preserving the original private or group chat destination.
-        recipients |= {
+        recipients = {
             chat_id for user_id, chat_id in requester_destinations if user_id in policy.allowed
         }
+        # Administrators receive every movie and every show/season batch. A
+        # lone weekly episode is requester-only; an administrator who asked
+        # for that season is already present through requester_destinations.
+        if not _is_single_episode(batch):
+            recipients.update(policy.admins)
         if not recipients:
+            # A known lone episode nobody requested is intentionally ignored,
+            # not retried every five seconds forever. An unresolved event stays
+            # pending because a later metadata lookup may still find its
+            # requester.
+            if first["external_id"] is not None:
+                self.store.mark_events_notified(keys)
             return
         for chat_id in recipients:
             pending = [
@@ -432,9 +531,12 @@ class Notifications:
         if not episodes:
             label = _season_label(season) or "New series"
             return f"📺 <b>Available in Plex</b>\n{show} · {label}"
-        if len(batch) > 1:
+        if len(episodes) > 1:
             label = _season_label(season) or "New episodes"
             return f"📺 <b>Available in Plex</b>\n{show} · {label} ({len(episodes)} episodes)"
+        if len(batch) > 1:
+            label = _season_label(season) or "New series"
+            return f"📺 <b>Available in Plex</b>\n{show} · {label}"
         episode = first["episode_number"]
         marker = ""
         if season is not None and episode is not None:

@@ -87,12 +87,15 @@ all other provider operations go through upstream MCP.
 ## Notifications
 
 Plex `library.new` webhooks are the availability authority. Movie, show,
-season, and episode payloads are supported. Every accepted addition notifies
-each configured administrator. A bot requester is notified only when the
-matching movie or requested season appears in Plex. A season batch waits until
-the latest event has been quiet for the configured delay, so a bulk import
-sends one message while weekly episodes remain individual messages. Each
-message contains an `Open in Plex` button.
+season, and episode payloads are supported. Every movie and grouped show or
+season arrival notifies each configured administrator. A lone weekly episode
+is requester-only, so an administrator receives it only after requesting that
+season through the bot. Every currently allowed requester of the matching movie
+or season is notified at the chat where they made the request. Plex's related
+show, season and episode events are coalesced before delivery; a season batch
+waits until the latest event has been quiet for the configured delay, so a bulk
+import sends one message while weekly episodes remain individual messages.
+Each message contains an `Open in Plex` button.
 When Plex supplies its catalog slug, that button uses a `watch.plex.tv` universal
 link so supported mobile clients open the Plex app; the browser remains the
 fallback. Missing slugs are resolved against Plex's fixed metadata endpoint

@@ -140,7 +140,7 @@ async def send_single_result_card(
     caption: str,
     candidate: Mapping[str, Any],
 ) -> object:
-    """Send a single search result with an optional action button."""
+    """Send one resolved media result with an optional Plex button."""
 
     bot = getattr(adapter, "_bot", None)
     if bot is None:

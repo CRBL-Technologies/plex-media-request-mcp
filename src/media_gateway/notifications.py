@@ -9,6 +9,7 @@ import time
 from collections import defaultdict
 from contextlib import suppress
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -65,6 +66,41 @@ def _queue_rows(value: object) -> list[dict[str, Any]]:
             if isinstance(records, list):
                 return [item for item in records if isinstance(item, dict)]
     return []
+
+
+def _provider_rows(value: object) -> list[dict[str, Any]]:
+    """Records returned by the upstream Radarr and Sonarr lookup tools."""
+
+    if isinstance(value, dict):
+        value = value.get("data")
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _public_poster_url(item: dict[str, Any]) -> str | None:
+    """Select a provider-hosted HTTPS poster that Telegram can retrieve."""
+
+    candidates: list[object] = [item.get("remotePoster")]
+    images = item.get("images")
+    if isinstance(images, list):
+        candidates.extend(
+            image.get("remoteUrl")
+            for image in images
+            if isinstance(image, dict) and image.get("coverType") == "poster"
+        )
+    for candidate in candidates:
+        if not isinstance(candidate, str) or len(candidate) > 2048:
+            continue
+        parsed = urlsplit(candidate)
+        if (
+            parsed.scheme == "https"
+            and parsed.hostname
+            and parsed.username is None
+            and parsed.password is None
+        ):
+            return candidate
+    return None
 
 
 def _external_id(metadata: dict[str, Any], provider: str) -> int | None:
@@ -412,6 +448,7 @@ class Notifications:
     async def _enrich(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         ready: list[dict[str, Any]] = []
         resolved_slugs: dict[tuple[str, int], str | None] = {}
+        resolved_posters: dict[tuple[str, int], str | None] = {}
         for event in events:
             if event.get("external_id") is None:
                 is_series = event.get("media_type") == "series"
@@ -470,8 +507,39 @@ class Notifications:
                 if event.get("plex_url") != plex_url:
                     event["plex_url"] = plex_url
                     self.store.set_media_plex_url(str(event["event_key"]), plex_url)
+            if isinstance(external_id, int) and media_type in {"movie", "series"}:
+                poster_key = media_type, external_id
+                if poster_key not in resolved_posters:
+                    try:
+                        resolved_posters[poster_key] = await self._poster_url(
+                            media_type=media_type, external_id=external_id
+                        )
+                    except Exception:
+                        # Artwork is optional. A provider outage must not hold
+                        # back an otherwise valid availability notification.
+                        LOGGER.warning("poster lookup failed for a Plex notification")
+                        resolved_posters[poster_key] = None
+                poster_url = resolved_posters[poster_key]
+                if poster_url is not None:
+                    event["poster_url"] = poster_url
             ready.append(event)
         return ready
+
+    async def _poster_url(self, *, media_type: str, external_id: int) -> str | None:
+        if media_type == "movie":
+            response = await self.upstream.call(
+                "radarr_search_movie", {"term": f"tmdb:{external_id}", "limit": 10}
+            )
+            id_fields = ("tmdbId", "tmdb_id")
+        else:
+            response = await self.upstream.call(
+                "sonarr_search_series", {"term": f"tvdb:{external_id}", "limit": 10}
+            )
+            id_fields = ("tvdbId", "tvdb_id")
+        for item in _provider_rows(response):
+            if any(_positive(item.get(field)) == external_id for field in id_fields):
+                return _public_poster_url(item)
+        return None
 
     async def _deliver_batch(self, batch: list[dict[str, Any]]) -> None:
         first = batch[0]
@@ -509,7 +577,13 @@ class Notifications:
             ]
             if not pending:
                 continue
-            await self._send(chat_id, self._message(pending), str(pending[0]["plex_url"]))
+            poster_url = pending[0].get("poster_url")
+            message = self._message(pending)
+            plex_url = str(pending[0]["plex_url"])
+            if isinstance(poster_url, str):
+                await self._send(chat_id, message, plex_url, poster_url=poster_url)
+            else:
+                await self._send(chat_id, message, plex_url)
             self.store.mark_delivered([str(item["event_key"]) for item in pending], chat_id)
         # Keep an unresolved episode durable after notifying administrators.
         # Once Plex exposes its show TVDB ID, the requester can still be found
@@ -544,20 +618,41 @@ class Notifications:
         title = html.escape(str(first["title"]))
         return f"📺 <b>Available in Plex</b>\n{show}{marker} · {title}"
 
-    async def _send(self, chat_id: int, text: str, plex_url: str) -> None:
+    async def _send(
+        self, chat_id: int, text: str, plex_url: str, *, poster_url: str | None = None
+    ) -> None:
         token = self._telegram_token()
-        body = {
+        markup = {"inline_keyboard": [[{"text": "Open in Plex", "url": plex_url}]]}
+        message_body = {
             "chat_id": chat_id,
             "text": text,
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
-            "reply_markup": {"inline_keyboard": [[{"text": "Open in Plex", "url": plex_url}]]},
+            "reply_markup": markup,
+        }
+        photo_body = {
+            "chat_id": chat_id,
+            "photo": poster_url,
+            "caption": text,
+            "parse_mode": "HTML",
+            "reply_markup": markup,
         }
         try:
             async with httpx.AsyncClient(timeout=15) as client:
-                response = await client.post(
-                    f"https://api.telegram.org/bot{token}/sendMessage", json=body
-                )
+                if poster_url is not None:
+                    response = await client.post(
+                        f"https://api.telegram.org/bot{token}/sendPhoto", json=photo_body
+                    )
+                    if response.status_code == 400:
+                        # A stale provider image must not prevent delivery.
+                        response = await client.post(
+                            f"https://api.telegram.org/bot{token}/sendMessage",
+                            json=message_body,
+                        )
+                else:
+                    response = await client.post(
+                        f"https://api.telegram.org/bot{token}/sendMessage", json=message_body
+                    )
         except httpx.HTTPError:
             # Do not let a network exception copy the token-bearing request
             # URL into the worker log.

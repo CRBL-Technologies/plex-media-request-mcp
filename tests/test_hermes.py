@@ -214,6 +214,72 @@ async def test_recommendations_return_conversational_status_without_picker(
     assert gateway.calls == [(1001, "recommend_media", arguments)]
 
 
+async def test_one_resolved_recommendation_sends_its_poster_and_plex_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RecommendationGateway(FakeGateway):
+        async def call(self, actor: Actor, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            self.calls.append((actor.user_id, name, arguments))
+            return {
+                "query": "recommendations",
+                "presentation": "recommendations",
+                "results": [
+                    {
+                        "media_type": "movie",
+                        "tmdb_id": 329865,
+                        "title": "Arrival",
+                        "year": 2016,
+                        "overview": "A linguist tries to understand visitors from another world.",
+                        "poster_url": "https://image.tmdb.org/arrival.jpg",
+                        "plex_url": "https://watch.plex.tv/movie/arrival",
+                    }
+                ],
+            }
+
+    class Button:
+        def __init__(self, text: str, *, callback_data: str = "", url: str = "") -> None:
+            self.text = text
+            self.callback_data = callback_data
+            self.url = url
+
+    class Markup:
+        def __init__(self, rows: list[list[Button]]) -> None:
+            self.inline_keyboard = rows
+
+    class PresentationAdapter:
+        def __init__(self) -> None:
+            self._media_delivery_loop = asyncio.get_running_loop()
+            self._bot = SimpleNamespace(send_photo=self.send_photo)
+            self.photos: list[dict[str, Any]] = []
+
+        async def send_photo(self, **values: Any) -> SimpleNamespace:
+            self.photos.append(values)
+            return SimpleNamespace(message_id=42)
+
+    telegram = ModuleType("telegram")
+    telegram.InlineKeyboardButton = Button  # type: ignore[attr-defined]
+    telegram.InlineKeyboardMarkup = Markup  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "telegram", telegram)
+    gateway = RecommendationGateway()
+    adapter = PresentationAdapter()
+    monkeypatch.setattr(plugin, "_client", gateway)
+    monkeypatch.setattr(plugin, "_active_adapter", adapter)
+    actor = Actor(user_id=1001, chat_id=1001)
+    arguments = {"titles": ["Arrival (2016)"], "media_type": "movie"}
+    with actor_scope(actor, Role.USER):
+        raw = await plugin._handler("recommend_media")(arguments)
+
+    result = json.loads(raw)
+    assert result["telegram_presentation"]["poster_cards_delivered"] is True
+    assert "why it fits" in result["telegram_presentation"]["instruction"]
+    assert len(adapter.photos) == 1
+    card = adapter.photos[0]
+    assert card["photo"] == "https://image.tmdb.org/arrival.jpg"
+    button = card["reply_markup"].inline_keyboard[0][0]
+    assert button.text == "▶ Open in Plex"
+    assert button.url == "https://watch.plex.tv/movie/arrival"
+
+
 def test_a_card_offers_a_plex_link_or_no_button(monkeypatch: pytest.MonkeyPatch) -> None:
     """A card can only ever link to Plex. It never carries an action."""
 
@@ -373,6 +439,7 @@ def test_tool_contracts_describe_capability_not_procedure() -> None:
 
     batch = SHARED_SCHEMAS["recommend_media"]
     assert "unmatched_titles" in batch["description"]
+    assert "posted to the chat as a poster" in batch["description"]
     # The four-title rule was the picker's tab count, not a real constraint.
     assert batch["inputSchema"]["properties"]["titles"]["minItems"] == 1
     assert batch["inputSchema"]["properties"]["titles"]["maxItems"] == 20

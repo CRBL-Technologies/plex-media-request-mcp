@@ -250,11 +250,11 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "recommend_media": {
         "description": (
-            "Resolve several titles at once, when you already know which titles you want to "
+            "Resolve one or several titles, when you already know which titles you want to "
             "check. Each is matched exactly -- include a year as 'Title (2016)' when known -- "
             "and returned with the same fields as search_media. Titles with no exact match come "
-            "back in unmatched_titles rather than being guessed at. Nothing is posted to the "
-            "chat, so the reply is yours to write."
+            "back in unmatched_titles rather than being guessed at. One matched title is posted "
+            "to the chat as a poster; several titles are left for a conversational reply."
         ),
         "inputSchema": {
             "type": "object",

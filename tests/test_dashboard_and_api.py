@@ -2403,6 +2403,120 @@ async def test_notification_enrichment_upgrades_to_the_app_link(
         assert runtime.store.pending_media_events(int(time.time()) + 10)[0]["plex_url"] == expected
 
 
+async def test_notification_enrichment_adds_one_public_poster_per_title(config: Config) -> None:
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["sonarr_search_series"] = {
+        "data": [
+            {
+                "tvdbId": 81797,
+                "title": "One Piece",
+                "remotePoster": "https://artworks.thetvdb.com/one-piece.jpg",
+            }
+        ]
+    }
+    with TestClient(app):
+        runtime = app.state.runtime
+        runtime.notifications.upstream = fake
+        for episode in (19, 20):
+            runtime.store.add_media_event(
+                event_key=f"episode:{episode}",
+                media_type="series",
+                external_id=81797,
+                rating_key=str(episode),
+                title=f"Episode {episode}",
+                show_title="One Piece",
+                season_number=2,
+                episode_number=episode,
+                plex_url=f"https://watch.plex.tv/show/one-piece/season/2/episode/{episode}",
+                observed_at=int(time.time()) - 10,
+            )
+
+        events = runtime.store.pending_media_events(int(time.time()) + 10)
+        enriched = await runtime.notifications._enrich(events)
+
+    assert {event["poster_url"] for event in enriched} == {
+        "https://artworks.thetvdb.com/one-piece.jpg"
+    }
+    assert fake.calls.count(("sonarr_search_series", {"term": "tvdb:81797", "limit": 10})) == 1
+
+
+async def test_availability_notification_sends_photo_caption_and_plex_button(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = create_app(config)
+    sent: list[tuple[str, dict[str, Any]]] = []
+
+    class Response:
+        status_code = 200
+        is_error = False
+
+    class Client:
+        async def __aenter__(self) -> Client:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def post(self, url: str, **values: Any) -> Response:
+            sent.append((url.rsplit("/", 1)[-1], values["json"]))
+            return Response()
+
+    monkeypatch.setattr("media_gateway.notifications.httpx.AsyncClient", lambda **_kwargs: Client())
+    with TestClient(app):
+        await app.state.runtime.notifications._send(
+            1001,
+            "🍿 <b>Available in Plex</b>\nArrival",
+            "https://watch.plex.tv/movie/arrival",
+            poster_url="https://image.tmdb.org/arrival.jpg",
+        )
+
+    assert [method for method, _body in sent] == ["sendPhoto"]
+    body = sent[0][1]
+    assert body["photo"] == "https://image.tmdb.org/arrival.jpg"
+    assert body["caption"].endswith("Arrival")
+    assert body["reply_markup"]["inline_keyboard"][0][0] == {
+        "text": "Open in Plex",
+        "url": "https://watch.plex.tv/movie/arrival",
+    }
+
+
+async def test_rejected_notification_poster_falls_back_to_text(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = create_app(config)
+    sent: list[str] = []
+
+    class Response:
+        is_error = False
+
+        def __init__(self, status_code: int) -> None:
+            self.status_code = status_code
+
+    class Client:
+        async def __aenter__(self) -> Client:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def post(self, url: str, **_values: Any) -> Response:
+            method = url.rsplit("/", 1)[-1]
+            sent.append(method)
+            return Response(400 if method == "sendPhoto" else 200)
+
+    monkeypatch.setattr("media_gateway.notifications.httpx.AsyncClient", lambda **_kwargs: Client())
+    with TestClient(app):
+        await app.state.runtime.notifications._send(
+            1001,
+            "Available",
+            "https://watch.plex.tv/movie/arrival",
+            poster_url="https://image.tmdb.org/stale.jpg",
+        )
+
+    assert sent == ["sendPhoto", "sendMessage"]
+
+
 async def test_plex_slug_lookup_keeps_token_out_of_the_url(
     config: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:

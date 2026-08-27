@@ -48,7 +48,8 @@ PLATFORM_HINT = (
     "research with web_search. "
     "Adding to the library is the only thing you can change here, so do it when asked and never "
     "report something as requested unless a tool said so. "
-    "A single search result is also posted to the chat as a poster, carrying a link that opens "
+    "A single resolved media result is also posted to the chat as a poster, carrying a link "
+    "that opens "
     "Plex when the title is held; at most one poster is posted per message, so do not describe "
     "the card or promise buttons. Choose the tools yourself."
 )
@@ -253,7 +254,7 @@ async def _decorate_search_result(
     decorated = dict(result)
     decorated["results"] = candidates
 
-    if recommendation_mode:
+    if recommendation_mode and len(candidates) > 1:
         decorated["telegram_presentation"] = {
             "poster_cards_delivered": False,
             "selection_status": "conversational",
@@ -317,7 +318,8 @@ async def _decorate_search_result(
         "selection_status": "single_result",
         "provider_mutation_performed": False,
         "instruction": (
-            f"{card}Answer only about this result. If the current user message "
+            f"{card}Answer only about this result. If this is a recommendation, explain why "
+            "it fits the user's question. If the current user message "
             "explicitly asks to add or request it, call the matching request tool now; a "
             "series still needs its seasons named. Otherwise this is a read-only lookup: "
             "never imply it was requested."

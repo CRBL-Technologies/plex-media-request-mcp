@@ -1091,7 +1091,9 @@ def test_series_results_report_which_seasons_are_held(config: Config) -> None:
     assert result["downloaded"] is False
 
 
-def test_fully_held_series_is_reported_as_downloaded(config: Config) -> None:
+def test_airing_season_with_every_released_episode_is_reported_as_downloaded(
+    config: Config,
+) -> None:
     app = create_app(config)
     fake = FakeUpstream()
     fake.responses["sonarr_search_series"] = {
@@ -1109,7 +1111,14 @@ def test_fully_held_series_is_reported_as_downloaded(config: Config) -> None:
         "data": {
             "id": 4,
             "seasons": [
-                {"seasonNumber": 1, "statistics": {"episodeFileCount": 9, "totalEpisodeCount": 9}}
+                {
+                    "seasonNumber": 1,
+                    "statistics": {
+                        "episodeFileCount": 3,
+                        "episodeCount": 3,
+                        "totalEpisodeCount": 8,
+                    },
+                }
             ],
         }
     }
@@ -1118,10 +1127,16 @@ def test_fully_held_series_is_reported_as_downloaded(config: Config) -> None:
         response = call_tool(
             client, "search_media", {"query": "Severance", "media_type": "series", "limit": 1}
         )
+        seasons = call_tool(client, "series_seasons", {"tvdb_id": 371980})
 
     result = response.json()["result"]["results"][0]
     assert result["downloaded"] is True
+    assert result["seasons_complete"] == [1]
     assert result["seasons_missing"] == []
+    state = seasons.json()["result"]["seasons"][0]
+    assert state["episodes"] == 3
+    assert state["files"] == 3
+    assert state["complete"] is True
 
 
 def test_untracked_series_costs_no_library_read(config: Config) -> None:

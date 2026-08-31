@@ -175,7 +175,11 @@ def _season_states(item: dict[str, Any]) -> list[dict[str, Any]]:
         stats = season.get("statistics")
         stats = stats if isinstance(stats, dict) else {}
         files = stats.get("episodeFileCount")
-        total = _first(stats, "totalEpisodeCount", "episodeCount")
+        # Sonarr's episodeCount is what has aired; totalEpisodeCount also
+        # includes future episodes. Availability is complete when every aired
+        # episode is held, not only after an ongoing season broadcasts its
+        # finale.
+        total = _first(stats, "episodeCount", "totalEpisodeCount")
         files = files if isinstance(files, int) and files >= 0 else 0
         total = total if isinstance(total, int) and total >= 0 else 0
         states.append(

@@ -6,8 +6,8 @@ migration, not an unattended dependency bump.
 
 Before changing the pinned digest:
 
-1. Confirm the upstream release is still `v2026.8.3` with package version
-   `0.20.0`, or deliberately update both compatibility constants after
+1. Confirm the upstream release is still `v2026.8.27` with package version
+   `0.20.6`, or deliberately update both compatibility constants after
    reviewing the release notes.
 2. Run the s6-overlay smoke with `tests/hermes_gateway_stub.py`; it verifies the
    exact shared/admin tool manifest, plugin registration, private visibility

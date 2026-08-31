@@ -1,4 +1,4 @@
-"""Minimal Hermes v2026.8.3 Telegram adapter and role-aware tools."""
+"""Minimal Hermes v2026.8.27 Telegram adapter and role-aware tools."""
 
 from __future__ import annotations
 

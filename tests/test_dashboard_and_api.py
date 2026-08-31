@@ -1117,6 +1117,7 @@ def test_airing_season_with_every_released_episode_is_reported_as_downloaded(
                         "episodeFileCount": 3,
                         "episodeCount": 3,
                         "totalEpisodeCount": 8,
+                        "nextAiring": "2026-09-07T01:00:00Z",
                     },
                 }
             ],
@@ -1133,10 +1134,24 @@ def test_airing_season_with_every_released_episode_is_reported_as_downloaded(
     assert result["downloaded"] is True
     assert result["seasons_complete"] == [1]
     assert result["seasons_missing"] == []
+    assert result["season_states"] == [
+        {
+            "number": 1,
+            "files": 3,
+            "episodes": 3,
+            "monitored": False,
+            "complete": True,
+            "partial": False,
+            "status": "airing",
+            "next_airing": "2026-09-07T01:00:00Z",
+        }
+    ]
     state = seasons.json()["result"]["seasons"][0]
     assert state["episodes"] == 3
     assert state["files"] == 3
     assert state["complete"] is True
+    assert state["status"] == "airing"
+    assert state["next_airing"] == "2026-09-07T01:00:00Z"
 
 
 def test_untracked_series_costs_no_library_read(config: Config) -> None:

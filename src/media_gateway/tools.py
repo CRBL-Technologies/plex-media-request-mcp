@@ -182,16 +182,19 @@ def _season_states(item: dict[str, Any]) -> list[dict[str, Any]]:
         total = _first(stats, "episodeCount", "totalEpisodeCount")
         files = files if isinstance(files, int) and files >= 0 else 0
         total = total if isinstance(total, int) and total >= 0 else 0
-        states.append(
-            {
-                "number": number,
-                "files": files,
-                "episodes": total,
-                "monitored": season.get("monitored") is True,
-                "complete": total > 0 and files >= total,
-                "partial": 0 < files < total,
-            }
-        )
+        state: dict[str, Any] = {
+            "number": number,
+            "files": files,
+            "episodes": total,
+            "monitored": season.get("monitored") is True,
+            "complete": total > 0 and files >= total,
+            "partial": 0 < files < total,
+        }
+        next_airing = stats.get("nextAiring")
+        if isinstance(next_airing, str) and next_airing:
+            state["status"] = "airing"
+            state["next_airing"] = next_airing[:40]
+        states.append(state)
     return sorted(states, key=lambda state: int(state["number"]))
 
 
@@ -237,9 +240,11 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
         "description": (
             "Search Radarr and Sonarr for one movie or series. Each match reports its year, "
             "media type, poster_url, and whether the file is held: downloaded for a movie, and "
-            "for a series seasons_complete and seasons_missing, with downloaded meaning every "
-            "aired season is present. A lone held title also carries plex_url. When exactly one "
-            "title matches, it is posted to the chat as a poster."
+            "for a series season_states, seasons_complete, and seasons_missing. A season state "
+            "marked airing reports files out of episodes aired so far plus next_airing; complete "
+            "then means all aired episodes are held, not that the season has finished. A lone held "
+            "title also carries plex_url. When exactly one title matches, it is posted to the chat "
+            "as a poster."
         ),
         "inputSchema": {
             "type": "object",
@@ -543,6 +548,7 @@ class ToolService:
         states = _season_states(record)
         if not states:
             return
+        candidate["season_states"] = states
         complete = [int(state["number"]) for state in states if state["complete"]]
         # A season Sonarr lists with no episodes has not aired yet, so it is
         # not missing: there is nothing to acquire, and counting it would keep

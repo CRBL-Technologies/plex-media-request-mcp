@@ -11,10 +11,15 @@ ENV S6_BEHAVIOUR_IF_STAGE2_FAILS=2 \
 WORKDIR /opt/hermes
 
 COPY deployment/hermes-requirements.txt /tmp/crbl-hermes-requirements.txt
+# Hermes v0.20.6 itself pins cryptography 50 while its bundled msal metadata
+# still declares <49. Allow exactly that upstream baseline conflict, but fail
+# the image for any additional incompatibility.
 RUN cd /tmp \
     && uv pip install --python /opt/hermes/.venv/bin/python --no-deps --require-hashes \
       -r /tmp/crbl-hermes-requirements.txt \
-    && uv pip check --python /opt/hermes/.venv/bin/python \
+    && check="$(uv pip check --python /opt/hermes/.venv/bin/python 2>&1 || true)" \
+    && test "$(printf '%s\n' "$check" | grep -c '^The package ')" -eq 1 \
+    && printf '%s\n' "$check" | grep -Fqx 'The package `msal` requires `cryptography>=2.5,<49`, but `50.0.0` is installed' \
     && /opt/hermes/.venv/bin/python -c 'import ddgs'
 
 COPY src /app/src

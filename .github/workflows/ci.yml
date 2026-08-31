@@ -10,7 +10,7 @@ permissions:
 
 env:
   PYTHON_BASE_IMAGE: python:3.12-slim@sha256:dd29372629eeba2dd003fd9e9d35a5b8236c44727875a0364254b5127af88e65
-  HERMES_BASE_IMAGE: nousresearch/hermes-agent@sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e
+  HERMES_BASE_IMAGE: nousresearch/hermes-agent@sha256:e0df6adebddf29b91112aefc999d4aaf6846c9eb544faca5672a16a13590ff79
 
 jobs:
   verify:

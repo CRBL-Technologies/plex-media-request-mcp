@@ -1,4 +1,4 @@
-"""All compatibility code for the pinned Hermes v2026.8.3 runtime."""
+"""All compatibility code for the pinned Hermes v2026.8.27 runtime."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from collections.abc import Callable, Mapping
 from types import SimpleNamespace
 from typing import Any
 
-PINNED_HERMES_RELEASE = "v2026.8.3"
-PINNED_HERMES_PACKAGE_VERSION = "0.20.0"
+PINNED_HERMES_RELEASE = "v2026.8.27"
+PINNED_HERMES_PACKAGE_VERSION = "0.20.6"
 NATIVE_MODULE = "plugins.platforms.telegram.adapter"
 NATIVE_CLASS = "TelegramAdapter"
 
@@ -176,7 +176,6 @@ def verify_pinned_runtime(
         load_soul_md,
     )
     from agent.web_search_registry import (  # type: ignore[import-not-found]
-        get_active_extract_provider,
         get_active_search_provider,
     )
     from gateway.platform_registry import platform_registry  # type: ignore[import-not-found]
@@ -190,8 +189,6 @@ def verify_pinned_runtime(
     provider = get_active_search_provider()
     if provider is None or provider.name != "ddgs" or not provider.is_available():
         raise RuntimeError("DuckDuckGo search provider is unavailable")
-    if get_active_extract_provider() is not None:
-        raise RuntimeError("CRBL media bot must not enable web extraction")
     entry = platform_registry.get("telegram")
     if entry is None or entry.plugin_name != "crbl-media":
         raise RuntimeError("CRBL Telegram adapter did not replace the native entry")

@@ -339,6 +339,15 @@ async def test_single_search_result_sends_a_poster_without_any_action(
                         "title": "3 Body Problem",
                         "year": 2024,
                         "poster_url": "https://artworks.thetvdb.com/three-body.jpg",
+                        "season_states": [
+                            {
+                                "number": 1,
+                                "files": 3,
+                                "episodes": 3,
+                                "status": "airing",
+                                "next_airing": "2026-09-07T01:00:00Z",
+                            }
+                        ],
                     }
                 ],
                 "unavailable_sources": [],
@@ -387,6 +396,9 @@ async def test_single_search_result_sends_a_poster_without_any_action(
     assert card["reply_markup"] is None
     assert len(result["results"]) == 1
     assert result["telegram_presentation"]["selection_status"] == "single_result"
+    instruction = result["telegram_presentation"]["instruction"]
+    assert "label it 'Airing'" in instruction
+    assert "Never describe an airing season as complete or finished" in instruction
 
 
 def test_presentation_drops_unnamable_rows_and_nothing_else() -> None:

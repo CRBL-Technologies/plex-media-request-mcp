@@ -313,12 +313,24 @@ async def _decorate_search_result(
         if delivered
         else ""
     )
+    season_states = candidate.get("season_states")
+    airing = isinstance(season_states, list) and any(
+        isinstance(state, dict) and state.get("status") == "airing" for state in season_states
+    )
+    airing_note = (
+        "For each season marked airing, label it 'Airing', report files out of episodes as "
+        "the aired episodes available, and include next_airing when present. Never describe "
+        "an airing season as complete or finished. "
+        if airing
+        else ""
+    )
     decorated["telegram_presentation"] = {
         "poster_cards_delivered": delivered,
         "selection_status": "single_result",
         "provider_mutation_performed": False,
         "instruction": (
-            f"{card}Answer only about this result. If this is a recommendation, explain why "
+            f"{card}{airing_note}Answer only about this result. If this is a recommendation, "
+            "explain why "
             "it fits the user's question. If the current user message "
             "explicitly asks to add or request it, call the matching request tool now; a "
             "series still needs its seasons named. Otherwise this is a read-only lookup: "

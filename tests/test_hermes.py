@@ -460,6 +460,15 @@ def test_tool_contracts_describe_capability_not_procedure() -> None:
     assert "up to a hundred at once" in bulk
     assert "could not be matched" in bulk
 
+    for name in ("request_movie", "request_series"):
+        request = SHARED_SCHEMAS[name]["description"]
+        assert "authoritative outcome" in request
+        assert "sufficient to confirm" in request
+
+    history = SHARED_SCHEMAS["request_status"]["description"]
+    assert "historical requests" in history
+    assert "not confirmation of a request mutation" in history
+
     for name in ("search_media", "recommend_media", "request_titles", "series_seasons"):
         text = SHARED_SCHEMAS[name]["description"]
         for prescription in ("never search", "Use this whenever", "never ask", "one at a time"):

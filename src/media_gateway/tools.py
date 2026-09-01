@@ -282,7 +282,10 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
         },
     },
     "request_movie": {
-        "description": ("Request one movie by TMDB ID."),
+        "description": (
+            "Request one movie by TMDB ID and return the exact movie and authoritative outcome "
+            "of that request. A successful result is sufficient to confirm the request."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {"tmdb_id": {"type": "integer", "minimum": 1}},
@@ -291,7 +294,11 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
         },
     },
     "request_series": {
-        "description": ("Request specific seasons of one series by TVDB ID. Season 0 is specials."),
+        "description": (
+            "Request specific seasons of one series by TVDB ID and return the exact series, "
+            "seasons, and authoritative outcome of that request. A successful result is "
+            "sufficient to confirm the request. Season 0 is specials."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -348,7 +355,11 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
         },
     },
     "request_status": {
-        "description": "Show this user's requests and their availability state.",
+        "description": (
+            "Show historical requests visible to this user and their availability state. This "
+            "answers questions about earlier requests; it is not confirmation of a request "
+            "mutation."
+        ),
         "inputSchema": {"type": "object", "additionalProperties": False},
     },
     "download_status": {

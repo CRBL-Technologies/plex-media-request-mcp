@@ -1959,10 +1959,30 @@ async def test_revoked_series_requester_is_excluded_without_hiding_other_request
 
 async def test_unrequested_single_episode_is_ignored_once(config: Config) -> None:
     app = create_app(config)
+    fake = _idle_queue()
+    fake.responses["sonarr_search_series"] = {
+        "data": [{"id": 17, "tvdbId": 411959, "title": "3 Body Problem"}]
+    }
+    fake.responses["sonarr_get_series_by_id"] = {
+        "data": {
+            "id": 17,
+            "seasons": [
+                {
+                    "seasonNumber": 1,
+                    "statistics": {
+                        "episodeFileCount": 8,
+                        "episodeCount": 8,
+                        "totalEpisodeCount": 10,
+                        "nextAiring": "2026-09-11T01:00:00Z",
+                    },
+                }
+            ],
+        }
+    }
     sent: list[int] = []
     with TestClient(app):
         runtime = app.state.runtime
-        runtime.notifications.upstream = _idle_queue()
+        runtime.notifications.upstream = fake
         runtime.store.add_media_event(
             event_key="episode:unrequested",
             media_type="series",
@@ -1986,6 +2006,62 @@ async def test_unrequested_single_episode_is_ignored_once(config: Config) -> Non
         assert runtime.store.pending_media_events(int(time.time()) + 10) == []
 
     assert sent == []
+
+
+async def test_unrequested_finale_notifies_admin_that_the_season_is_complete(
+    config: Config,
+) -> None:
+    app = create_app(config)
+    fake = _idle_queue()
+    fake.responses["sonarr_search_series"] = {
+        "data": [{"id": 17, "tvdbId": 403245, "title": "Silo"}]
+    }
+    fake.responses["sonarr_get_series_by_id"] = {
+        "data": {
+            "id": 17,
+            "seasons": [
+                {
+                    "seasonNumber": 3,
+                    "statistics": {
+                        "episodeFileCount": 10,
+                        "episodeCount": 10,
+                        "totalEpisodeCount": 10,
+                    },
+                }
+            ],
+        }
+    }
+    sent: list[tuple[int, str]] = []
+    with TestClient(app):
+        runtime = app.state.runtime
+        runtime.notifications.upstream = fake
+        runtime.store.add_media_event(
+            event_key="episode:silo-finale",
+            media_type="series",
+            external_id=403245,
+            rating_key="silo-finale",
+            title="Troy",
+            show_title="Silo",
+            season_number=3,
+            episode_number=10,
+            plex_url="https://watch.plex.tv/show/silo/season/3/episode/10",
+            observed_at=int(time.time()) - 10,
+        )
+
+        async def capture(chat_id: int, text: str, _url: str) -> None:
+            sent.append((chat_id, text))
+
+        runtime.notifications._send = capture  # type: ignore[method-assign]
+        await runtime.notifications.flush()
+        await runtime.notifications.flush()
+
+        assert runtime.store.pending_media_events(int(time.time()) + 10) == []
+
+    assert len(sent) == 1
+    assert sent[0][0] == 9001
+    assert "Season complete in Plex" in sent[0][1]
+    assert "Silo · Season 3 (10 episodes)" in sent[0][1]
+    assert "Finale: S03E10 · Troy" in sent[0][1]
 
 
 async def test_multiple_movie_requesters_and_admin_are_all_notified(config: Config) -> None:

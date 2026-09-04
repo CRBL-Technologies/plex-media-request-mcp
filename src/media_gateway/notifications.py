@@ -523,6 +523,8 @@ class Notifications:
                 if poster_url is not None:
                     event["poster_url"] = poster_url
             ready.append(event)
+        if _is_single_episode(ready):
+            ready[0]["completed_season_size"] = await self._completed_season_size(ready[0])
         return ready
 
     async def _poster_url(self, *, media_type: str, external_id: int) -> str | None:
@@ -541,6 +543,66 @@ class Notifications:
                 return _public_poster_url(item)
         return None
 
+    async def _completed_season_size(self, event: dict[str, Any]) -> int | None:
+        """Return a finished season's episode count, zero, or None on lookup failure."""
+
+        external_id = event.get("external_id")
+        season_number = event.get("season_number")
+        if (
+            not isinstance(external_id, int)
+            or isinstance(external_id, bool)
+            or not isinstance(season_number, int)
+            or isinstance(season_number, bool)
+        ):
+            return 0
+        try:
+            lookup = await self.upstream.call(
+                "sonarr_search_series", {"term": f"tvdb:{external_id}", "limit": 10}
+            )
+            source = next(
+                (
+                    item
+                    for item in _provider_rows(lookup)
+                    if _positive(item.get("tvdbId")) == external_id
+                    or _positive(item.get("tvdb_id")) == external_id
+                ),
+                None,
+            )
+            sonarr_id = _positive(source.get("id")) if source is not None else None
+            if sonarr_id is None:
+                return 0
+            raw = await self.upstream.call("sonarr_get_series_by_id", {"id": sonarr_id})
+        except Exception:
+            # Do not permanently discard a possible finale during a transient
+            # Sonarr failure. The durable event will be checked again.
+            LOGGER.warning("season completion lookup failed for a Plex notification")
+            return None
+        record = raw.get("data", raw) if isinstance(raw, dict) else None
+        seasons = record.get("seasons") if isinstance(record, dict) else None
+        if not isinstance(seasons, list):
+            return 0
+        for season in seasons:
+            if not isinstance(season, dict) or season.get("seasonNumber") != season_number:
+                continue
+            stats = season.get("statistics")
+            if not isinstance(stats, dict):
+                return 0
+            files = _positive(stats.get("episodeFileCount"))
+            aired = _positive(stats.get("episodeCount"))
+            total = _positive(stats.get("totalEpisodeCount"))
+            next_airing = stats.get("nextAiring")
+            if (
+                files is not None
+                and aired is not None
+                and total is not None
+                and files >= total
+                and aired >= total
+                and not next_airing
+            ):
+                return total
+            return 0
+        return 0
+
     async def _deliver_batch(self, batch: list[dict[str, Any]]) -> None:
         first = batch[0]
         keys = [str(item["event_key"]) for item in batch]
@@ -556,17 +618,24 @@ class Notifications:
         recipients = {
             chat_id for user_id, chat_id in requester_destinations if user_id in policy.allowed
         }
+        lone_episode = _is_single_episode(batch)
+        completed_season_size = first.get("completed_season_size")
+        season_completed = (
+            lone_episode and isinstance(completed_season_size, int) and completed_season_size > 0
+        )
+        completion_unknown = lone_episode and completed_season_size is None
         # Administrators receive every movie and every show/season batch. A
-        # lone weekly episode is requester-only; an administrator who asked
-        # for that season is already present through requester_destinations.
-        if not _is_single_episode(batch):
+        # lone weekly episode is requester-only unless it completes a season;
+        # an administrator who asked for that season is already present through
+        # requester_destinations.
+        if not lone_episode or season_completed:
             recipients.update(policy.admins)
         if not recipients:
             # A known lone episode nobody requested is intentionally ignored,
-            # not retried every five seconds forever. An unresolved event stays
-            # pending because a later metadata lookup may still find its
-            # requester.
-            if first["external_id"] is not None:
+            # not retried every five seconds forever. An unresolved event or a
+            # failed finale check stays pending until its identity and season
+            # state can be established.
+            if first["external_id"] is not None and not completion_unknown:
                 self.store.mark_events_notified(keys)
             return
         for chat_id in recipients:
@@ -588,7 +657,7 @@ class Notifications:
         # Keep an unresolved episode durable after notifying administrators.
         # Once Plex exposes its show TVDB ID, the requester can still be found
         # and notified without sending the administrator a duplicate.
-        if first["external_id"] is None:
+        if first["external_id"] is None or completion_unknown:
             return
         if first["media_type"] == "movie" and isinstance(first["external_id"], int):
             self.store.mark_movie_available(int(first["external_id"]))
@@ -612,6 +681,18 @@ class Notifications:
             label = _season_label(season) or "New series"
             return f"📺 <b>Available in Plex</b>\n{show} · {label}"
         episode = first["episode_number"]
+        completed_season_size = first.get("completed_season_size")
+        if isinstance(completed_season_size, int) and completed_season_size > 0:
+            label = _season_label(season) or "Season"
+            marker = ""
+            if season is not None and episode is not None:
+                marker = f"S{int(season):02d}E{int(episode):02d} · "
+            title = html.escape(str(first["title"]))
+            return (
+                f"📺 <b>Season complete in Plex</b>\n"
+                f"{show} · {label} ({completed_season_size} episodes)\n"
+                f"Finale: {marker}{title}"
+            )
         marker = ""
         if season is not None and episode is not None:
             marker = f" · S{int(season):02d}E{int(episode):02d}"

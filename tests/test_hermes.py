@@ -214,8 +214,10 @@ async def test_recommendations_return_conversational_status_without_picker(
     assert gateway.calls == [(1001, "recommend_media", arguments)]
 
 
+@pytest.mark.parametrize("downloaded", [True, False])
 async def test_one_resolved_recommendation_sends_its_poster_and_plex_link(
     monkeypatch: pytest.MonkeyPatch,
+    downloaded: bool,
 ) -> None:
     class RecommendationGateway(FakeGateway):
         async def call(self, actor: Actor, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -231,7 +233,8 @@ async def test_one_resolved_recommendation_sends_its_poster_and_plex_link(
                         "year": 2016,
                         "overview": "A linguist tries to understand visitors from another world.",
                         "poster_url": "https://image.tmdb.org/arrival.jpg",
-                        "plex_url": "https://watch.plex.tv/movie/arrival",
+                        "downloaded": downloaded,
+                        "plex_url": "https://watch.plex.tv/movie/arrival" if downloaded else None,
                     }
                 ],
             }
@@ -275,9 +278,14 @@ async def test_one_resolved_recommendation_sends_its_poster_and_plex_link(
     assert len(adapter.photos) == 1
     card = adapter.photos[0]
     assert card["photo"] == "https://image.tmdb.org/arrival.jpg"
-    button = card["reply_markup"].inline_keyboard[0][0]
-    assert button.text == "▶ Open in Plex"
-    assert button.url == "https://watch.plex.tv/movie/arrival"
+    if downloaded:
+        button = card["reply_markup"].inline_keyboard[0][0]
+        assert button.text == "▶ Open in Plex"
+        assert button.url == "https://watch.plex.tv/movie/arrival"
+    else:
+        assert card["reply_markup"] is None
+    # Resolving a choice shows its poster but does not request the movie.
+    assert gateway.calls == [(1001, "recommend_media", arguments)]
 
 
 def test_a_card_offers_a_plex_link_or_no_button(monkeypatch: pytest.MonkeyPatch) -> None:

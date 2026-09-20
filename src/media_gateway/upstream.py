@@ -130,3 +130,35 @@ class Upstream:
         if not isinstance(payload, dict) or not isinstance(payload.get("records"), list):
             raise UpstreamError("Radarr queue returned an invalid response")
         return [item for item in payload["records"] if isinstance(item, dict)]
+
+    async def plex_episodes(self, rating_key: str) -> list[dict[str, Any]]:
+        """Read actual files under a show/season; container existence is not availability."""
+
+        if not rating_key.isdecimal():
+            raise UpstreamError("Plex metadata key is invalid")
+        values = read_dotenv(self.token_file, {"PLEX_URL", "PLEX_API_KEY"})
+        base = values.get("PLEX_URL", "").rstrip("/")
+        token = values.get("PLEX_API_KEY", "")
+        if not base or not token:
+            raise UpstreamError("Plex configuration is unavailable")
+        items: list[dict[str, Any]] = []
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                while True:
+                    response = await client.get(
+                        f"{base}/library/metadata/{rating_key}/allLeaves",
+                        headers={"X-Plex-Token": token, "Accept": "application/json"},
+                        params={"X-Plex-Container-Start": len(items), "X-Plex-Container-Size": 500},
+                    )
+                    response.raise_for_status()
+                    container = response.json()["MediaContainer"]
+                    rows = container.get("Metadata", [])
+                    if not isinstance(rows, list) or any(not isinstance(x, dict) for x in rows):
+                        raise ValueError("invalid episode list")
+                    items.extend(rows)
+                    if len(items) >= int(container.get("totalSize", len(items))):
+                        return items
+                    if not rows:
+                        raise ValueError("incomplete episode list")
+        except Exception:
+            raise UpstreamError("Plex episodes are unavailable") from None

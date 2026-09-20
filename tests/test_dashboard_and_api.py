@@ -16,7 +16,7 @@ from media_gateway.config import Config
 from media_gateway.constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
 from media_gateway.dashboard import _request_status
 from media_gateway.types import Actor
-from media_gateway.upstream import UpstreamError
+from media_gateway.upstream import Upstream, UpstreamError
 
 
 def _idle_queue() -> FakeUpstream:
@@ -25,6 +25,55 @@ def _idle_queue() -> FakeUpstream:
     fake = FakeUpstream()
     fake.responses["sonarr_get_queue"] = {"data": {"records": []}}
     return fake
+
+
+def _season_library(
+    fake: FakeUpstream,
+    *,
+    total: int = 10,
+    files: int = 10,
+    airing: bool = False,
+    tvdb: int = 411959,
+) -> None:
+    fake.responses["sonarr_search_series"] = {"data": [{"id": 4, "tvdbId": tvdb}]}
+    fake.responses["sonarr_get_series_by_id"] = {
+        "id": 4,
+        "status": "continuing" if airing else "ended",
+        "seasons": [{"seasonNumber": 1}],
+    }
+    fake.responses["sonarr_get_episodes"] = {
+        "data": [
+            {
+                "seasonNumber": 1,
+                "episodeNumber": n,
+                "hasFile": n <= files,
+                "airDateUtc": "2099-01-01T00:00:00Z"
+                if airing and n > files
+                else "2020-01-01T00:00:00Z",
+            }
+            for n in range(1, total + 1)
+        ]
+    }
+    fake.responses["plex_get_metadata"] = {
+        "MediaContainer": {
+            "Metadata": [
+                {"type": "episode", "parentRatingKey": "10538", "Guid": [{"id": "tvdb://411959"}]}
+            ]
+        }
+    }
+    fake.responses["plex_episodes"] = [
+        {
+            "type": "episode",
+            "ratingKey": str(10538 + n),
+            "parentIndex": 1,
+            "index": n,
+            "grandparentRatingKey": "10537",
+            "grandparentTitle": "3 Body Problem",
+            "title": f"Episode {n}",
+            "Media": [{"Part": [{"id": n}]}],
+        }
+        for n in range(1, files + 1)
+    ]
 
 
 def _actor(user_id: int, **extra: Any) -> dict[str, Any]:
@@ -1762,7 +1811,9 @@ async def test_notifications_group_bulk_season_and_reach_admin_and_requester(
         runtime = app.state.runtime
         # Flushing a series batch consults the Sonarr queue; stub it so the
         # test does not reach for a real upstream.
-        runtime.notifications.upstream = _idle_queue()
+        fake = _idle_queue()
+        _season_library(fake, total=2, files=2)
+        runtime.notifications.upstream = fake
         runtime.store.record_request(
             media_type="series",
             external_id=411959,
@@ -1805,7 +1856,12 @@ async def test_single_episode_notifies_all_matching_requesters_not_unrelated_adm
     sent: list[int] = []
     with TestClient(app):
         runtime = app.state.runtime
-        runtime.notifications.upstream = _idle_queue()
+        fake = _idle_queue()
+        _season_library(fake, files=3)
+        fake.responses["sonarr_get_series_by_id"]["status"] = "continuing"
+        for episode in fake.responses["sonarr_get_episodes"]["data"][3:]:
+            episode["airDateUtc"] = "2099-01-01T00:00:00Z"
+        runtime.notifications.upstream = fake
         runtime.policy.set_allowed(2002, allowed=True)
         runtime.policy.set_allowed(3003, allowed=True)
         for user_id, season in ((1001, 1), (2002, 1), (3003, 2)):
@@ -1831,6 +1887,8 @@ async def test_single_episode_notifies_all_matching_requesters_not_unrelated_adm
         )
 
         async def capture(chat_id: int, _text: str, _url: str) -> None:
+            assert "S01E03" in _text
+            assert "Season complete" not in _text
             sent.append(chat_id)
 
         runtime.notifications._send = capture  # type: ignore[method-assign]
@@ -1841,12 +1899,49 @@ async def test_single_episode_notifies_all_matching_requesters_not_unrelated_adm
     assert 3003 not in sent
 
 
+@pytest.mark.parametrize("incomplete", [False, True])
+async def test_plex_episode_listing_reads_all_pages(
+    config: Config, monkeypatch: pytest.MonkeyPatch, incomplete: bool
+) -> None:
+    monkeypatch.setattr(
+        "media_gateway.upstream.read_dotenv",
+        lambda *_args: {"PLEX_URL": "http://plex:32400", "PLEX_API_KEY": "test-token"},
+    )
+    starts: list[int] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert request.headers["X-Plex-Token"] == "test-token"
+        assert "test-token" not in str(request.url)
+        assert request.url.path == "/library/metadata/123/allLeaves"
+        start = int(request.url.params["X-Plex-Container-Start"])
+        starts.append(start)
+        rows = [{"ratingKey": str(start + 1), "type": "episode"}]
+        if incomplete and start == 1:
+            rows = []
+        return httpx.Response(200, json={"MediaContainer": {"Metadata": rows, "totalSize": 2}})
+
+    client = httpx.AsyncClient
+    monkeypatch.setattr(
+        "media_gateway.upstream.httpx.AsyncClient",
+        lambda **kwargs: client(transport=httpx.MockTransport(respond), **kwargs),
+    )
+    upstream = Upstream(config.upstream_url, config.upstream_token_file)
+    if incomplete:
+        with pytest.raises(UpstreamError, match="Plex episodes are unavailable"):
+            await upstream.plex_episodes("123")
+    else:
+        assert [row["ratingKey"] for row in await upstream.plex_episodes("123")] == ["1", "2"]
+    assert starts == [0, 1]
+
+
 async def test_single_episode_notifies_admin_who_requested_that_season(config: Config) -> None:
     app = create_app(config)
     sent: list[int] = []
     with TestClient(app):
         runtime = app.state.runtime
-        runtime.notifications.upstream = _idle_queue()
+        fake = _idle_queue()
+        _season_library(fake, files=4, airing=True)
+        runtime.notifications.upstream = fake
         for user_id in (1001, 9001):
             runtime.store.record_request(
                 media_type="series",
@@ -1883,7 +1978,9 @@ async def test_same_chat_requested_by_multiple_users_receives_one_episode(config
     sent: list[int] = []
     with TestClient(app):
         runtime = app.state.runtime
-        runtime.notifications.upstream = _idle_queue()
+        fake = _idle_queue()
+        _season_library(fake, files=5, airing=True)
+        runtime.notifications.upstream = fake
         runtime.policy.set_allowed(2002, allowed=True)
         for user_id in (1001, 2002):
             runtime.store.record_request(
@@ -1923,7 +2020,9 @@ async def test_revoked_series_requester_is_excluded_without_hiding_other_request
     sent: list[int] = []
     with TestClient(app):
         runtime = app.state.runtime
-        runtime.notifications.upstream = _idle_queue()
+        fake = _idle_queue()
+        _season_library(fake, files=7, airing=True)
+        runtime.notifications.upstream = fake
         runtime.policy.set_allowed(2002, allowed=True)
         for user_id in (1001, 2002):
             runtime.store.record_request(
@@ -1960,6 +2059,8 @@ async def test_revoked_series_requester_is_excluded_without_hiding_other_request
 async def test_unrequested_single_episode_is_ignored_once(config: Config) -> None:
     app = create_app(config)
     fake = _idle_queue()
+    _season_library(fake, total=10, files=8)
+    fake.responses["sonarr_get_episodes"]["data"][-1]["airDateUtc"] = "2099-01-01T00:00:00Z"
     fake.responses["sonarr_search_series"] = {
         "data": [{"id": 17, "tvdbId": 411959, "title": "3 Body Problem"}]
     }
@@ -2013,6 +2114,12 @@ async def test_unrequested_finale_notifies_admin_that_the_season_is_complete(
 ) -> None:
     app = create_app(config)
     fake = _idle_queue()
+    _season_library(fake)
+    for episode in fake.responses["sonarr_get_episodes"]["data"]:
+        episode["seasonNumber"] = 3
+        episode["finaleType"] = "season" if episode["episodeNumber"] == 10 else None
+    for episode in fake.responses["plex_episodes"]:
+        episode["parentIndex"] = 3
     fake.responses["sonarr_search_series"] = {
         "data": [{"id": 17, "tvdbId": 403245, "title": "Silo"}]
     }
@@ -2061,7 +2168,7 @@ async def test_unrequested_finale_notifies_admin_that_the_season_is_complete(
     assert sent[0][0] == 9001
     assert "Season complete in Plex" in sent[0][1]
     assert "Silo · Season 3 (10 episodes)" in sent[0][1]
-    assert "Finale: S03E10 · Troy" in sent[0][1]
+    assert "Finale:" not in sent[0][1]
 
 
 async def test_multiple_movie_requesters_and_admin_are_all_notified(config: Config) -> None:
@@ -2110,7 +2217,9 @@ async def test_partial_requester_delivery_retries_only_undelivered_chats(config:
     successes: list[int] = []
     with TestClient(app):
         runtime = app.state.runtime
-        runtime.notifications.upstream = _idle_queue()
+        fake = _idle_queue()
+        _season_library(fake, files=6, airing=True)
+        runtime.notifications.upstream = fake
         runtime.policy.set_allowed(2002, allowed=True)
         for user_id in (1001, 2002):
             runtime.store.record_request(
@@ -2158,7 +2267,9 @@ async def test_show_season_and_episodes_coalesce_into_one_batch(config: Config) 
     sent: list[tuple[int, str]] = []
     with TestClient(app):
         runtime = app.state.runtime
-        runtime.notifications.upstream = _idle_queue()
+        fake = _idle_queue()
+        _season_library(fake, total=2, files=2)
+        runtime.notifications.upstream = fake
         runtime.store.record_request(
             media_type="series",
             external_id=411959,
@@ -2308,6 +2419,7 @@ async def test_notifications_filter_revoked_requesters_but_preserve_allowed_chat
 async def test_episode_enrichment_retries_before_requester_notification(config: Config) -> None:
     app = create_app(config)
     fake = FakeUpstream()
+    _season_library(fake, files=1, airing=True)
     attempts = 0
 
     def metadata(_arguments: dict[str, Any]) -> dict[str, Any]:
@@ -2361,7 +2473,9 @@ async def test_new_show_webhook_reaches_admin_and_requester(config: Config) -> N
         runtime = app.state.runtime
         # Flushing a series batch consults the Sonarr queue; stub it so the
         # test does not reach for a real upstream.
-        runtime.notifications.upstream = _idle_queue()
+        fake = _idle_queue()
+        _season_library(fake, files=1)
+        runtime.notifications.upstream = fake
         runtime.store.record_request(
             media_type="series",
             external_id=411959,
@@ -2388,8 +2502,100 @@ async def test_new_show_webhook_reaches_admin_and_requester(config: Config) -> N
 
         runtime.notifications._send = capture  # type: ignore[method-assign]
         await runtime.notifications.flush()
+        assert sent == []  # A show container with only episode 1 is not a season.
+        fake.responses["sonarr_search_series"] = {"data": []}
+        await runtime.notifications.flush()
+        assert sent == []  # An empty lookup cannot establish readiness.
+        _season_library(fake, files=1)
+        fake.responses["sonarr_get_series_by_id"]["seasons"] = []
+        await runtime.notifications.flush()
+        assert sent == []  # Missing season metadata must also be retried.
+        _season_library(fake, files=5)
+        await runtime.notifications.flush()
+        assert sent == []  # A quiet queue and half a season still aren't readiness.
+        _season_library(fake, files=10)
+        fake.responses["plex_episodes"] = fake.responses["plex_episodes"][:5]
+        await runtime.notifications.flush()
+        assert sent == []  # Sonarr imported everything; Plex is still scanning.
+        _season_library(fake, files=10)
+        await runtime.notifications.flush()
         assert {item[0] for item in sent} == {1001, 9001}
-        assert all("Season 1" in item[1] for item in sent)
+        assert all("Season complete in Plex" in item[1] for item in sent)
+        assert all("Season 1 (10 episodes)" in item[1] for item in sent)
+        await runtime.notifications.flush()
+        assert len(sent) == 2
+        runtime.store.add_media_event(
+            event_key="episode:10540",
+            media_type="series",
+            external_id=411959,
+            rating_key="10540",
+            title="Episode 2",
+            show_title="3 Body Problem",
+            season_number=1,
+            episode_number=2,
+            plex_url="https://app.plex.tv/show",
+            observed_at=int(time.time()) - 10,
+        )
+        await runtime.notifications.flush()
+        assert len(sent) == 2  # Late individual webhooks do not repeat completion.
+
+
+async def test_show_container_waits_for_the_requested_season_without_another_webhook(
+    config: Config,
+) -> None:
+    fake = _idle_queue()
+    _season_library(fake, files=1)
+    app = create_app(config)
+    sent: list[tuple[int, str]] = []
+    with TestClient(app):
+        runtime = app.state.runtime
+        runtime.notifications.upstream = fake
+        runtime.store.record_request(
+            media_type="series",
+            external_id=411959,
+            seasons=(2,),
+            title="3 Body Problem",
+            year=2024,
+            actor=Actor(user_id=1001, chat_id=1001),
+        )
+        runtime.store.add_media_event(
+            event_key="show:10537",
+            media_type="series",
+            external_id=411959,
+            rating_key="10537",
+            title="3 Body Problem",
+            show_title="3 Body Problem",
+            season_number=None,
+            episode_number=None,
+            plex_url="https://app.plex.tv/show",
+            observed_at=int(time.time()) - 10,
+        )
+
+        async def capture(chat_id: int, text: str, _url: str) -> None:
+            sent.append((chat_id, text))
+
+        runtime.notifications._send = capture  # type: ignore[method-assign]
+        await runtime.notifications.flush()
+        assert sent == []
+        assert any(
+            row["event_key"] == "show:10537"
+            for row in runtime.store.pending_media_events(int(time.time()))
+        )
+        _season_library(fake, total=2, files=2)
+        fake.responses["sonarr_get_series_by_id"]["seasons"] = [{"seasonNumber": 2}]
+        for row in fake.responses["sonarr_get_episodes"]["data"]:
+            row["seasonNumber"] = 2
+        for row in fake.responses["plex_episodes"]:
+            row["parentIndex"] = 2
+            row["ratingKey"] = str(int(row["ratingKey"]) + 100)
+        await runtime.notifications.flush()
+        assert {chat for chat, _text in sent} == {1001, 9001}
+        assert all(
+            "Season complete in Plex" in text and "Season 2 (2 episodes)" in text
+            for _, text in sent
+        )
+        await runtime.notifications.flush()
+        assert len(sent) == 2
 
 
 async def test_new_show_without_guid_enriches_from_its_own_rating_key(
@@ -2397,9 +2603,13 @@ async def test_new_show_without_guid_enriches_from_its_own_rating_key(
 ) -> None:
     app = create_app(config)
     fake = FakeUpstream()
-    fake.responses["plex_get_metadata"] = {
-        "MediaContainer": {"Metadata": {"Guid": [{"id": "tvdb://411959"}]}}
-    }
+    _season_library(fake)
+    episode_metadata = fake.responses["plex_get_metadata"]
+    fake.responses["plex_get_metadata"] = lambda args: (
+        {"MediaContainer": {"Metadata": {"Guid": [{"id": "tvdb://411959"}]}}}
+        if args["ratingKey"] == "10537"
+        else episode_metadata
+    )
     sent: list[int] = []
     with TestClient(app):
         runtime = app.state.runtime
@@ -2736,6 +2946,7 @@ async def test_a_quiet_season_waits_while_sonarr_is_still_fetching(config: Confi
 async def test_a_quiet_season_is_sent_once_the_queue_is_clear(config: Config) -> None:
     app = create_app(config)
     fake = FakeUpstream()
+    _season_library(fake, files=1, airing=True, tvdb=371980)
     fake.responses["sonarr_get_queue"] = {"data": {"records": []}}
     sent: list[str] = []
     with TestClient(app):
@@ -2756,6 +2967,7 @@ async def test_a_quiet_season_is_sent_once_the_queue_is_clear(config: Config) ->
 async def test_a_different_show_in_the_queue_does_not_hold_this_one(config: Config) -> None:
     app = create_app(config)
     fake = FakeUpstream()
+    _season_library(fake, files=1, airing=True, tvdb=371980)
     fake.responses["sonarr_get_queue"] = {
         "data": {"records": [{"series": {"tvdbId": 81797, "title": "One Piece"}}]}
     }
@@ -2789,7 +3001,9 @@ async def test_an_unreachable_sonarr_queue_still_delivers(config: Config) -> Non
     sent: list[str] = []
     with TestClient(app):
         runtime = app.state.runtime
-        runtime.notifications.upstream = BrokenQueue()
+        fake = BrokenQueue()
+        _season_library(fake, files=1, airing=True, tvdb=371980)
+        runtime.notifications.upstream = fake
         _request_quiet_series(runtime)
 
         async def send(chat_id: int, text: str, plex_url: str) -> None:

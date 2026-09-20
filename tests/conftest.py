@@ -44,6 +44,15 @@ class FakeUpstream:
             raise value
         return value if isinstance(value, list) else []
 
+    async def plex_episodes(self, rating_key: str) -> list[dict[str, Any]]:
+        self.calls.append(("plex_episodes", {"ratingKey": rating_key}))
+        value = self.responses.get("plex_episodes", [])
+        if callable(value):
+            value = value({"ratingKey": rating_key})
+        if isinstance(value, Exception):
+            raise value
+        return value
+
 
 @pytest.fixture
 def config(tmp_path: Path) -> Config:

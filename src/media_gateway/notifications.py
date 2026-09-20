@@ -8,6 +8,7 @@ import logging
 import time
 from collections import defaultdict
 from contextlib import suppress
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -425,6 +426,14 @@ class Notifications:
         # entire group has been quiet for the configured delay. Filtering in
         # SQL first would send early episodes while later ones were arriving.
         events = self.store.pending_media_events(now, limit=500)
+        for event in events:
+            if _event_kind(event) in {"show", "season"}:
+                await self._expand_container(event)
+        events = [
+            item
+            for item in self.store.pending_media_events(now, limit=500)
+            if _event_kind(item) not in {"show", "season"}
+        ]
         grouped = _group_pending_events(events)
         arriving: set[tuple[str, object]] | None = None
         asked_sonarr = False
@@ -443,46 +452,91 @@ class Notifications:
                 if arriving and self._matches_queue(batch[0], arriving):
                     continue
             batch = await self._enrich(batch)
+            if batch[0].get("season_import_pending"):
+                continue
             await self._deliver_batch(batch)
+
+    async def _expand_container(self, event: dict[str, Any]) -> None:
+        """Turn a show/season observation into actual Plex episode observations."""
+
+        await self._identify(event)
+        if event.get("external_id") is None:
+            return
+        try:
+            episodes = await self.upstream.plex_episodes(str(event["rating_key"]))
+        except Exception:
+            LOGGER.warning("Plex container episodes are unavailable; will retry")
+            return
+        represented: set[int] = set()
+        for item in episodes:
+            season = _season_index(item.get("parentIndex"))
+            episode = _positive(item.get("index"))
+            key = item.get("ratingKey")
+            if (
+                item.get("type") != "episode"
+                or not item.get("Media")
+                or not isinstance(key, str)
+                or not key
+                or season is None
+                or episode is None
+            ):
+                continue
+            self.store.add_media_event(
+                event_key=f"episode:{key}",
+                media_type="series",
+                external_id=event.get("external_id"),
+                rating_key=key,
+                title=str(item.get("title") or f"Episode {episode}"),
+                show_title=str(
+                    item.get("grandparentTitle") or event.get("show_title") or event["title"]
+                ),
+                season_number=season,
+                episode_number=episode,
+                parent_rating_key=item.get("grandparentRatingKey")
+                or event.get("parent_rating_key")
+                or (event["rating_key"] if _event_kind(event) == "show" else None),
+                plex_url=plex_watch.server_details_url(
+                    machine_id=self.config.plex_machine_id, rating_key=key
+                ),
+                observed_at=int(event["observed_at"]),
+            )
+            represented.add(season)
+        requested = self.store.requested_seasons(event["external_id"])
+        if _event_kind(event) == "season":
+            requested &= {event.get("season_number")}
+        # Each requested season needs an episode to drive readiness retries.
+        # A show webhook can arrive while only an older season is visible.
+        if represented and requested.issubset(represented):
+            self.store.mark_events_notified([str(event["event_key"])])
+
+    async def _identify(self, event: dict[str, Any]) -> None:
+        if event.get("external_id") is not None:
+            return
+        is_series = event.get("media_type") == "series"
+        lookup_key = event.get("rating_key")
+        if is_series and event.get("parent_rating_key"):
+            lookup_key = event["parent_rating_key"]
+        try:
+            if not isinstance(lookup_key, str) or not lookup_key:
+                return
+            metadata = await self.upstream.call("plex_get_metadata", {"ratingKey": lookup_key})
+            candidates = self._metadata_objects(metadata) if isinstance(metadata, dict) else []
+            external_id = (
+                _external_id(candidates[0], "tvdb" if is_series else "tmdb") if candidates else None
+            )
+        except Exception:
+            return
+        if external_id is not None:
+            event["external_id"] = external_id
+            self.store.set_media_external_id(str(event["event_key"]), external_id)
 
     async def _enrich(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         ready: list[dict[str, Any]] = []
         resolved_slugs: dict[tuple[str, int], str | None] = {}
         resolved_posters: dict[tuple[str, int], str | None] = {}
+        records: dict[tuple[str, int], dict[str, Any]] = {}
         for event in events:
-            if event.get("external_id") is None:
-                is_series = event.get("media_type") == "series"
-                lookup_key = event.get("rating_key")
-                if is_series and event.get("parent_rating_key"):
-                    lookup_key = event.get("parent_rating_key")
-                provider = "tvdb" if is_series else "tmdb"
-                try:
-                    if not isinstance(lookup_key, str) or not lookup_key:
-                        raise ValueError("Plex metadata key is unavailable")
-                    metadata = await self.upstream.call(
-                        "plex_get_metadata", {"ratingKey": lookup_key}
-                    )
-                    candidates = (
-                        self._metadata_objects(metadata) if isinstance(metadata, dict) else []
-                    )
-                    external_id = _external_id(candidates[0], provider) if candidates else None
-                except Exception:
-                    external_id = None
-                if external_id is not None:
-                    event["external_id"] = external_id
-                    self.store.set_media_external_id(str(event["event_key"]), external_id)
-            if (
-                event.get("media_type") == "series"
-                and event.get("season_number") is None
-                and isinstance(event.get("external_id"), int)
-            ):
-                requested = self.store.requested_seasons(int(event["external_id"]))
-                if len(requested) == 1:
-                    # A first-time Plex show event represents the newly added
-                    # series as a whole. Preserve the one requested season in
-                    # the notification even though Plex omits it from the
-                    # top-level webhook payload.
-                    event["season_number"] = next(iter(requested))
+            await self._identify(event)
             # Upgrade a stored server-route link once the id is known, because
             # only a watch.plex.tv link opens the Plex app.
             slug = plex_watch.watch_slug(event.get("plex_url"))
@@ -511,9 +565,10 @@ class Notifications:
                 poster_key = media_type, external_id
                 if poster_key not in resolved_posters:
                     try:
-                        resolved_posters[poster_key] = await self._poster_url(
+                        records[poster_key] = await self._provider_record(
                             media_type=media_type, external_id=external_id
                         )
+                        resolved_posters[poster_key] = _public_poster_url(records[poster_key])
                     except Exception:
                         # Artwork is optional. A provider outage must not hold
                         # back an otherwise valid availability notification.
@@ -523,11 +578,19 @@ class Notifications:
                 if poster_url is not None:
                     event["poster_url"] = poster_url
             ready.append(event)
-        if _is_single_episode(ready):
-            ready[0]["completed_season_size"] = await self._completed_season_size(ready[0])
+        if ready and ready[0]["media_type"] == "series":
+            source = next((item for item in ready if _event_kind(item) == "episode"), ready[0])
+            external_id = source.get("external_id")
+            record = records.get(("series", external_id)) if isinstance(external_id, int) else None
+            ready[0]["completed_season_size"] = await self._completed_season_size(source, record)
+            ready[0]["season_import_pending"] = source.get("season_import_pending", False) or (
+                ready[0]["completed_season_size"] is None
+                and isinstance(external_id, int)
+                and source.get("season_number") in self.store.requested_seasons(external_id)
+            )
         return ready
 
-    async def _poster_url(self, *, media_type: str, external_id: int) -> str | None:
+    async def _provider_record(self, *, media_type: str, external_id: int) -> dict[str, Any]:
         if media_type == "movie":
             response = await self.upstream.call(
                 "radarr_search_movie", {"term": f"tmdb:{external_id}", "limit": 10}
@@ -540,10 +603,12 @@ class Notifications:
             id_fields = ("tvdbId", "tvdb_id")
         for item in _provider_rows(response):
             if any(_positive(item.get(field)) == external_id for field in id_fields):
-                return _public_poster_url(item)
-        return None
+                return item
+        return {}
 
-    async def _completed_season_size(self, event: dict[str, Any]) -> int | None:
+    async def _completed_season_size(
+        self, event: dict[str, Any], source: dict[str, Any] | None = None
+    ) -> int | None:
         """Return a finished season's episode count, zero, or None on lookup failure."""
 
         external_id = event.get("external_id")
@@ -556,21 +621,11 @@ class Notifications:
         ):
             return 0
         try:
-            lookup = await self.upstream.call(
-                "sonarr_search_series", {"term": f"tvdb:{external_id}", "limit": 10}
-            )
-            source = next(
-                (
-                    item
-                    for item in _provider_rows(lookup)
-                    if _positive(item.get("tvdbId")) == external_id
-                    or _positive(item.get("tvdb_id")) == external_id
-                ),
-                None,
-            )
+            if source is None:
+                source = await self._provider_record(media_type="series", external_id=external_id)
             sonarr_id = _positive(source.get("id")) if source is not None else None
             if sonarr_id is None:
-                return 0
+                return None
             raw = await self.upstream.call("sonarr_get_series_by_id", {"id": sonarr_id})
         except Exception:
             # Do not permanently discard a possible finale during a transient
@@ -579,29 +634,75 @@ class Notifications:
             return None
         record = raw.get("data", raw) if isinstance(raw, dict) else None
         seasons = record.get("seasons") if isinstance(record, dict) else None
-        if not isinstance(seasons, list):
-            return 0
+        if not isinstance(record, dict) or not isinstance(seasons, list):
+            return None
         for season in seasons:
             if not isinstance(season, dict) or season.get("seasonNumber") != season_number:
                 continue
-            stats = season.get("statistics")
-            if not isinstance(stats, dict):
-                return 0
-            files = _positive(stats.get("episodeFileCount"))
-            aired = _positive(stats.get("episodeCount"))
-            total = _positive(stats.get("totalEpisodeCount"))
-            next_airing = stats.get("nextAiring")
-            if (
-                files is not None
-                and aired is not None
-                and total is not None
-                and files >= total
-                and aired >= total
-                and not next_airing
-            ):
-                return total
-            return 0
-        return 0
+            try:
+                raw = await self.upstream.call(
+                    "sonarr_get_episodes", {"seriesId": sonarr_id, "seasonNumber": season_number}
+                )
+                episodes = raw.get("data", raw) if isinstance(raw, dict) else raw
+                if not isinstance(episodes, list) or not episodes:
+                    return None
+                expected: set[int] = set()
+                future = False
+                held = True
+                for episode in episodes:
+                    if (
+                        not isinstance(episode, dict)
+                        or episode.get("seasonNumber") != season_number
+                    ):
+                        return None
+                    number = _positive(episode.get("episodeNumber"))
+                    if number is None or not isinstance(episode.get("hasFile"), bool):
+                        return None
+                    expected.add(number)
+                    held = held and episode["hasFile"]
+                    date = datetime.fromisoformat(episode["airDateUtc"].replace("Z", "+00:00"))
+                    if date.tzinfo is None:
+                        return None
+                    future = future or date > datetime.now(UTC)
+                stats = season.get("statistics") or {}
+                total = stats.get("totalEpisodeCount", len(expected))
+                if len(expected) != len(episodes) or total > len(expected):
+                    return None
+                if future:
+                    return 0  # Weekly releases remain episode notifications.
+                last = max(episodes, key=lambda item: item["episodeNumber"])
+                finished = (
+                    record.get("status") == "ended"
+                    or str(last.get("finaleType") or "").casefold() in {"season", "series"}
+                    or any(s.get("seasonNumber", -1) > season_number for s in seasons)
+                )
+                if not finished or season_number == 0:
+                    return 0
+                requested = season_number in self.store.requested_seasons(external_id)
+                if not held:
+                    event["season_import_pending"] = requested
+                    return 0
+                key = str(event["rating_key"])
+                if _event_kind(event) == "episode":
+                    metadata = await self.upstream.call("plex_get_metadata", {"ratingKey": key})
+                    objects = self._metadata_objects(metadata)
+                    key = str(objects[0]["parentRatingKey"])
+                plex_episodes = await self.upstream.plex_episodes(key)
+                visible = {
+                    item.get("index")
+                    for item in plex_episodes
+                    if item.get("type") == "episode"
+                    and item.get("parentIndex") == season_number
+                    and item.get("Media")
+                }
+                if not expected.issubset(visible):
+                    event["season_import_pending"] = requested
+                    return None
+                return len(expected)
+            except Exception:
+                LOGGER.warning("season episode verification is unavailable; will retry")
+                return None
+        return None
 
     async def _deliver_batch(self, batch: list[dict[str, Any]]) -> None:
         first = batch[0]
@@ -620,9 +721,8 @@ class Notifications:
         }
         lone_episode = _is_single_episode(batch)
         completed_season_size = first.get("completed_season_size")
-        season_completed = (
-            lone_episode and isinstance(completed_season_size, int) and completed_season_size > 0
-        )
+        season_completed = isinstance(completed_season_size, int) and completed_season_size > 0
+        completion_key = f"season-complete:{first['external_id']}:{first['season_number']}"
         completion_unknown = lone_episode and completed_season_size is None
         # Administrators receive every movie and every show/season batch. A
         # lone weekly episode is requester-only unless it completes a season;
@@ -639,6 +739,9 @@ class Notifications:
                 self.store.mark_events_notified(keys)
             return
         for chat_id in recipients:
+            if season_completed and self.store.delivered([completion_key], chat_id):
+                self.store.mark_delivered(keys, chat_id)
+                continue
             pending = [
                 item
                 for item in batch
@@ -646,6 +749,7 @@ class Notifications:
             ]
             if not pending:
                 continue
+            pending[0] = {**pending[0], "completed_season_size": completed_season_size}
             poster_url = pending[0].get("poster_url")
             message = self._message(pending)
             plex_url = str(pending[0]["plex_url"])
@@ -653,7 +757,11 @@ class Notifications:
                 await self._send(chat_id, message, plex_url, poster_url=poster_url)
             else:
                 await self._send(chat_id, message, plex_url)
-            self.store.mark_delivered([str(item["event_key"]) for item in pending], chat_id)
+            self.store.mark_delivered(
+                [str(item["event_key"]) for item in pending]
+                + ([completion_key] if season_completed else []),
+                chat_id,
+            )
         # Keep an unresolved episode durable after notifying administrators.
         # Once Plex exposes its show TVDB ID, the requester can still be found
         # and notified without sending the administrator a duplicate.
@@ -670,6 +778,13 @@ class Notifications:
             return f"🍿 <b>Available in Plex</b>\n{html.escape(str(first['title']))}"
         show = html.escape(str(first["show_title"] or first["title"]))
         season = first["season_number"]
+        completed_season_size = first.get("completed_season_size")
+        if isinstance(completed_season_size, int) and completed_season_size > 0:
+            label = _season_label(season) or "Season"
+            return (
+                f"📺 <b>Season complete in Plex</b>\n"
+                f"{show} · {label} ({completed_season_size} episodes)"
+            )
         episodes = [item for item in batch if item["episode_number"] is not None]
         if not episodes:
             label = _season_label(season) or "New series"
@@ -677,22 +792,8 @@ class Notifications:
         if len(episodes) > 1:
             label = _season_label(season) or "New episodes"
             return f"📺 <b>Available in Plex</b>\n{show} · {label} ({len(episodes)} episodes)"
-        if len(batch) > 1:
-            label = _season_label(season) or "New series"
-            return f"📺 <b>Available in Plex</b>\n{show} · {label}"
+        first = episodes[0]
         episode = first["episode_number"]
-        completed_season_size = first.get("completed_season_size")
-        if isinstance(completed_season_size, int) and completed_season_size > 0:
-            label = _season_label(season) or "Season"
-            marker = ""
-            if season is not None and episode is not None:
-                marker = f"S{int(season):02d}E{int(episode):02d} · "
-            title = html.escape(str(first["title"]))
-            return (
-                f"📺 <b>Season complete in Plex</b>\n"
-                f"{show} · {label} ({completed_season_size} episodes)\n"
-                f"Finale: {marker}{title}"
-            )
         marker = ""
         if season is not None and episode is not None:
             marker = f" · S{int(season):02d}E{int(episode):02d}"

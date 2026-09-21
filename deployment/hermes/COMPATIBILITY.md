@@ -4,6 +4,24 @@
 private Hermes APIs. A Hermes base-image digest change is an integration
 migration, not an unattended dependency bump.
 
+The media adapter isolates both ordinary group and topic sessions per user.
+`isolate_actor_sessions` must update the adapter's queue settings AND the
+session store's canonical key builder for Telegram sources before dispatch.
+It must not change global session flags for other platforms. Shared unmentioned
+group observation is disabled because native Hermes anonymizes those turns.
+The registered message handler rechecks the sender and role when a queued turn
+actually executes; intake context alone is not an authorization boundary.
+Native queued continuations may retain an existing actor only when their source
+user and chat still match. The wrapped handler preserves the runner owner used
+by native callback authorization. Poster cards use native topic/reply routing helpers.
+
+Run the behavioral integration cases against the pinned Hermes source as well
+as the standalone suite (the latter intentionally skips native-only tests):
+
+```sh
+PYTHONPATH=src:/path/to/hermes-v2026.8.27 pytest -q tests/test_hermes.py -k pinned_runtime
+```
+
 Before changing the pinned digest:
 
 1. Confirm the upstream release is still `v2026.8.27` with package version

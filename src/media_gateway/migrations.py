@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 TABLE_COLUMNS = {
     "users": {
@@ -32,6 +32,8 @@ TABLE_COLUMNS = {
         "created_at",
         "updated_at",
         "fulfilled_at",
+        "generation",
+        "fulfilled_seasons",
     },
     "request_destinations": {"request_id", "chat_id", "created_at"},
     "media_events": {
@@ -72,6 +74,9 @@ def migrate(database: sqlite3.Connection) -> None:
     if version == 1:
         _migration_2(database)
         version = 2
+    if version == 2:
+        _migration_3(database)
+        version = 3
     database.execute(f"PRAGMA user_version={version}")
     _validate(database)
 
@@ -190,6 +195,28 @@ def _migration_2(database: sqlite3.Connection) -> None:
         COMMIT;
         """
     )
+
+
+def _migration_3(database: sqlite3.Connection) -> None:
+    """Track re-request generations and per-season series fulfillment."""
+
+    database.execute("BEGIN IMMEDIATE")
+    try:
+        database.execute("ALTER TABLE requests ADD COLUMN generation INTEGER NOT NULL DEFAULT 1")
+        database.execute(
+            """ALTER TABLE requests ADD COLUMN fulfilled_seasons TEXT NOT NULL DEFAULT '[]'"""
+        )
+        database.execute(
+            """UPDATE requests SET fulfilled_seasons=seasons
+            WHERE media_type='series' AND state='available'"""
+        )
+        database.execute("PRAGMA user_version=3")
+        _validate(database)
+    except Exception:
+        database.rollback()
+        raise
+    else:
+        database.commit()
 
 
 def _validate(database: sqlite3.Connection) -> None:

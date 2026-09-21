@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlsplit
 
 from . import plex_watch
 from .config import Config
 from .constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
+from .episode_facts import season_episode_facts, season_is_finished
+from .provider_metadata import public_poster_url
 from .store import Store
 from .types import Actor, Role
 from .upstream import Upstream, UpstreamError
@@ -114,31 +116,6 @@ def _bool(value: object) -> bool:
     return value is True
 
 
-def _poster_url(item: dict[str, Any]) -> str | None:
-    """Return the provider's public poster URL, never its private relative path."""
-
-    candidates: list[object] = [item.get("remotePoster")]
-    images = item.get("images")
-    if isinstance(images, list):
-        candidates.extend(
-            image.get("remoteUrl")
-            for image in images
-            if isinstance(image, dict) and image.get("coverType") == "poster"
-        )
-    for candidate in candidates:
-        if not isinstance(candidate, str) or len(candidate) > 2048:
-            continue
-        parsed = urlsplit(candidate)
-        if (
-            parsed.scheme == "https"
-            and parsed.hostname
-            and parsed.username is None
-            and parsed.password is None
-        ):
-            return candidate
-    return None
-
-
 def _season_numbers(item: dict[str, Any]) -> list[int]:
     """Every season Sonarr knows, including 0 for specials."""
 
@@ -155,7 +132,9 @@ def _season_numbers(item: dict[str, Any]) -> list[int]:
     return sorted(set(result))
 
 
-def _season_states(item: dict[str, Any]) -> list[dict[str, Any]]:
+def _season_states(
+    item: dict[str, Any], episodes: list[dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
     """Per-season episode counts, so a caller can tell complete from missing.
 
     ``monitored`` alone is not availability: a season can be monitored with no
@@ -165,6 +144,14 @@ def _season_states(item: dict[str, Any]) -> list[dict[str, Any]]:
     raw = item.get("seasons")
     if not isinstance(raw, list):
         return []
+    season_numbers = {
+        number
+        for season in raw
+        if isinstance(season, dict)
+        and isinstance((number := _first(season, "seasonNumber", "season_number")), int)
+        and not isinstance(number, bool)
+        and number >= 0
+    }
     states: list[dict[str, Any]] = []
     for season in raw:
         if not isinstance(season, dict):
@@ -174,21 +161,45 @@ def _season_states(item: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         stats = season.get("statistics")
         stats = stats if isinstance(stats, dict) else {}
-        files = stats.get("episodeFileCount")
-        # Sonarr's episodeCount is what has aired; totalEpisodeCount also
-        # includes future episodes. Availability is complete when every aired
-        # episode is held, not only after an ongoing season broadcasts its
-        # finale.
-        total = _first(stats, "episodeCount", "totalEpisodeCount")
-        files = files if isinstance(files, int) and files >= 0 else 0
-        total = total if isinstance(total, int) and total >= 0 else 0
+        facts = (
+            season_episode_facts(episodes, number, now=datetime.now(UTC))
+            if episodes is not None
+            else None
+        )
+        finished = (
+            season_is_finished(
+                facts,
+                season_number=number,
+                series_status=item.get("status"),
+                has_later_season=any(other > number for other in season_numbers),
+            )
+            if facts is not None
+            else False
+        )
+        if facts is None:
+            files = None
+            total = None
+            complete = None
+            partial = None
+            up_to_date = None
+        else:
+            files = facts.aired_files
+            total = facts.total if finished else facts.aired_total
+            complete = finished and facts.all_have_files
+            partial = 0 < files < total
+            up_to_date = (
+                total > 0
+                and files >= total
+                and not (facts.has_unknown_air_date and not facts.all_have_files)
+            )
         state: dict[str, Any] = {
             "number": number,
             "files": files,
             "episodes": total,
             "monitored": season.get("monitored") is True,
-            "complete": total > 0 and files >= total,
-            "partial": 0 < files < total,
+            "complete": complete,
+            "partial": partial,
+            "up_to_date": up_to_date,
         }
         next_airing = stats.get("nextAiring")
         if isinstance(next_airing, str) and next_airing:
@@ -210,9 +221,15 @@ def _movie_candidate(item: dict[str, Any]) -> dict[str, Any] | None:
         "title": title,
         "year": _year(_first(item, "year", "releaseDate", "inCinemas")),
         "overview": str(item.get("overview") or "")[:1000],
-        "poster_url": _poster_url(item),
+        "poster_url": public_poster_url(item),
         "in_radarr": isinstance(radarr_id, int) and radarr_id > 0,
-        "downloaded": _bool(item.get("hasFile")),
+        "downloaded": (
+            item["hasFile"]
+            if isinstance(item.get("hasFile"), bool)
+            else None
+            if isinstance(radarr_id, int) and radarr_id > 0
+            else False
+        ),
     }
 
 
@@ -228,7 +245,7 @@ def _series_candidate(item: dict[str, Any]) -> dict[str, Any] | None:
         "title": title,
         "year": _year(_first(item, "year", "firstAired")),
         "overview": str(item.get("overview") or "")[:1000],
-        "poster_url": _poster_url(item),
+        "poster_url": public_poster_url(item),
         "seasons": _season_numbers(item),
         "in_sonarr": isinstance(sonarr_id, int) and sonarr_id > 0,
         "status": str(item.get("status") or "unknown")[:40],
@@ -241,10 +258,10 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
             "Search Radarr and Sonarr for one movie or series. Each match reports its year, "
             "media type, poster_url, and whether the file is held: downloaded for a movie, and "
             "for a series season_states, seasons_complete, and seasons_missing. A season state "
-            "marked airing reports files out of episodes aired so far plus next_airing; complete "
-            "then means all aired episodes are held, not that the season has finished. A lone held "
-            "title also carries plex_url. When exactly one title matches, it is posted to the chat "
-            "as a poster."
+            "marked airing reports files out of episodes aired so far plus next_airing; up_to_date "
+            "means those episodes are held, while complete means the season has finished. A lone "
+            "held title also carries plex_url. When exactly one title matches, it is posted to the "
+            "chat as a poster."
         ),
         "inputSchema": {
             "type": "object",
@@ -390,6 +407,12 @@ class ToolService:
         self.config = config
         self.store = store
         self.upstream = upstream
+        self._request_locks: dict[tuple[str, int], asyncio.Lock] = {}
+
+    def _request_lock(self, media_type: str, external_id: int) -> asyncio.Lock:
+        """Serialize mutations of one provider title inside this worker."""
+
+        return self._request_locks.setdefault((media_type, external_id), asyncio.Lock())
 
     async def tools_for(self, role: Role) -> list[dict[str, Any]]:
         if role is Role.BLOCKED:
@@ -481,7 +504,7 @@ class ToolService:
                 group.append(candidate)
             groups.append(group)
         results = _interleave(groups, limit)
-        await asyncio.gather(
+        enrichment_errors = await asyncio.gather(
             self._enrich_from_library(
                 results=results,
                 library_ids=library_ids,
@@ -501,7 +524,12 @@ class ToolService:
                 apply=self._apply_series_availability,
             ),
         )
-        return results, errors
+        errors.extend(
+            kind
+            for kind, failed in zip(("movie", "series"), enrichment_errors, strict=True)
+            if failed
+        )
+        return results, sorted(set(errors))
 
     async def _enrich_from_library(
         self,
@@ -513,7 +541,7 @@ class ToolService:
         tool: str,
         apply: Callable[[dict[str, Any], dict[str, Any]], None],
         skip: Callable[[dict[str, Any]], bool] = lambda _candidate: False,
-    ) -> None:
+    ) -> bool:
         """Read each tracked candidate's library record and fold it back in.
 
         Both providers answer "does this exist" from their lookup and "do we
@@ -533,20 +561,41 @@ class ToolService:
             if provider_id is not None:
                 targets.append((candidate, provider_id))
         if not targets:
-            return
+            return False
 
         async def resolve(candidate: dict[str, Any], provider_id: int) -> None:
             record = _record(await self.upstream.call(tool, {"id": provider_id}))
-            if record is not None:
+            if record is None:
+                raise UpstreamError("library record is unavailable")
+            if kind == "series":
+                raw_episodes = await self.upstream.call(
+                    "sonarr_get_episodes", {"seriesId": provider_id}
+                )
+                episode_data = (
+                    raw_episodes.get("data") if isinstance(raw_episodes, dict) else raw_episodes
+                )
+                if not isinstance(episode_data, list) or any(
+                    not isinstance(item, dict) for item in episode_data
+                ):
+                    raise UpstreamError("series episode availability is unavailable")
+                episodes = episode_data
+                apply(candidate, {**record, "_episode_records": episodes})
+            else:
                 apply(candidate, record)
 
         outcomes = await asyncio.gather(
             *(resolve(candidate, provider_id) for candidate, provider_id in targets),
             return_exceptions=True,
         )
-        for outcome in outcomes:
+        failed = False
+        for (candidate, _), outcome in zip(targets, outcomes, strict=True):
             if isinstance(outcome, BaseException) and not isinstance(outcome, Exception):
                 raise outcome
+            if isinstance(outcome, Exception):
+                candidate["downloaded"] = None
+                candidate["availability_error"] = "library availability is temporarily unavailable"
+                failed = True
+        return failed
 
     @staticmethod
     def _apply_series_availability(candidate: dict[str, Any], record: dict[str, Any]) -> None:
@@ -556,9 +605,14 @@ class ToolService:
         result cannot tell a series that is fully held from one merely tracked.
         """
 
-        states = _season_states(record)
+        episodes = record.get("_episode_records")
+        if not isinstance(episodes, list):
+            raise UpstreamError("series episode availability is unavailable")
+        states = _season_states(record, episodes)
         if not states:
             return
+        if any(state["complete"] is None for state in states):
+            raise UpstreamError("series episode availability is unavailable")
         candidate["season_states"] = states
         complete = [int(state["number"]) for state in states if state["complete"]]
         # A season Sonarr lists with no episodes has not aired yet, so it is
@@ -567,13 +621,18 @@ class ToolService:
         missing = [
             int(state["number"])
             for state in states
-            if not state["complete"] and int(state["episodes"]) > 0
+            if state["up_to_date"] is False
+            and isinstance(state["episodes"], int)
+            and state["episodes"] > 0
         ]
         candidate["seasons_complete"] = complete
         candidate["seasons_missing"] = missing
         # "Downloaded" for a series means every aired season is complete, so
         # the model never calls a half-held show available.
-        candidate["downloaded"] = bool(complete) and not missing
+        ordinary = [state for state in states if int(state["number"]) > 0]
+        candidate["downloaded"] = any(state["files"] > 0 for state in ordinary) and all(
+            state["complete"] is True or state["episodes"] == 0 for state in ordinary
+        )
 
     @staticmethod
     def _apply_movie_availability(candidate: dict[str, Any], record: dict[str, Any]) -> None:
@@ -585,8 +644,9 @@ class ToolService:
         the bot offer to add films the user can already watch.
         """
 
-        if _bool(record.get("hasFile")):
-            candidate["downloaded"] = True
+        if not isinstance(record.get("hasFile"), bool):
+            raise UpstreamError("movie availability is unavailable")
+        candidate["downloaded"] = record["hasFile"]
 
     async def _enrich_plex_urls(self, results: list[dict[str, Any]]) -> None:
         """Attach ``plex_url`` to a lone held result, at a cost of one call.
@@ -610,7 +670,11 @@ class ToolService:
             held = bool(candidate.get("downloaded"))
         elif media_type == "series":
             external_id = candidate.get("tvdb_id")
-            held = bool(candidate.get("seasons_complete"))
+            held = any(
+                isinstance(state.get("files"), int) and state["files"] > 0
+                for state in candidate.get("season_states", [])
+                if isinstance(state, dict)
+            )
         else:
             return
         if not held or not isinstance(external_id, int) or external_id <= 0:
@@ -662,12 +726,19 @@ class ToolService:
                 wanted_year is None or candidate.get("year") == wanted_year
             )
 
+        matches: list[tuple[dict[str, Any], tuple[str, int]]] = []
         for candidate in candidates:
             key = identity(candidate)
             if exact_match(candidate) and key is not None and key not in seen:
-                seen.add(key)
-                return candidate
-        return None
+                matches.append((candidate, key))
+        # A bare title is not enough to choose between distinct exact matches
+        # such as Dune (1984) and Dune (2021). A year narrows the set above.
+        identities = {key for _, key in matches}
+        if len(identities) != 1:
+            return None
+        candidate, key = matches[0]
+        seen.add(key)
+        return candidate
 
     async def _recommend_media(
         self, arguments: object, _actor: Actor, _role: Role
@@ -753,12 +824,18 @@ class ToolService:
         async def handle(title: str) -> dict[str, Any]:
             async with gate:
                 try:
-                    candidates, _errors = await self._search_candidates(title, media_type, 5)
+                    candidates, errors = await self._search_candidates(title, media_type, 5)
                 except UpstreamError:
                     return {"title": title, "state": "failed", "detail": "provider unavailable"}
                 async with lock:
                     choice = self._recommendation_choice(title, candidates, seen)
                 if choice is None:
+                    if errors:
+                        return {
+                            "title": title,
+                            "state": "failed",
+                            "detail": "provider unavailable",
+                        }
                     return {"title": title, "state": "unmatched"}
                 name = (
                     f"{choice['title']} ({choice['year']})"
@@ -822,6 +899,10 @@ class ToolService:
     async def _request_movie(self, arguments: object, actor: Actor, _role: Role) -> dict[str, Any]:
         args = _exact(arguments, {"tmdb_id"})
         tmdb_id = _positive(args.get("tmdb_id"), "tmdb_id")
+        async with self._request_lock("movie", tmdb_id):
+            return await self._request_movie_locked(tmdb_id, actor)
+
+    async def _request_movie_locked(self, tmdb_id: int, actor: Actor) -> dict[str, Any]:
         lookup = await self.upstream.call(
             "radarr_search_movie", {"term": f"tmdb:{tmdb_id}", "limit": 10}
         )
@@ -844,6 +925,10 @@ class ToolService:
             year=candidate["year"],
             actor=actor,
         )
+        intent = self.store.request_intent(request_id)
+        if intent is None:
+            raise RuntimeError("request intent is missing")
+        generation = int(intent["generation"])
         try:
             action = await self._fulfill_movie_request(
                 tmdb_id=tmdb_id,
@@ -852,9 +937,9 @@ class ToolService:
                 held=held,
             )
         except Exception:
-            self.store.mark_request_unknown(request_id)
+            self.store.mark_request_unknown(request_id, generation=generation)
             raise
-        self.store.complete_request(request_id, action)
+        self.store.complete_request(request_id, action, generation=generation)
         return {
             "request_id": request_id,
             "status": action,
@@ -877,11 +962,10 @@ class ToolService:
 
         if not isinstance(existing_id, int) or existing_id <= 0:
             return False
-        try:
-            record = _record(await self.upstream.call("radarr_get_movie", {"id": existing_id}))
-        except UpstreamError:
-            return False
-        return record is not None and _bool(record.get("hasFile"))
+        record = _record(await self.upstream.call("radarr_get_movie", {"id": existing_id}))
+        if record is None or not isinstance(record.get("hasFile"), bool):
+            raise UpstreamError("movie availability is unavailable")
+        return bool(record["hasFile"])
 
     async def _fulfill_movie_request(
         self,
@@ -894,6 +978,7 @@ class ToolService:
         if held:
             return "available"
         if isinstance(existing_id, int) and existing_id > 0:
+            await self.upstream.call("radarr_update_movie", {"id": existing_id, "monitored": True})
             await self.upstream.call("radarr_search_movie_releases", {"id": existing_id})
             return "search_started"
         await self.upstream.call(
@@ -939,12 +1024,22 @@ class ToolService:
             )
             if current is not None:
                 record = current
+            raw_episodes = await self.upstream.call("sonarr_get_episodes", {"seriesId": sonarr_id})
+            episode_data = (
+                raw_episodes.get("data") if isinstance(raw_episodes, dict) else raw_episodes
+            )
+            if not isinstance(episode_data, list) or any(
+                not isinstance(item, dict) for item in episode_data
+            ):
+                raise UpstreamError("series episode availability is unavailable")
+        else:
+            episode_data = None
         return {
             "tvdb_id": tvdb_id,
             "title": candidate["title"],
             "year": candidate["year"],
             "in_sonarr": isinstance(sonarr_id, int) and sonarr_id > 0,
-            "seasons": _season_states(record),
+            "seasons": _season_states(record, episode_data),
         }
 
     async def _request_series(self, arguments: object, actor: Actor, _role: Role) -> dict[str, Any]:
@@ -959,6 +1054,16 @@ class ToolService:
         anime = args.get("anime", False)
         if not isinstance(anime, bool):
             raise ToolError("anime must be a boolean")
+        async with self._request_lock("series", tvdb_id):
+            return await self._request_series_locked(tvdb_id, seasons, anime, actor)
+
+    async def _request_series_locked(
+        self,
+        tvdb_id: int,
+        seasons: tuple[int, ...],
+        anime: bool,
+        actor: Actor,
+    ) -> dict[str, Any]:
         lookup = await self.upstream.call(
             "sonarr_search_series", {"term": f"tvdb:{tvdb_id}", "limit": 10}
         )
@@ -985,6 +1090,10 @@ class ToolService:
             actor=actor,
             options={"anime": anime},
         )
+        intent = self.store.request_intent(request_id)
+        if intent is None:
+            raise RuntimeError("request intent is missing")
+        generation = int(intent["generation"])
         try:
             action = await self._fulfill_series_request(
                 tvdb_id=tvdb_id,
@@ -995,9 +1104,9 @@ class ToolService:
                 known_seasons=known_seasons,
             )
         except Exception:
-            self.store.mark_request_unknown(request_id)
+            self.store.mark_request_unknown(request_id, generation=generation)
             raise
-        self.store.complete_request(request_id, action)
+        self.store.complete_request(request_id, action, generation=generation)
         return {
             "request_id": request_id,
             "status": action,
@@ -1026,6 +1135,7 @@ class ToolService:
             if current is None:
                 raise ToolError("Sonarr returned incomplete series settings")
             updated_series = dict(current)
+            updated_series["monitored"] = True
             options = current.get("seasons")
             if not isinstance(options, list):
                 raise ToolError("Sonarr returned incomplete season settings")
@@ -1108,19 +1218,35 @@ class ToolService:
 
         repaired = 0
         unresolved = 0
-        for intent in intents:
-            request_id = int(intent["id"])
-            try:
-                if intent["media_type"] == "movie":
-                    status = await self._reconcile_movie_intent(intent)
-                else:
-                    status = await self._reconcile_series_intent(intent)
-            except Exception:
-                self.store.mark_request_unknown(request_id)
-                unresolved += 1
-                continue
-            self.store.complete_request(request_id, status, record_activity=False)
-            repaired += 1
+        for snapshot in intents:
+            request_id = int(snapshot["id"])
+            media_type = str(snapshot["media_type"])
+            external_id = int(snapshot["external_id"])
+            async with self._request_lock(media_type, external_id):
+                # A foreground request can complete while a startup/stale
+                # snapshot is waiting for this title. Re-read under the same
+                # lock so reconciliation never repeats that mutation.
+                intent = self.store.request_intent(request_id)
+                if (
+                    intent is None
+                    or intent["state"] not in {"pending", "unknown"}
+                    or intent["generation"] != snapshot["generation"]
+                ):
+                    continue
+                generation = int(intent["generation"])
+                try:
+                    if media_type == "movie":
+                        status = await self._reconcile_movie_intent(intent)
+                    else:
+                        status = await self._reconcile_series_intent(intent)
+                except Exception:
+                    self.store.mark_request_unknown(request_id, generation=generation)
+                    unresolved += 1
+                    continue
+                if self.store.complete_request(
+                    request_id, status, generation=generation, record_activity=False
+                ):
+                    repaired += 1
         return {"repaired": repaired, "unresolved": unresolved}
 
     async def _reconcile_movie_intent(self, intent: dict[str, Any]) -> str:

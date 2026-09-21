@@ -35,9 +35,9 @@ def actor_from_event(event: object) -> Actor:
         raise TrustError("native Telegram chat ID is invalid")
     source_user = _get(source, "user_id")
     source_chat = _get(source, "chat_id")
-    if source_user is not None and str(source_user) != str(user_id):
+    if str(source_user) != str(user_id):
         raise TrustError("Hermes and Telegram user identities differ")
-    if source_chat is not None and str(source_chat) != str(chat_id):
+    if str(source_chat) != str(chat_id):
         raise TrustError("Hermes and Telegram chat identities differ")
     return Actor(
         user_id=user_id,
@@ -55,56 +55,47 @@ def _text(value: object) -> str | None:
     return value[:128] or None
 
 
+def actor_for_turn(event: object) -> Actor:
+    """Allow a native queued continuation only within its original actor scope."""
+
+    if _get(event, "raw_message") is not None:
+        return actor_from_event(event)
+    actor = require_actor()
+    source = _get(event, "source")
+    if str(_get(source, "user_id")) != str(actor.user_id) or str(_get(source, "chat_id")) != str(
+        actor.chat_id
+    ):
+        raise TrustError("queued continuation has no matching trusted Telegram actor")
+    return actor
+
+
 _ACTOR: ContextVar[Actor | None] = ContextVar("crbl_media_actor", default=None)
 _ROLE: ContextVar[Role | None] = ContextVar("crbl_media_role", default=None)
-_SESSION_KEY: ContextVar[str | None] = ContextVar("crbl_media_session_key", default=None)
+_EVENT: ContextVar[object | None] = ContextVar("crbl_media_event", default=None)
 _CARD_BUDGET: ContextVar[list[int] | None] = ContextVar("crbl_media_card_budget", default=None)
 
 
-def session_key_from_event(
-    event: object,
-    actor: Actor,
-    *,
-    group_sessions_per_user: bool = True,
-    thread_sessions_per_user: bool = False,
-) -> str:
-    """Build Hermes' canonical session key from the trusted native source."""
+def current_event() -> object | None:
+    """Trusted native event, used only to preserve the reply's topic routing."""
 
-    source = _get(event, "source")
-    if source is None:
-        raise TrustError("native Telegram session source is unavailable")
-    try:
-        from gateway.session import build_session_key  # type: ignore[import-not-found]
-    except ImportError:
-        # Hermes is intentionally absent from the standalone unit-test image.
-        return f"agent:main:telegram:dm:{actor.chat_id}"
-    try:
-        session_key = build_session_key(
-            source,
-            group_sessions_per_user=group_sessions_per_user,
-            thread_sessions_per_user=thread_sessions_per_user,
-        )
-    except Exception as exc:
-        raise TrustError("native Telegram session is invalid") from exc
-    if not isinstance(session_key, str) or not session_key:
-        raise TrustError("native Telegram session key is invalid")
-    return session_key
+    return _EVENT.get()
 
 
 @contextmanager
 def actor_scope(
     actor: Actor,
     role: Role,
-    session_key: str | None = None,
+    *,
+    event: object | None = None,
 ) -> Iterator[None]:
     budget_token = _CARD_BUDGET.set([])
     actor_token = _ACTOR.set(actor)
     role_token = _ROLE.set(role)
-    session_token = _SESSION_KEY.set(session_key or f"agent:main:telegram:dm:{actor.chat_id}")
+    event_token = _EVENT.set(event)
     try:
         yield
     finally:
-        _SESSION_KEY.reset(session_token)
+        _EVENT.reset(event_token)
         _ROLE.reset(role_token)
         _ACTOR.reset(actor_token)
         _CARD_BUDGET.reset(budget_token)

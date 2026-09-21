@@ -44,6 +44,8 @@ class Store:
         cutoff = (now or int(time.time())) - 60 * 24 * 60 * 60
         with self._db() as db:
             db.execute("DELETE FROM activity WHERE occurred_at < ?", (cutoff,))
+            # Synthetic season receipts have no matching media event.
+            db.execute("DELETE FROM deliveries WHERE delivered_at < ?", (cutoff,))
             old_events = db.execute(
                 "SELECT event_key FROM media_events WHERE observed_at < ?", (cutoff,)
             ).fetchall()
@@ -53,11 +55,15 @@ class Store:
                 db.executemany("DELETE FROM deliveries WHERE event_key=?", parameters)
                 db.executemany("DELETE FROM media_events WHERE event_key=?", parameters)
             db.execute(
-                "DELETE FROM requests WHERE state='available' AND fulfilled_at < ?", (cutoff,)
+                """DELETE FROM requests WHERE media_type='movie' AND state='available'
+                AND fulfilled_at < ?""",
+                (cutoff,),
             )
             db.execute(
                 """DELETE FROM users WHERE last_seen < ? AND user_id NOT IN
-                (SELECT user_id FROM requests WHERE state IN ('pending','requested','unknown'))""",
+                (SELECT user_id FROM requests
+                    WHERE state IN ('pending','requested','unknown')
+                    OR (media_type='series' AND state='available'))""",
                 (cutoff,),
             )
 
@@ -197,6 +203,8 @@ class Store:
                     options=excluded.options,
                     state='pending',
                     provider_status=NULL,
+                    generation=requests.generation + 1,
+                    fulfilled_seasons='[]',
                     updated_at=excluded.updated_at,
                     fulfilled_at=NULL
                 """,
@@ -228,45 +236,64 @@ class Store:
             return request_id
 
     def complete_request(
-        self, request_id: int, provider_status: str, *, record_activity: bool = True
-    ) -> None:
+        self,
+        request_id: int,
+        provider_status: str,
+        *,
+        generation: int,
+        record_activity: bool = True,
+    ) -> bool:
         if not provider_status or len(provider_status) > 64:
             raise ValueError("provider status is invalid")
+        if generation < 1:
+            raise ValueError("request generation is invalid")
         now = int(time.time())
         state = "available" if provider_status == "available" else "requested"
         with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
             row = db.execute(
-                "SELECT title, user_id FROM requests WHERE id=?", (request_id,)
+                "SELECT title, user_id, state FROM requests WHERE id=? AND generation=?",
+                (request_id, generation),
             ).fetchone()
             if row is None:
-                raise RuntimeError("request intent is missing")
-            db.execute(
-                """UPDATE requests SET state=?, provider_status=?, updated_at=?, fulfilled_at=?
-                WHERE id=?""",
+                return False
+            already_available = row["state"] == "available"
+            cursor = db.execute(
+                """UPDATE requests SET
+                    state=CASE WHEN state='available' THEN state ELSE ? END,
+                    provider_status=CASE WHEN state='available' THEN provider_status ELSE ? END,
+                    updated_at=?,
+                    fulfilled_at=CASE WHEN state='available' THEN fulfilled_at ELSE ? END
+                WHERE id=? AND generation=?""",
                 (
                     state,
                     provider_status,
                     now,
                     now if state == "available" else None,
                     request_id,
+                    generation,
                 ),
             )
-            if record_activity:
+            if cursor.rowcount != 1:
+                return False
+            if record_activity and not already_available:
                 db.execute(
                     """INSERT INTO activity(occurred_at, kind, user_id, label)
                     VALUES (?, 'request', ?, ?)""",
                     (now, int(row["user_id"]), f"Requested {row['title']}"),
                 )
+            return True
 
-    def mark_request_unknown(self, request_id: int) -> None:
+    def mark_request_unknown(self, request_id: int, *, generation: int) -> bool:
+        if generation < 1:
+            raise ValueError("request generation is invalid")
         with self._db() as db:
             cursor = db.execute(
                 """UPDATE requests SET state='unknown', provider_status=NULL, updated_at=?
-                WHERE id=?""",
-                (int(time.time()), request_id),
+                WHERE id=? AND generation=? AND state != 'available'""",
+                (int(time.time()), request_id, generation),
             )
-            if cursor.rowcount != 1:
-                raise RuntimeError("request intent is missing")
+            return cursor.rowcount == 1
 
     def record_request(
         self,
@@ -288,7 +315,10 @@ class Store:
             year=year,
             actor=actor,
         )
-        self.complete_request(request_id, "requested")
+        intent = self.request_intent(request_id)
+        if intent is None:
+            raise RuntimeError("request intent is missing")
+        self.complete_request(request_id, "requested", generation=int(intent["generation"]))
         return request_id
 
     def pending_request_intents(
@@ -301,7 +331,17 @@ class Store:
                     AND updated_at <= ? ORDER BY updated_at, id LIMIT ?""",
                 (cutoff, min(max(limit, 1), 500)),
             ).fetchall()
-        return [self._request_row(row, destinations=[]) for row in rows]
+        return [self._request_row(row, destinations=[], internal=True) for row in rows]
+
+    def request_intent(self, request_id: int) -> dict[str, Any] | None:
+        """Return the current durable row for an intent snapshot."""
+
+        with self._db() as db:
+            row = db.execute("SELECT * FROM requests WHERE id=?", (request_id,)).fetchone()
+            if row is None:
+                return None
+            destinations = self._destinations(db, [request_id])
+        return self._request_row(row, destinations=destinations.get(request_id, []), internal=True)
 
     def requests_for(self, user_id: int, *, all_users: bool = False) -> list[dict[str, Any]]:
         query = "SELECT * FROM requests"
@@ -319,8 +359,10 @@ class Store:
         ]
 
     @staticmethod
-    def _request_row(row: sqlite3.Row, *, destinations: list[int]) -> dict[str, Any]:
-        return {
+    def _request_row(
+        row: sqlite3.Row, *, destinations: list[int], internal: bool = False
+    ) -> dict[str, Any]:
+        result = {
             "id": int(row["id"]),
             "media_type": row["media_type"],
             "external_id": int(row["external_id"]),
@@ -336,6 +378,10 @@ class Store:
             "updated_at": int(row["updated_at"]),
             "fulfilled_at": row["fulfilled_at"],
         }
+        if internal:
+            result["generation"] = int(row["generation"])
+            result["fulfilled_seasons"] = json.loads(row["fulfilled_seasons"])
+        return result
 
     @staticmethod
     def _destinations(database: sqlite3.Connection, request_ids: list[int]) -> dict[int, list[int]]:
@@ -459,7 +505,8 @@ class Store:
                 FROM requests JOIN request_destinations
                     ON request_destinations.request_id=requests.id
                 WHERE requests.media_type=? AND requests.external_id=?
-                    AND requests.state IN ('pending','requested','unknown')""",
+                    AND (requests.state IN ('pending','requested','unknown')
+                        OR (requests.media_type='series' AND requests.state='available'))""",
                 (media_type, external_id),
             ).fetchall()
         destinations: set[tuple[int, int]] = set()
@@ -469,36 +516,141 @@ class Store:
                 destinations.add((int(row["user_id"]), int(row["chat_id"])))
         return destinations
 
+    def request_cycles(
+        self, *, media_type: str, external_id: int, season_number: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Snapshot matching requests and destinations before asynchronous work."""
+
+        with self._db() as db:
+            rows = db.execute(
+                """SELECT requests.id, requests.user_id, requests.seasons,
+                    requests.fulfilled_seasons, requests.generation, requests.state,
+                    request_destinations.chat_id
+                FROM requests JOIN request_destinations
+                    ON request_destinations.request_id=requests.id
+                WHERE requests.media_type=? AND requests.external_id=?
+                    AND (requests.state IN ('pending','requested','unknown')
+                        OR (requests.media_type='series' AND requests.state='available'))
+                ORDER BY requests.id, request_destinations.chat_id""",
+                (media_type, external_id),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            seasons = json.loads(row["seasons"])
+            if (
+                media_type == "series"
+                and season_number is not None
+                and season_number not in seasons
+            ):
+                continue
+            result.append(
+                {
+                    "request_id": int(row["id"]),
+                    "user_id": int(row["user_id"]),
+                    "chat_id": int(row["chat_id"]),
+                    "seasons": seasons,
+                    "fulfilled_seasons": json.loads(row["fulfilled_seasons"]),
+                    "generation": int(row["generation"]),
+                    "state": str(row["state"]),
+                }
+            )
+        return result
+
+    def mark_series_seasons_available(
+        self, cycles: list[dict[str, Any]], verified_seasons: set[int]
+    ) -> set[tuple[int, int]]:
+        """Credit verified seasons only to still-current captured request cycles."""
+
+        now = int(time.time())
+        credited: set[tuple[int, int]] = set()
+        identities = sorted(
+            {(int(cycle["request_id"]), int(cycle["generation"])) for cycle in cycles}
+        )
+        with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            for request_id, generation in identities:
+                row = db.execute(
+                    """SELECT seasons, fulfilled_seasons, state FROM requests
+                    WHERE id=? AND generation=? AND media_type='series'""",
+                    (request_id, generation),
+                ).fetchone()
+                if row is None:
+                    continue
+                selected = {
+                    item
+                    for item in json.loads(row["seasons"])
+                    if isinstance(item, int) and not isinstance(item, bool) and item >= 0
+                }
+                fulfilled = {
+                    item
+                    for item in json.loads(row["fulfilled_seasons"])
+                    if isinstance(item, int) and not isinstance(item, bool) and item >= 0
+                }
+                updated = fulfilled | (verified_seasons & selected)
+                complete = bool(selected) and selected.issubset(updated)
+                cursor = db.execute(
+                    """UPDATE requests SET fulfilled_seasons=?,
+                        state=CASE WHEN ? THEN 'available' ELSE state END,
+                        provider_status=CASE WHEN ? THEN 'available' ELSE provider_status END,
+                        updated_at=?, fulfilled_at=CASE WHEN ? THEN ? ELSE fulfilled_at END
+                    WHERE id=? AND generation=?""",
+                    (
+                        json.dumps(sorted(updated), separators=(",", ":")),
+                        complete,
+                        complete,
+                        now,
+                        complete,
+                        now,
+                        request_id,
+                        generation,
+                    ),
+                )
+                if cursor.rowcount == 1:
+                    credited.add((request_id, generation))
+        return credited
+
     def requested_seasons(self, external_id: int) -> set[int]:
         """Return outstanding requested seasons for one series."""
 
         with self._db() as db:
             rows = db.execute(
-                """SELECT seasons FROM requests
+                """SELECT seasons, fulfilled_seasons FROM requests
                 WHERE media_type='series' AND external_id=?
                     AND state IN ('pending','requested','unknown')""",
                 (external_id,),
             ).fetchall()
         result: set[int] = set()
         for row in rows:
-            result.update(
+            selected = {
                 item
                 for item in json.loads(row["seasons"])
                 # Season 0 is the specials season; dropping it would make a
                 # specials notification match every requester of the show.
                 if isinstance(item, int) and not isinstance(item, bool) and item >= 0
-            )
+            }
+            fulfilled = {
+                item
+                for item in json.loads(row["fulfilled_seasons"])
+                if isinstance(item, int) and not isinstance(item, bool) and item >= 0
+            }
+            result.update(selected - fulfilled)
         return result
 
-    def mark_movie_available(self, external_id: int) -> None:
+    def mark_movie_available(self, external_id: int, cycles: list[dict[str, Any]]) -> None:
+        """Fulfill only the request attempts captured for this delivery."""
         now = int(time.time())
+        identities = {(int(cycle["request_id"]), int(cycle["generation"])) for cycle in cycles}
         with self._db() as db:
-            db.execute(
+            db.executemany(
                 """UPDATE requests SET state='available', provider_status='available',
                     updated_at=?, fulfilled_at=?
                 WHERE media_type='movie' AND external_id=?
+                    AND id=? AND generation=?
                     AND state IN ('pending','requested','unknown')""",
-                (now, now, external_id),
+                (
+                    (now, now, external_id, request_id, generation)
+                    for request_id, generation in identities
+                ),
             )
 
     def delivered(self, event_keys: Iterable[str], chat_id: int) -> bool:

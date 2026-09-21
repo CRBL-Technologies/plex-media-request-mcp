@@ -99,7 +99,9 @@ def server_details_url(*, machine_id: str, rating_key: str) -> str:
     return f"https://app.plex.tv/desktop/#!/server/{quote(machine_id, safe='')}/details?key={key}"
 
 
-def _metadata_objects(value: dict[str, Any]) -> list[dict[str, Any]]:
+def metadata_objects(value: dict[str, Any]) -> list[dict[str, Any]]:
+    """Normalize Plex's container and single-object metadata envelopes."""
+
     container = value.get("MediaContainer", value)
     if not isinstance(container, dict):
         return []
@@ -159,5 +161,5 @@ async def lookup_slug(*, token_file: Path, media_type: str, external_id: int) ->
         value = response.json()
     except ValueError:
         return None
-    candidates = _metadata_objects(value) if isinstance(value, dict) else []
+    candidates = metadata_objects(value) if isinstance(value, dict) else []
     return _remember(key, valid_slug(candidates[0].get("slug")) if candidates else None)

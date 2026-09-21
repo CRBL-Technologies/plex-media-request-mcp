@@ -52,6 +52,13 @@ deliberate product decision: only explicit administrators see it, while regular
 users remain limited to eight normalized tools. No selection token is used:
 requests take the TMDB or TVDB ID returned by a current search.
 
+Series availability comes from Sonarr episode records, not monitoring-filtered
+summary counts. Being caught up with aired episodes is distinct from a finished,
+fully held season. A failed provider read means unknown availability, not missing
+media. Bulk requests leave ambiguous exact titles unresolved instead of choosing
+one remake or media type arbitrarily. Mutations and reconciliation for the same
+title are serialized within the gateway worker.
+
 Search results retain the provider's public poster URL. A search that resolves
 to exactly one result is posted as that poster, carrying an `Open in Plex` link
 when the title is held and no button at all otherwise. That link is the only
@@ -105,11 +112,26 @@ fallback when resolution is unavailable.
 
 Webhook events and delivery receipts are durable and deduplicated in SQLite.
 Unresolved Plex provider IDs remain retryable, and terminal operational data is
-pruned after 60 days. Acquisition intent and every Telegram destination are
+pruned after 60 days, at startup and hourly while running. Delivery failures are
+isolated per recipient: blocked chats are suppressed for that event, while
+temporary failures and rate limits retry without holding up other recipients.
+Acquisition intent and every Telegram destination are
 committed before Radarr or Sonarr is mutated. Provider outcomes are recorded
 afterward; interrupted or unknown operations are reconciled idempotently at
 gateway startup. A repeat request by one user from another chat therefore adds
 a destination instead of overwriting the first.
+
+Each request attempt has an internal generation; results from an older attempt
+cannot overwrite a newer one. Series requests track verified seasons individually
+and become available only when all requested seasons are fulfilled. Fulfilled
+series rows remain active episode subscriptions rather than being pruned as
+terminal movie requests. New attempts clear their season progress without changing
+the original creation time or losing notification destinations.
+
+Database schema 3 adds only `generation` and `fulfilled_seasons` to existing
+requests. The migration runs transactionally on startup and preserves existing
+rows. Rolling back to an older image requires restoring a pre-upgrade database;
+older images intentionally refuse newer schemas.
 
 ## Authorization
 
@@ -118,6 +140,11 @@ model runs. Model arguments never supply identity. The gateway rechecks the
 current `TELEGRAM_ALLOWED_USERS` / `TELEGRAM_ADMIN_USERS` policy on every tool
 call. The dashboard changes only `TELEGRAM_ALLOWED_USERS`, using a locked atomic
 rewrite of Hermes' canonical `.env`; it never promotes or removes an admin.
+
+Group and topic sessions are isolated per user in both Hermes' queue and history.
+The executing handler rechecks identity and role for queued turns. Native shared
+unmentioned-group observation is disabled; private-chat session keys are unchanged.
+Poster cards preserve the originating topic and private-topic reply anchor.
 
 If the CRBL plugin does not load completely, the container startup gate fails.
 If it fails before replacement, Hermes' native Telegram allowlist remains the
@@ -179,8 +206,9 @@ queue drains when it finishes importing, which is before Plex scans the files
 and emits those webhooks -- a season pack is one queue item that becomes many
 webhooks after it drains -- so an empty queue never proves an arrival is
 complete. The queue is therefore only ever read to keep a quiet season waiting
-while Sonarr is still fetching it, never to release one early, and an
-unreachable Sonarr delivers on quiet alone.
+while Sonarr is still fetching it, never to release one early. An unavailable
+queue does not by itself block delivery; season completeness still requires
+verified Sonarr episode records and matching playable Plex episodes.
 
 The worker re-evaluates every pending batch once every 5 seconds, so the quiet
 window is a threshold that pass tests, not a timer that fires, and that cycle

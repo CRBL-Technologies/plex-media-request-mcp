@@ -20,16 +20,19 @@ from .client import GatewayClient
 from .compat import (
     install_platform_hint,
     install_tool_visibility,
+    isolate_actor_sessions,
     native_adapter,
+    preserve_handler_owner,
     send_single_result_card,
 )
 from .trusted import (
+    actor_for_turn,
     actor_from_event,
     actor_scope,
     claim_card_slot,
+    current_event,
     current_role,
     require_actor,
-    session_key_from_event,
 )
 
 PLATFORM = "telegram"
@@ -46,8 +49,8 @@ PLATFORM_HINT = (
     "or from results earlier in the conversation. Anything the library cannot answer -- what a "
     "film is about, what exists, what order to watch things in -- is yours to answer or to "
     "research with web_search. "
-    "Adding to the library is the only thing you can change here, so do it when asked and never "
-    "report something as requested unless a tool said so. "
+    "Use the tools available to your role for changes the user requests; administrators may "
+    "also manage the library. Never report something as requested unless a tool said so. "
     "When the user clarifies a previous match by number, year, or media type, resolve that "
     "choice with recommend_media using the full title, year when known, and media type. "
     "This refreshes availability and sends the selected poster; a clarification alone is "
@@ -71,6 +74,9 @@ class _FallbackAdapter:
     async def handle_message(self, event: object) -> object:
         return event
 
+    def set_message_handler(self, handler: Callable[[Any], Any]) -> None:
+        self._message_handler = handler
+
 
 _NativeAdapter = native_adapter(_FallbackAdapter)
 _client: GatewayClient | None = None
@@ -87,6 +93,23 @@ class MediaTelegramAdapter(_NativeAdapter):  # type: ignore[misc, valid-type]
     def __init__(self, config: object) -> None:
         super().__init__(config)
         self._media_delivery_loop: asyncio.AbstractEventLoop | None = None
+
+    def set_message_handler(self, handler: Callable[[Any], Any]) -> None:
+        isolate_actor_sessions(self)
+
+        async def trusted_handler(event: object) -> object:
+            actor = actor_for_turn(event)
+            role = await _gateway().observe(actor)
+            if role is Role.BLOCKED:
+                raise PermissionError("Telegram user is not allowed")
+            # Native queued turns are spawned from the previous turn's task.
+            # Rebind at execution, not just at intake, including the card budget.
+            with actor_scope(actor, role, event=event):
+                result = handler(event)
+                return await result if inspect.isawaitable(result) else result
+
+        preserve_handler_owner(self, trusted_handler)
+        super().set_message_handler(trusted_handler)
 
     @property
     def authorization_is_upstream(self) -> bool:
@@ -110,22 +133,11 @@ class MediaTelegramAdapter(_NativeAdapter):  # type: ignore[misc, valid-type]
     async def handle_message(self, event: object) -> object:
         self._media_delivery_loop = asyncio.get_running_loop()
         actor = actor_from_event(event)
-        extra = getattr(self.config, "extra", None)
-        extra = extra if isinstance(extra, Mapping) else {}
-        session_key = session_key_from_event(
-            event,
-            actor,
-            group_sessions_per_user=bool(extra.get("group_sessions_per_user", True)),
-            thread_sessions_per_user=bool(extra.get("thread_sessions_per_user", False)),
-        )
+        isolate_actor_sessions(self)
         role = await _gateway().observe(actor)
         if role is Role.BLOCKED:
             raise PermissionError("Telegram user is not allowed")
-        with actor_scope(
-            actor,
-            role,
-            session_key,
-        ):
+        with actor_scope(actor, role, event=event):
             result = super().handle_message(event)
             return await result if inspect.isawaitable(result) else result
 
@@ -304,6 +316,7 @@ async def _decorate_search_result(
                 poster_url=poster,
                 caption=_candidate_caption(candidate),
                 candidate=candidate,
+                event=current_event(),
             )
             return bool(getattr(response, "success", False))
 

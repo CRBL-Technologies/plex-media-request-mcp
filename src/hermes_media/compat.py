@@ -17,6 +17,57 @@ NATIVE_CLASS = "TelegramAdapter"
 logger = logging.getLogger(__name__)
 
 
+def isolate_actor_sessions(adapter: Any) -> None:
+    """Keep native queue keys and the runner's history keys isolated together."""
+
+    runner = getattr(adapter, "gateway_runner", None)
+    store = getattr(runner, "session_store", None)
+    original = getattr(store, "_generate_session_key", None)
+    resolve_profile = getattr(store, "_resolve_profile_for_key", None)
+    extra = getattr(adapter.config, "extra", None)
+    if (
+        store is None
+        or not callable(original)
+        or not callable(resolve_profile)
+        or not isinstance(extra, dict)
+    ):
+        raise RuntimeError("Hermes session isolation boundary is unavailable")
+    # Native observation intentionally erases sender IDs to build shared history.
+    # It cannot coexist with this adapter's per-user authority and history.
+    # The explicit extra also takes precedence over the legacy key/environment.
+    extra["observe_unmentioned_group_messages"] = False
+    for key in ("group_sessions_per_user", "thread_sessions_per_user"):
+        extra[key] = True
+    if getattr(original, "__crbl_media_isolation__", False):
+        return
+
+    def session_key(source: Any) -> str:
+        platform = getattr(source.platform, "value", source.platform)
+        if platform != "telegram":
+            return str(original(source))
+        from gateway.session import build_session_key  # type: ignore[import-not-found]
+
+        return str(
+            build_session_key(
+                source,
+                group_sessions_per_user=True,
+                thread_sessions_per_user=True,
+                profile=resolve_profile(source),
+            )
+        )
+
+    session_key.__crbl_media_isolation__ = True  # type: ignore[attr-defined]
+    # Runner and async store paths both delegate to this canonical store method.
+    # Do not change global flags: other chat platforms may share the same runner.
+    store._generate_session_key = session_key
+
+
+def preserve_handler_owner(adapter: Any, handler: Callable[[Any], Any]) -> None:
+    """Native Telegram callbacks inspect this bound-owner attribute for auth."""
+
+    handler.__self__ = adapter.gateway_runner  # type: ignore[attr-defined]
+
+
 def native_adapter(fallback: type) -> type:
     """Subclass the native adapter, or return ``fallback`` itself when absent.
 
@@ -139,6 +190,7 @@ async def send_single_result_card(
     poster_url: str | None,
     caption: str,
     candidate: Mapping[str, Any],
+    event: object | None = None,
 ) -> object:
     """Send one resolved media result with an optional Plex button."""
 
@@ -146,6 +198,32 @@ async def send_single_result_card(
     if bot is None:
         return SimpleNamespace(success=False)
     markup = _single_result_markup(candidate=candidate)
+    routing: dict[str, Any] = {}
+    if event is not None:
+        # Use the same pinned-runtime topic and DM-anchor rules as native replies.
+        # Keep these private dependencies here, not in the tool or identity layer.
+        from gateway.platforms.base import (  # type: ignore[import-not-found]
+            _reply_anchor_for_event,
+            _thread_metadata_for_source,
+        )
+
+        native: Any = adapter
+        metadata = _thread_metadata_for_source(
+            getattr(event, "source", None), _reply_anchor_for_event(event)
+        )
+        mode = native._reply_to_mode
+        reply_id = native._reply_to_message_id_for_send(
+            _reply_anchor_for_event(event), metadata, reply_to_mode=mode
+        )
+        routing = native._thread_kwargs_for_send(
+            str(chat_id),
+            native._metadata_thread_id(metadata),
+            metadata,
+            reply_to_message_id=reply_id,
+            reply_to_mode=mode,
+        )
+        if reply_id is not None:
+            routing["reply_to_message_id"] = reply_id
     if poster_url is not None:
         message = await bot.send_photo(
             chat_id=chat_id,
@@ -153,6 +231,7 @@ async def send_single_result_card(
             caption=caption,
             parse_mode="HTML",
             reply_markup=markup,
+            **routing,
         )
     else:
         message = await bot.send_message(
@@ -161,6 +240,7 @@ async def send_single_result_card(
             parse_mode="HTML",
             reply_markup=markup,
             disable_web_page_preview=True,
+            **routing,
         )
     return SimpleNamespace(success=True, message_id=str(message.message_id))
 

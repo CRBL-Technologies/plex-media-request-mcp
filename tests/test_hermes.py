@@ -13,7 +13,14 @@ import pytest
 from hermes_media import compat as compat_module
 from hermes_media import plugin
 from hermes_media.soul import SOUL_MD, install_soul
-from hermes_media.trusted import TrustError, actor_from_event, actor_scope
+from hermes_media.trusted import (
+    TrustError,
+    actor_from_event,
+    actor_scope,
+    claim_card_slot,
+    current_role,
+    require_actor,
+)
 from media_gateway.constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
 from media_gateway.tools import SHARED_SCHEMAS
 from media_gateway.types import Actor, Role
@@ -109,6 +116,31 @@ class FakeContext:
         self.tools.append(values)
 
 
+def session_owner() -> SimpleNamespace:
+    config = SimpleNamespace(group_sessions_per_user=False, thread_sessions_per_user=False)
+
+    def original_key(source: Any) -> str:
+        from gateway.session import build_session_key
+
+        return str(
+            build_session_key(
+                source,
+                group_sessions_per_user=config.group_sessions_per_user,
+                thread_sessions_per_user=config.thread_sessions_per_user,
+            )
+        )
+
+    return SimpleNamespace(
+        config=config,
+        session_store=SimpleNamespace(
+            config=config,
+            _generate_session_key=original_key,
+            _resolve_profile_for_key=lambda _source: None,
+        ),
+        _is_user_authorized=lambda source: source.user_id == "1001",
+    )
+
+
 async def test_plugin_registers_closed_inventory_and_binds_actor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -121,7 +153,9 @@ async def test_plugin_registers_closed_inventory_and_binds_actor(
     assert platform_hint == plugin.PLATFORM_HINT
     # The hint constrains what may be claimed, never which tool to reach for.
     assert "only source of truth for this library" in platform_hint
-    assert "never report something as requested unless a tool said so" in platform_hint
+    assert "never report something as requested unless a tool said so" in platform_hint.lower()
+    assert "only thing you can change" not in platform_hint
+    assert "administrators may also manage the library" in platform_hint
     assert "Choose the tools yourself" in platform_hint
     for prescription in (
         "call search_media in the current turn",
@@ -203,7 +237,7 @@ async def test_recommendations_return_conversational_status_without_picker(
         ],
         "media_type": "movie",
     }
-    with actor_scope(actor, Role.USER, "agent:main:telegram:dm:1001"):
+    with actor_scope(actor, Role.USER):
         raw = await plugin._handler("recommend_media")(arguments)
 
     result = json.loads(raw)
@@ -488,13 +522,211 @@ async def test_adapter_verifies_actor_before_trusting_gateway(
 ) -> None:
     gateway = FakeGateway()
     monkeypatch.setattr(plugin, "_client", gateway)
-    adapter = plugin.MediaTelegramAdapter(object())
+    adapter = plugin.MediaTelegramAdapter(SimpleNamespace(extra={}))
+    adapter.gateway_runner = session_owner()
     assert adapter.authorization_is_upstream is True
     assert adapter._is_user_authorized_from_message(object()) is True
     allowed = event(1001)
-    assert await adapter.handle_message(allowed) is allowed
+    await adapter.handle_message(allowed)
     with pytest.raises(PermissionError, match="not allowed"):
         await adapter.handle_message(event(7777))
+
+
+async def test_execution_rebinds_actor_role_and_card_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(plugin, "_client", FakeGateway())
+    adapter = plugin.MediaTelegramAdapter(SimpleNamespace(extra={}))
+    adapter.gateway_runner = session_owner()
+    seen: list[tuple[int, Role | None, bool]] = []
+
+    async def handler(_event: object) -> None:
+        seen.append((require_actor().user_id, current_role(), claim_card_slot()))
+
+    adapter.set_message_handler(handler)
+    with actor_scope(Actor(user_id=9001, chat_id=9001), Role.ADMIN):
+        assert claim_card_slot()
+        await adapter._message_handler(event(1001))
+        await adapter._message_handler(event(1001))
+        with pytest.raises(PermissionError, match="not allowed"):
+            await adapter._message_handler(event(7777))
+        # Native continuations retain their authenticated origin, not a new actor.
+        await adapter._message_handler(SimpleNamespace(source=Value(user_id=9001, chat_id=9001)))
+        with pytest.raises(TrustError, match="matching trusted"):
+            await adapter._message_handler(
+                SimpleNamespace(source=Value(user_id=1001, chat_id=1001))
+            )
+    assert seen == [(1001, Role.USER, True), (1001, Role.USER, True), (9001, Role.ADMIN, True)]
+    for config in (adapter.gateway_runner.config, adapter.gateway_runner.session_store.config):
+        assert config.group_sessions_per_user is False
+        assert config.thread_sessions_per_user is False
+    assert adapter._message_handler.__self__ is adapter.gateway_runner
+    assert adapter.config.extra == {
+        "group_sessions_per_user": True,
+        "thread_sessions_per_user": True,
+        "observe_unmentioned_group_messages": False,
+    }
+
+
+def test_missing_native_source_identity_is_not_a_shared_session_fallback() -> None:
+    incoming = event(1001)
+    incoming.source.user_id = None  # type: ignore[attr-defined]
+    with pytest.raises(TrustError, match="identities differ"):
+        actor_from_event(incoming)
+
+
+@pytest.mark.parametrize("chat_type,thread_id", [("group", None), ("forum", "77")])
+async def test_pinned_runtime_queued_users_remain_isolated(
+    monkeypatch: pytest.MonkeyPatch,
+    chat_type: str,
+    thread_id: str | None,
+) -> None:
+    """Run with the pinned Hermes source on PYTHONPATH, without contacting Telegram."""
+    base = pytest.importorskip("gateway.platforms.base")
+    config_module = pytest.importorskip("gateway.config")
+    session_module = pytest.importorskip("gateway.session")
+    monkeypatch.setattr(plugin, "_client", FakeGateway())
+    config = config_module.PlatformConfig(extra={}, typing_indicator=False)
+    config.extra["ingest_unmentioned_group_messages"] = True
+    monkeypatch.setenv("TELEGRAM_OBSERVE_UNMENTIONED_GROUP_MESSAGES", "true")
+    adapter = plugin.MediaTelegramAdapter(config)
+    adapter.gateway_runner = session_owner()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    other_done = asyncio.Event()
+    followup_done = asyncio.Event()
+    seen: list[tuple[str, int, Role | None, bool]] = []
+
+    async def handler(incoming: Any) -> None:
+        seen.append((incoming.text, require_actor().user_id, current_role(), claim_card_slot()))
+        if incoming.text == "admin":
+            entered.set()
+            await release.wait()
+        elif incoming.text == "user":
+            other_done.set()
+        else:
+            followup_done.set()
+
+    adapter.set_message_handler(handler)
+    assert adapter._telegram_observe_unmentioned_group_messages() is False
+
+    def incoming(text: str, user: int) -> Any:
+        raw = SimpleNamespace(from_user=SimpleNamespace(id=user), chat=SimpleNamespace(id=-100))
+        return base.MessageEvent(
+            text=text,
+            message_type=base.MessageType.TEXT,
+            raw_message=raw,
+            source=session_module.SessionSource(
+                platform=config_module.Platform.TELEGRAM,
+                chat_id="-100",
+                user_id=str(user),
+                chat_type=chat_type,
+                thread_id=thread_id,
+            ),
+        )
+
+    key_for = adapter.gateway_runner.session_store._generate_session_key
+    assert key_for(incoming("admin", 9001).source) != key_for(incoming("user", 1001).source)
+    # The canonical history key and adapter queue key must agree.
+    assert key_for(incoming("user", 1001).source) == session_module.build_session_key(
+        incoming("user", 1001).source,
+        group_sessions_per_user=True,
+        thread_sessions_per_user=True,
+    )
+    slack_sources = [
+        session_module.SessionSource(
+            platform=config_module.Platform.SLACK,
+            chat_id="C1",
+            user_id=user,
+            chat_type="group",
+            thread_id="T1",
+            scope_id="W1",
+        )
+        for user in ("U1", "U2")
+    ]
+    assert key_for(slack_sources[0]) == key_for(slack_sources[1])
+
+    try:
+        await adapter.handle_message(incoming("admin", 9001))
+        await asyncio.wait_for(entered.wait(), 2)
+        await adapter.handle_message(incoming("followup", 9001))
+        await adapter.handle_message(incoming("user", 1001))
+        await asyncio.wait_for(other_done.wait(), 2)
+        release.set()
+        await asyncio.wait_for(followup_done.wait(), 2)
+        assert seen == [
+            ("admin", 9001, Role.ADMIN, True),
+            ("user", 1001, Role.USER, True),
+            ("followup", 9001, Role.ADMIN, True),
+        ]
+    finally:
+        release.set()
+        tasks = list(adapter._background_tasks)
+        if tasks:
+            await asyncio.wait_for(asyncio.gather(*tasks), 2)
+
+
+@pytest.mark.parametrize("photo", [True, False])
+@pytest.mark.parametrize("chat_type,thread_id", [("forum", "77"), ("dm", "77"), ("dm", None)])
+async def test_pinned_runtime_cards_preserve_topic_and_dm_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+    photo: bool,
+    chat_type: str,
+    thread_id: str | None,
+) -> None:
+    base = pytest.importorskip("gateway.platforms.base")
+    config_module = pytest.importorskip("gateway.config")
+    session_module = pytest.importorskip("gateway.session")
+    adapter = plugin.MediaTelegramAdapter(config_module.PlatformConfig())
+    sent: list[dict[str, Any]] = []
+
+    async def send(**kwargs: Any) -> SimpleNamespace:
+        sent.append(kwargs)
+        return SimpleNamespace(message_id=123)
+
+    adapter._bot = SimpleNamespace(send_photo=send, send_message=send)
+    telegram = ModuleType("telegram")
+    telegram.InlineKeyboardButton = object  # type: ignore[attr-defined]
+    telegram.InlineKeyboardMarkup = object  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "telegram", telegram)
+    incoming = base.MessageEvent(
+        text="movie",
+        message_type=base.MessageType.TEXT,
+        message_id="456",
+        source=session_module.SessionSource(
+            platform=config_module.Platform.TELEGRAM,
+            chat_id="1001",
+            user_id="1001",
+            chat_type=chat_type,
+            thread_id=thread_id,
+        ),
+    )
+    await compat_module.send_single_result_card(
+        adapter,
+        chat_id=1001,
+        poster_url="https://example.com/poster.jpg" if photo else None,
+        caption="Movie",
+        candidate={},
+        event=incoming,
+    )
+    assert sent[0]["message_thread_id"] == (77 if thread_id else None)
+    assert sent[0].get("reply_to_message_id") == (456 if chat_type == "dm" else None)
+
+
+def test_pinned_runtime_native_callbacks_keep_runner_authorization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_module = pytest.importorskip("gateway.config")
+    adapter = plugin.MediaTelegramAdapter(config_module.PlatformConfig())
+    adapter.gateway_runner = session_owner()
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USERS", "7777")
+
+    async def handler(_event: Any) -> None:
+        pass
+
+    adapter.set_message_handler(handler)
+    assert adapter._is_callback_user_authorized("1001", chat_id="1001") is True
+    assert adapter._is_callback_user_authorized("7777", chat_id="7777") is False
 
 
 def test_platform_visibility_adds_search_only_for_media_telegram(
@@ -799,7 +1031,7 @@ async def test_only_one_card_is_pushed_per_user_message(monkeypatch: pytest.Monk
     monkeypatch.setattr(plugin, "_active_adapter", adapter)
     actor = Actor(user_id=1001, chat_id=1001)
 
-    with actor_scope(actor, Role.USER, "agent:main:telegram:dm:1001"):
+    with actor_scope(actor, Role.USER):
         first = json.loads(await plugin._handler("search_media")({"query": "Arrival"}))
         second = json.loads(await plugin._handler("search_media")({"query": "Ex Machina"}))
 
@@ -811,7 +1043,7 @@ async def test_only_one_card_is_pushed_per_user_message(monkeypatch: pytest.Monk
     assert "already sent" in first["telegram_presentation"]["instruction"]
     assert "already sent" not in second["telegram_presentation"]["instruction"]
     # The next message earns its own card.
-    with actor_scope(actor, Role.USER, "agent:main:telegram:dm:1001"):
+    with actor_scope(actor, Role.USER):
         await plugin._handler("search_media")({"query": "Dark City"})
     assert len(adapter.sent) == 2
 

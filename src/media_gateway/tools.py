@@ -936,7 +936,7 @@ class ToolService:
         if candidate is None or candidate["year"] is None:
             raise ToolError("Radarr returned incomplete movie metadata")
         existing_id = source.get("id")
-        held = await self._movie_is_held(existing_id)
+        record = await self._movie_record(existing_id)
         request_id = self.store.begin_request(
             media_type="movie",
             external_id=tmdb_id,
@@ -954,7 +954,7 @@ class ToolService:
                 tmdb_id=tmdb_id,
                 candidate=candidate,
                 existing_id=existing_id,
-                held=held,
+                record=record,
                 requester=actor.user_id,
             )
         except Exception:
@@ -971,8 +971,10 @@ class ToolService:
             },
         }
 
-    async def _movie_is_held(self, existing_id: object) -> bool:
-        """Whether Radarr already holds the file for a tracked movie.
+    async def _movie_record(self, existing_id: object) -> dict[str, Any] | None:
+        """The library record of a tracked movie, or None when it is not tracked.
+
+        Radarr's lookup answers "does this film exist", not "do we hold it": it
 
         Radarr's lookup answers "does this film exist", not "do we hold it": it
         returns the catalogue entry, where hasFile is null even for a film on
@@ -982,11 +984,11 @@ class ToolService:
         """
 
         if not isinstance(existing_id, int) or existing_id <= 0:
-            return False
+            return None
         record = _record(await self.upstream.call("radarr_get_movie", {"id": existing_id}))
         if record is None or not isinstance(record.get("hasFile"), bool):
             raise UpstreamError("movie availability is unavailable")
-        return bool(record["hasFile"])
+        return record
 
     async def _fulfill_movie_request(
         self,
@@ -994,11 +996,25 @@ class ToolService:
         tmdb_id: int,
         candidate: dict[str, Any],
         existing_id: object,
-        held: bool,
+        record: dict[str, Any] | None,
         requester: int,
     ) -> str:
-        if held:
-            return "available"
+        if isinstance(existing_id, int) and existing_id > 0 and record is not None:
+            # A list import can sit on a lighter profile than requests get. Once a
+            # person asks for it, it earns the request profile, even when a file
+            # is already there: Radarr then upgrades that file in place.
+            current = record.get("qualityProfileId")
+            moved = isinstance(current, int) and current != self.config.radarr_profile_id
+            if moved:
+                with contextlib.suppress(UpstreamError):
+                    await self.upstream.set_quality_profile(
+                        "radarr", existing_id, self.config.radarr_profile_id
+                    )
+            if record["hasFile"]:
+                await self._tag_existing("radarr", existing_id, requester)
+                if moved:
+                    await self.upstream.call("radarr_search_movie_releases", {"id": existing_id})
+                return "available"
         if isinstance(existing_id, int) and existing_id > 0:
             await self.upstream.call("radarr_update_movie", {"id": existing_id, "monitored": True})
             await self.upstream.call("radarr_search_movie_releases", {"id": existing_id})
@@ -1321,7 +1337,7 @@ class ToolService:
             tmdb_id=tmdb_id,
             candidate=candidate,
             existing_id=source.get("id"),
-            held=await self._movie_is_held(source.get("id")),
+            record=await self._movie_record(source.get("id")),
             requester=int(intent["user_id"]),
         )
 

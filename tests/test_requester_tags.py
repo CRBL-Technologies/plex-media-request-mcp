@@ -186,3 +186,94 @@ async def test_add_tags_keeps_existing_tags(
     assert seen == [
         ("PUT", "/api/v3/movie/editor", b'{"movieIds":[55],"tags":[14],"applyTags":"add"}')
     ]
+
+
+def _held_movie(fake: FakeUpstream, *, profile: int, has_file: bool = True) -> None:
+    fake.responses["radarr_search_movie"] = {
+        "data": [{"tmdbId": 123, "title": "A Movie", "year": 2026, "id": 55}]
+    }
+    fake.responses["radarr_get_movie"] = {
+        "id": 55,
+        "hasFile": has_file,
+        "qualityProfileId": profile,
+    }
+
+
+def test_requesting_a_held_list_movie_moves_it_to_the_request_profile(config: Config) -> None:
+    app = create_app(config)
+    fake = FakeUpstream()
+    _held_movie(fake, profile=30)
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = _call(client, "request_movie", {"tmdb_id": 123}, first_name="Katy")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["status"] == "available"
+    assert ("set_quality_profile", {"service": "radarr", "id": 55, "profile": 10}) in fake.calls
+    assert ("add_tags", {"service": "radarr", "id": 55, "tags": [100]}) in fake.calls
+    # The file stays watchable; the search fetches the better copy to replace it.
+    assert ("radarr_search_movie_releases", {"id": 55}) in fake.calls
+
+
+def test_requesting_a_held_movie_already_on_the_request_profile_only_tags(config: Config) -> None:
+    app = create_app(config)
+    fake = FakeUpstream()
+    _held_movie(fake, profile=10)
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = _call(client, "request_movie", {"tmdb_id": 123}, first_name="Katy")
+
+    assert response.json()["result"]["status"] == "available"
+    names = [name for name, _ in fake.calls]
+    assert "set_quality_profile" not in names
+    assert "radarr_search_movie_releases" not in names
+    assert ("add_tags", {"service": "radarr", "id": 55, "tags": [100]}) in fake.calls
+
+
+def test_requesting_a_missing_list_movie_moves_it_and_searches(config: Config) -> None:
+    app = create_app(config)
+    fake = FakeUpstream()
+    _held_movie(fake, profile=30, has_file=False)
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = _call(client, "request_movie", {"tmdb_id": 123}, first_name="Katy")
+
+    assert response.json()["result"]["status"] == "search_started"
+    names = [name for name, _ in fake.calls]
+    assert names.index("set_quality_profile") < names.index("radarr_search_movie_releases")
+
+
+def test_a_failed_profile_move_still_serves_the_request(config: Config) -> None:
+    app = create_app(config)
+    fake = FakeUpstream()
+    _held_movie(fake, profile=30)
+    fake.responses["set_quality_profile"] = UpstreamError("Radarr profile unavailable")
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        response = _call(client, "request_movie", {"tmdb_id": 123}, first_name="Katy")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["status"] == "available"
+
+
+async def test_set_quality_profile_uses_the_editor(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "media_gateway.upstream.read_dotenv",
+        lambda *_args: {"RADARR_URL": "http://radarr:7878", "RADARR_API_KEY": "k" * 32},
+    )
+    seen: list[tuple[str, str, bytes]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, request.read()))
+        return httpx.Response(202, json=[])
+
+    client = httpx.AsyncClient
+    monkeypatch.setattr(
+        "media_gateway.upstream.httpx.AsyncClient",
+        lambda **kwargs: client(transport=httpx.MockTransport(respond), **kwargs),
+    )
+    upstream = Upstream(config.upstream_url, config.upstream_token_file)
+    await upstream.set_quality_profile("radarr", 55, 25)
+    assert seen == [("PUT", "/api/v3/movie/editor", b'{"movieIds":[55],"qualityProfileId":25}')]

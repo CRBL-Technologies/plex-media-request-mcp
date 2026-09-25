@@ -58,6 +58,14 @@ class FakeUpstream:
         if isinstance(value, Exception):
             raise value
 
+    async def set_quality_profile(self, service: str, item_id: int, profile_id: int) -> None:
+        self.calls.append(
+            ("set_quality_profile", {"service": service, "id": item_id, "profile": profile_id})
+        )
+        value = self.responses.get("set_quality_profile")
+        if isinstance(value, Exception):
+            raise value
+
     async def plex_episodes(self, rating_key: str) -> list[dict[str, Any]]:
         self.calls.append(("plex_episodes", {"ratingKey": rating_key}))
         value = self.responses.get("plex_episodes", [])

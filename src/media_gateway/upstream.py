@@ -165,6 +165,27 @@ class Upstream:
         except Exception as exc:
             raise UpstreamError(f"{service.capitalize()} tags could not be applied") from exc
 
+    async def set_quality_profile(self, service: str, item_id: int, profile_id: int) -> None:
+        """Move one tracked movie or series to another quality profile."""
+
+        base, api_key = self._arr(service)
+        path, key = {
+            "radarr": ("movie/editor", "movieIds"),
+            "sonarr": ("series/editor", "seriesIds"),
+        }[service]
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                response = await client.put(
+                    f"{base}/api/v3/{path}",
+                    headers={"X-Api-Key": api_key},
+                    json={key: [item_id], "qualityProfileId": profile_id},
+                )
+            response.raise_for_status()
+        except Exception as exc:
+            raise UpstreamError(
+                f"{service.capitalize()} quality profile could not be changed"
+            ) from exc
+
     async def radarr_queue(self, *, limit: int = 50) -> list[dict[str, Any]]:
         """Read the Radarr queue missing from upstream MCP 2.3.0.
 

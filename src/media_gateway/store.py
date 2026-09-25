@@ -109,6 +109,17 @@ class Store:
                     ),
                 )
 
+    def user_names(self, user_id: int) -> tuple[str | None, str | None]:
+        """The first name and username last observed for a Telegram user."""
+
+        with self._db() as db:
+            row = db.execute(
+                "SELECT first_name, username FROM users WHERE user_id=?", (user_id,)
+            ).fetchone()
+        if row is None:
+            return None, None
+        return row["first_name"], row["username"]
+
     def record_activity(self, kind: str, label: str, user_id: int | None = None) -> None:
         if len(kind) > 32 or len(label) > 200:
             raise ValueError("activity value is too long")

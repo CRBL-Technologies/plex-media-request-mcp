@@ -90,17 +90,13 @@ class Upstream:
                 return {"message": text[:2000]}
         return {}
 
-    async def radarr_queue(self, *, limit: int = 50) -> list[dict[str, Any]]:
-        """Read the Radarr queue missing from upstream MCP 2.3.0.
+    def _arr(self, service: str) -> tuple[str, str]:
+        """Base URL and API key for Radarr or Sonarr from the upstream secrets."""
 
-        The pinned upstream advertises ``radarr_get_queue`` in its full tool
-        profile but does not register an implementation. Keep this narrow and
-        read-only until upstream provides the tool.
-        """
-
-        values = read_dotenv(self.token_file, {"RADARR_URL", "RADARR_API_KEY"})
-        base = values.get("RADARR_URL", "").rstrip("/")
-        api_key = values.get("RADARR_API_KEY", "")
+        prefix = {"radarr": "RADARR", "sonarr": "SONARR"}[service]
+        values = read_dotenv(self.token_file, {f"{prefix}_URL", f"{prefix}_API_KEY"})
+        base = values.get(f"{prefix}_URL", "").rstrip("/")
+        api_key = values.get(f"{prefix}_API_KEY", "")
         parsed = urlsplit(base)
         if (
             parsed.scheme not in {"http", "https"}
@@ -111,7 +107,76 @@ class Upstream:
             or parsed.fragment
             or len(api_key) < 16
         ):
-            raise UpstreamError("Radarr queue configuration is invalid")
+            raise UpstreamError(f"{service.capitalize()} configuration is invalid")
+        return base, api_key
+
+    async def ensure_tag(self, service: str, label: str) -> int:
+        """Return the ID of a Radarr/Sonarr tag, creating it when missing.
+
+        Upstream MCP 2.3.0 has no tag tools, and a tag must exist before an
+        item can carry it. Both apps compare labels case-insensitively and
+        reject duplicates, so look up before creating.
+        """
+
+        base, api_key = self._arr(service)
+        headers = {"X-Api-Key": api_key}
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                response = await client.get(f"{base}/api/v3/tag", headers=headers)
+                response.raise_for_status()
+                tags = response.json()
+                if not isinstance(tags, list):
+                    raise ValueError("invalid tag list")
+                for tag in tags:
+                    if (
+                        isinstance(tag, dict)
+                        and isinstance(tag.get("label"), str)
+                        and tag["label"].casefold() == label.casefold()
+                        and isinstance(tag.get("id"), int)
+                    ):
+                        return int(tag["id"])
+                response = await client.post(
+                    f"{base}/api/v3/tag", headers=headers, json={"label": label}
+                )
+                response.raise_for_status()
+                created = response.json()
+        except Exception as exc:
+            raise UpstreamError(f"{service.capitalize()} tags are unavailable") from exc
+        if not isinstance(created, dict) or not isinstance(created.get("id"), int):
+            raise UpstreamError(f"{service.capitalize()} returned an invalid tag")
+        return int(created["id"])
+
+    async def add_tags(self, service: str, item_id: int, tag_ids: list[int]) -> None:
+        """Add tags to one tracked movie or series, keeping the tags it has."""
+
+        base, api_key = self._arr(service)
+        path, key = {
+            "radarr": ("movie/editor", "movieIds"),
+            "sonarr": ("series/editor", "seriesIds"),
+        }[service]
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                response = await client.put(
+                    f"{base}/api/v3/{path}",
+                    headers={"X-Api-Key": api_key},
+                    json={key: [item_id], "tags": tag_ids, "applyTags": "add"},
+                )
+            response.raise_for_status()
+        except Exception as exc:
+            raise UpstreamError(f"{service.capitalize()} tags could not be applied") from exc
+
+    async def radarr_queue(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        """Read the Radarr queue missing from upstream MCP 2.3.0.
+
+        The pinned upstream advertises ``radarr_get_queue`` in its full tool
+        profile but does not register an implementation. Keep this narrow and
+        read-only until upstream provides the tool.
+        """
+
+        try:
+            base, api_key = self._arr("radarr")
+        except UpstreamError:
+            raise UpstreamError("Radarr queue configuration is invalid") from None
         try:
             async with httpx.AsyncClient(timeout=20) as client:
                 response = await client.get(

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
+import unicodedata
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -20,6 +22,24 @@ from .upstream import Upstream, UpstreamError
 
 class ToolError(ValueError):
     pass
+
+
+def requester_tag_label(first_name: str | None, username: str | None) -> str | None:
+    """The Radarr/Sonarr tag naming who asked: first name, else username.
+
+    Both apps accept only lowercase ASCII letters, digits and hyphens, so
+    "Zoë Ann" becomes ``zoe-ann``. A name with nothing left after that falls
+    back to the username, and a user with neither gets no tag.
+    """
+
+    for raw in (first_name, username):
+        if not raw:
+            continue
+        folded = unicodedata.normalize("NFKD", raw).encode("ascii", "ignore").decode()
+        label = re.sub(r"[^a-z0-9]+", "-", folded.lower()).strip("-")[:40].strip("-")
+        if label:
+            return label
+    return None
 
 
 def _object(value: object, *, name: str = "arguments") -> dict[str, Any]:
@@ -935,6 +955,7 @@ class ToolService:
                 candidate=candidate,
                 existing_id=existing_id,
                 held=held,
+                requester=actor.user_id,
             )
         except Exception:
             self.store.mark_request_unknown(request_id, generation=generation)
@@ -974,12 +995,14 @@ class ToolService:
         candidate: dict[str, Any],
         existing_id: object,
         held: bool,
+        requester: int,
     ) -> str:
         if held:
             return "available"
         if isinstance(existing_id, int) and existing_id > 0:
             await self.upstream.call("radarr_update_movie", {"id": existing_id, "monitored": True})
             await self.upstream.call("radarr_search_movie_releases", {"id": existing_id})
+            await self._tag_existing("radarr", existing_id, requester)
             return "search_started"
         await self.upstream.call(
             "radarr_add_movie",
@@ -992,10 +1015,36 @@ class ToolService:
                 "minimumAvailability": "released",
                 "monitored": True,
                 "searchForMovie": True,
-                "tags": list(self.config.radarr_tags),
+                "tags": sorted(
+                    {*self.config.radarr_tags, *await self._requester_tags("radarr", requester)}
+                ),
             },
         )
         return "requested"
+
+    async def _requester_tags(self, service: str, user_id: int) -> list[int]:
+        """The requester's name tag, or none when it cannot be resolved.
+
+        The tag only records who asked, so a missing name or an unreachable
+        tag API must never fail the request itself.
+        """
+
+        label = requester_tag_label(*self.store.user_names(user_id))
+        if label is None:
+            return []
+        try:
+            return [await self.upstream.ensure_tag(service, label)]
+        except UpstreamError:
+            return []
+
+    async def _tag_existing(self, service: str, item_id: int, user_id: int) -> None:
+        """Credit a re-request of a tracked title to the person who asked."""
+
+        tags = await self._requester_tags(service, user_id)
+        if not tags:
+            return
+        with contextlib.suppress(UpstreamError):
+            await self.upstream.add_tags(service, item_id, tags)
 
     async def _series_seasons(
         self, arguments: object, _actor: Actor, _role: Role
@@ -1102,6 +1151,7 @@ class ToolService:
                 candidate=candidate,
                 existing_id=existing_id,
                 known_seasons=known_seasons,
+                requester=actor.user_id,
             )
         except Exception:
             self.store.mark_request_unknown(request_id, generation=generation)
@@ -1127,6 +1177,7 @@ class ToolService:
         candidate: dict[str, Any],
         existing_id: object,
         known_seasons: set[int],
+        requester: int,
     ) -> str:
         if isinstance(existing_id, int) and existing_id > 0:
             current = _record(
@@ -1177,6 +1228,7 @@ class ToolService:
                 await self.upstream.call(
                     "sonarr_search_season", {"seriesId": existing_id, "seasonNumber": season}
                 )
+            await self._tag_existing("sonarr", existing_id, requester)
         else:
             season_options = [
                 {"seasonNumber": number, "monitored": number in seasons}
@@ -1196,7 +1248,9 @@ class ToolService:
                     "monitored": True,
                     "seasonFolder": True,
                     "seriesType": "anime" if anime else "standard",
-                    "tags": list(self.config.sonarr_tags),
+                    "tags": sorted(
+                        {*self.config.sonarr_tags, *await self._requester_tags("sonarr", requester)}
+                    ),
                     "seasons": season_options,
                     "searchForMissingEpisodes": True,
                 },
@@ -1268,6 +1322,7 @@ class ToolService:
             candidate=candidate,
             existing_id=source.get("id"),
             held=await self._movie_is_held(source.get("id")),
+            requester=int(intent["user_id"]),
         )
 
     async def _reconcile_series_intent(self, intent: dict[str, Any]) -> str:
@@ -1299,6 +1354,7 @@ class ToolService:
             candidate=candidate,
             existing_id=source.get("id"),
             known_seasons=known_seasons,
+            requester=int(intent["user_id"]),
         )
 
     async def _request_status(self, arguments: object, actor: Actor, role: Role) -> dict[str, Any]:

@@ -24,6 +24,7 @@ class FakeUpstream:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.responses: dict[str, Any] = {}
         self.tool_schemas: list[dict[str, Any]] = []
+        self.tags: dict[str, int] = {}
 
     async def list_tools(self) -> list[dict[str, Any]]:
         return self.tool_schemas
@@ -43,6 +44,19 @@ class FakeUpstream:
         if isinstance(value, Exception):
             raise value
         return value if isinstance(value, list) else []
+
+    async def ensure_tag(self, service: str, label: str) -> int:
+        self.calls.append(("ensure_tag", {"service": service, "label": label}))
+        value = self.responses.get("ensure_tag")
+        if isinstance(value, Exception):
+            raise value
+        return self.tags.setdefault(label, 100 + len(self.tags))
+
+    async def add_tags(self, service: str, item_id: int, tag_ids: list[int]) -> None:
+        self.calls.append(("add_tags", {"service": service, "id": item_id, "tags": tag_ids}))
+        value = self.responses.get("add_tags")
+        if isinstance(value, Exception):
+            raise value
 
     async def plex_episodes(self, rating_key: str) -> list[dict[str, Any]]:
         self.calls.append(("plex_episodes", {"ratingKey": rating_key}))

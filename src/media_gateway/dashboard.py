@@ -89,6 +89,8 @@ def _page(content: str, *, title: str = "Media admin") -> str:
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(title)} · CRBL</title>
 <meta name="theme-color" content="#EFEBE1">
 <link rel="icon" href="/assets/favicon.svg?v=atelier" type="image/svg+xml">
+<link rel="apple-touch-icon" sizes="180x180" href="/assets/brand/apple-touch-icon.png?v=1">
+<meta name="apple-mobile-web-app-title" content="Media admin">
 <link rel="stylesheet" href="/assets/brand/colors_and_type.css">
 <link rel="stylesheet" href="/assets/app.css"></head><body>{content}</body></html>"""
 

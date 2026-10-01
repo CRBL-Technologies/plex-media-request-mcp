@@ -1,0 +1,361 @@
+/* ============================================================
+   CRBL Design System — tokens
+   Direction: "Atelier" — stone paper, warm ink, one muted
+   antique gold. Space Grotesk display, sharp corners, wide-
+   tracked mono labels. Quiet, premium, zero decoration.
+   ============================================================ */
+
+/* Self-hosted variable fonts. Use the standard format hints so the
+   declarations also work in browsers that reject legacy *-variations hints. */
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('fonts/InterVariable.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: italic;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('fonts/InterVariable-Italic.woff2') format('woff2');
+}
+
+/* Space Grotesk — display face for headings and the wordmark. */
+@font-face {
+  font-family: 'Space Grotesk';
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url('fonts/SpaceGrotesk-Variable.woff2') format('woff2');
+}
+
+/* JetBrains Mono — self-hosted variable TTF covers all weights (100–800). */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url('fonts/JetBrainsMono.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: italic;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url('fonts/JetBrainsMono-Italic.ttf') format('truetype');
+}
+
+:root {
+  /* -------- Primary palette — Stone & Gold -------- */
+  --color-bg:              #EFEBE1; /* stone paper — page canvas, never pure white */
+  --color-surface:         #F7F4EC; /* bright stone — cards, inputs, elevated */
+  --color-accent:          #C9A45C; /* light gold — highlights, decorative */
+  --color-accent-dark:     #A67B2D; /* antique gold — CTAs, links, the B */
+  --color-accent-darker:   #8A6420; /* deep gold — button hover / active */
+  --color-accent-deepest:  #6E4F17; /* deepest gold — button pressed */
+
+  --color-text:            #221F19; /* warm ink — headings, body */
+  --color-text-muted:      #6E675A; /* warm gray — secondary, captions */
+  --color-text-light:      #8A8172; /* light warm gray — placeholders, hints */
+
+  --color-border:          #D6D0C0; /* stone — cards, dividers */
+  --color-border-dark:     #C4BCA8; /* dark stone — hover, active input */
+
+  /* -------- Semantic colors -------- */
+  --color-success:         #3F6C4F;
+  --color-success-bg:      #EDF2E9;
+  --color-error:           #A8402F;
+  --color-error-bg:        #F5E9E6;
+  --color-warning:         #A67B2D; /* same as accent-dark */
+  --color-warning-bg:      #F5EDD8;
+  --color-info:            #3B5A82;
+  --color-info-bg:         #E9EEF4;
+
+  /* -------- Reserved for future dark mode -------- */
+  --color-bg-dark:         #221F19;
+  --color-surface-dark:    #2C2820;
+  --color-accent-onDark:   #C9A45C;
+  --color-accent-dark-onDark: #C9A45C;
+  --color-text-onDark:     #EFEBE1;
+  --color-text-muted-onDark: #8A8172;
+  --color-border-onDark:   #4E4838;
+
+  /* -------- Typography families -------- */
+  --font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-display: 'Space Grotesk', 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Geist Mono', 'Fira Code', ui-monospace, monospace;
+
+  /* -------- Type scale -------- */
+  --font-size-h1: 48px;
+  --font-size-h2: 32px;
+  --font-size-h3: 24px;
+  --font-size-h4: 18px;
+  --font-size-body: 16px;
+  --font-size-body-sm: 14px;
+  --font-size-caption: 12px;
+  --font-size-code-inline: 14px;
+  --font-size-code-block: 13px;
+
+  --line-height-h1: 1.1;
+  --line-height-h2: 1.2;
+  --line-height-h3: 1.3;
+  --line-height-h4: 1.4;
+  --line-height-body: 1.6;
+  --line-height-tight: 1.4;
+
+  --font-weight-regular: 400;
+  --font-weight-medium:  500; /* buttons + display headings */
+  --font-weight-semibold: 600; /* wordmark, small headings */
+  --font-weight-bold: 700;    /* rare emphasis only */
+
+  /* -------- Spacing — base unit 4px -------- */
+  --space-xs:  4px;
+  --space-sm:  8px;
+  --space-md:  16px;
+  --space-lg:  24px;
+  --space-xl:  32px;
+  --space-2xl: 48px;
+  --space-3xl: 64px;
+  --space-4xl: 96px;
+
+  /* -------- Border radius — sharp; the geometry is the brand -------- */
+  --radius-sm: 0;
+  --radius-md: 0;
+  --radius-lg: 0;
+  --radius-xl: 0;
+  --radius-full: 9999px; /* reserved; not used by core components */
+
+  /* -------- Shadows — minimal, prefer borders -------- */
+  --shadow-sm: 0 1px 2px rgba(34, 31, 25, 0.05);
+  --shadow-md: 0 4px 6px rgba(34, 31, 25, 0.07);
+  --shadow-lg: 0 10px 15px rgba(34, 31, 25, 0.10);
+
+  /* -------- Motion -------- */
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1); /* @kind other */
+  --duration-fast: 150ms; /* @kind other */
+  --duration-base: 200ms; /* @kind other */
+  --duration-slow: 600ms; /* @kind other */
+
+  /* -------- Layout -------- */
+  --content-max-width: 640px; /* body text line-length cap */
+  --page-max-width: 1024px;   /* section-container (max-w-5xl) */
+}
+
+/* ============================================================
+   Semantic element styles
+   Baseline resets + typography so raw HTML renders on-brand.
+   ============================================================ */
+
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-body);
+  line-height: var(--line-height-body);
+  font-weight: var(--font-weight-regular);
+}
+
+::selection {
+  background: rgba(166, 123, 45, 0.20); /* antique gold/20 */
+  color: var(--color-text);
+}
+
+h1, h2, h3, h4, h5, h6 {
+  color: var(--color-text);
+  font-family: var(--font-display);
+  font-weight: var(--font-weight-medium);
+  letter-spacing: -0.01em;
+  margin: 0 0 var(--space-md);
+  text-wrap: balance;
+}
+
+h1 { font-size: var(--font-size-h1); line-height: var(--line-height-h1); letter-spacing: -0.025em; }
+h2 { font-size: var(--font-size-h2); line-height: var(--line-height-h2); letter-spacing: -0.015em; }
+h3 { font-size: var(--font-size-h3); line-height: var(--line-height-h3); }
+h4 { font-size: var(--font-size-h4); line-height: var(--line-height-h4); }
+
+p {
+  margin: 0 0 var(--space-md);
+  max-width: var(--content-max-width);
+  text-wrap: pretty;
+}
+
+.small, small {
+  font-size: var(--font-size-body-sm);
+  color: var(--color-text-muted);
+  line-height: 1.5;
+}
+
+.caption {
+  font-size: var(--font-size-caption);
+  color: var(--color-text-light);
+  line-height: var(--line-height-tight);
+}
+
+a {
+  color: var(--color-accent-dark);
+  text-decoration: none;
+  transition: color var(--duration-fast) var(--ease-standard);
+}
+a:hover { color: var(--color-accent-darker); }
+
+code {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-code-inline);
+  background: var(--color-surface);
+  color: var(--color-text);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+}
+
+pre {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-code-block);
+  line-height: var(--line-height-body);
+  background: var(--color-text); /* #221F19 */
+  color: #EFEBE1;
+  padding: 16px 20px;
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+}
+pre code { background: transparent; color: inherit; padding: 0; }
+
+hr {
+  border: 0;
+  border-top: 1px solid var(--color-border);
+  margin: var(--space-xl) 0;
+}
+
+/* ============================================================
+   Component primitives — Atelier
+   ============================================================ */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: var(--font-weight-medium);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  border-radius: 0;
+  padding: 13px 26px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background var(--duration-fast) var(--ease-standard),
+              border-color var(--duration-fast) var(--ease-standard),
+              color var(--duration-fast) var(--ease-standard),
+              transform var(--duration-fast) var(--ease-standard);
+}
+.btn-primary {
+  background: var(--color-text);
+  color: var(--color-bg);
+}
+.btn-primary:hover { background: #3A352A; color: var(--color-bg); }
+.btn-primary:active { background: #4E4838; transform: scale(0.98); }
+.btn-primary:disabled { background: var(--color-border); color: var(--color-text-light); cursor: not-allowed; }
+
+.btn-secondary {
+  background: transparent;
+  color: var(--color-accent-dark);
+  border-color: var(--color-accent-dark);
+}
+.btn-secondary:hover { background: rgba(166,123,45,0.08); color: var(--color-accent-darker); border-color: var(--color-accent-darker); }
+
+.btn-ghost {
+  background: transparent;
+  color: var(--color-text-muted);
+  padding: 13px 14px;
+}
+.btn-ghost:hover { background: var(--color-surface); color: var(--color-text); }
+
+.card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-lg);
+  transition: border-color var(--duration-base) var(--ease-standard),
+              transform var(--duration-base) var(--ease-standard);
+}
+.card:hover { border-color: var(--color-border-dark); }
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: var(--font-weight-regular);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  padding: 4px 10px 4px 12px;
+  border-radius: 0;
+  border: 1px solid transparent;
+}
+.badge-coming   { background: var(--color-surface);    color: var(--color-accent-dark); border-color: var(--color-accent); }
+.badge-beta     { background: var(--color-warning-bg); color: var(--color-accent-darker); border-color: var(--color-accent-dark); }
+.badge-live     { background: var(--color-success-bg); color: var(--color-success); border-color: var(--color-success); }
+.badge-deprecated { background: var(--color-error-bg); color: var(--color-error); border-color: var(--color-error); }
+
+.input {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-body);
+  background: var(--color-surface);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+  width: 100%;
+  transition: border-color var(--duration-fast) var(--ease-standard);
+}
+.input::placeholder { color: var(--color-text-light); }
+.input:hover { border-color: var(--color-border-dark); }
+.input:focus { outline: none; border-color: var(--color-accent-dark); }
+
+/* ============================================================
+   Utility classes used across kits and previews
+   ============================================================ */
+.section-container {
+  max-width: var(--page-max-width);
+  margin: 0 auto;
+  padding: var(--space-4xl) var(--space-lg);
+}
+.mono { font-family: var(--font-mono); }
+.muted { color: var(--color-text-muted); }
+.light { color: var(--color-text-light); }
+
+/* Optional noise texture overlay */
+.noise::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  pointer-events: none;
+  opacity: 0.025;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 256px 256px;
+}
+
+/* Gradient blobs retired in the Atelier direction — kept as a no-op for old kits. */
+.gradient-blob { display: none; }
+
+/* Hero staggered entrance */
+@keyframes crbl-fade-in-up {
+  from { opacity: 0; transform: translateY(20px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.hero-animate { opacity: 0; animation: crbl-fade-in-up 0.8s ease-out forwards; }
+.hero-animate-delay-1 { animation-delay: 0.10s; }
+.hero-animate-delay-2 { animation-delay: 0.25s; }
+.hero-animate-delay-3 { animation-delay: 0.40s; }

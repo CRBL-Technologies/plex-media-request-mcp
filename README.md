@@ -163,6 +163,18 @@ notifications.
 
 ## Deployment
 
+### Dashboard design
+
+The Media admin dashboard uses CRBL Atelier: stone paper, warm ink, antique
+gold, square controls, and self-hosted Space Grotesk, Inter, and JetBrains Mono.
+`src/media_gateway/static/brand/` contains the shared stylesheet and fonts from
+the CRBL design-system revision `00d9f06` (2026-10-01 adoption). Keep that bundle
+in sync with the shared source; dashboard-specific layout stays in `dashboard.py`.
+The existing media clapperboard favicon uses the same palette. Fonts and icons
+are served locally under the existing same-origin content security policy.
+
+### Runtime
+
 Copy the examples in `deployment/` and provide only host paths and immutable
 image references as Portainer stack variables. Runtime settings live once in
 `gateway.env`; upstream provider credentials live once in `upstream.env`; key

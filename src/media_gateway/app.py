@@ -9,6 +9,7 @@ import logging
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -22,7 +23,8 @@ from starlette.responses import (
     RedirectResponse,
     Response,
 )
-from starlette.routing import Route
+from starlette.routing import Mount, Route
+from starlette.staticfiles import StaticFiles
 
 from .auth import Sessions
 from .config import Config, load_config_file
@@ -427,6 +429,11 @@ def create_app(config: Config | None = None) -> Starlette:
             Route("/readyz", ready),
             Route("/assets/app.css", css),
             Route("/assets/favicon.svg", favicon),
+            Mount(
+                "/assets/brand",
+                app=StaticFiles(directory=Path(__file__).parent / "static" / "brand"),
+                name="brand",
+            ),
             Route("/login", login, methods=["GET", "POST"]),
             Route("/logout", logout, methods=["POST"]),
             Route("/", dashboard),

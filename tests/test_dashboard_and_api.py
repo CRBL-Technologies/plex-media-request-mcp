@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
+import xml.etree.ElementTree as ET
 from types import SimpleNamespace
 from typing import Any, ClassVar
 
@@ -186,7 +188,7 @@ def test_login_redirect_and_real_user_table(config: Config) -> None:
         assert "2002" in page.text
         assert '"users"' not in page.text
         assert "Active user" not in page.text
-        assert "#fffbf5" in client.get("/assets/app.css").text
+        assert "Media admin" in page.text
 
 
 def test_dashboard_paginates_requests_and_activity_independently(config: Config) -> None:
@@ -3998,17 +4000,36 @@ def test_request_status_shows_the_specific_provider_outcome() -> None:
 
 def test_dashboard_serves_the_brand_favicon(config: Config) -> None:
     with TestClient(create_app(config)) as client:
-        response = client.get("/assets/favicon.svg")
+        login = client.get("/login")
+        favicon = re.search(r'<link rel="icon" href="([^"]+)"', login.text)
+        assert favicon is not None
+        response = client.get(favicon.group(1))
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("image/svg+xml")
-        # The canonical CRBL mark: amber B on a dark rounded square.
-        assert "#F59E0B" in response.text
-        assert "#1C1917" in response.text
+        # The media clapperboard keeps its identity in the Atelier palette.
+        assert ET.fromstring(response.text).tag == "{http://www.w3.org/2000/svg}svg"
+        assert "#C9A45C" in response.text
+        assert "#221F19" in response.text
 
-        login = client.get("/login")
-        assert '<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">' in login.text
         # Same-origin only, so the strict default-src CSP still allows it.
         assert "default-src 'self'" in login.headers["content-security-policy"]
+        stylesheets = re.findall(r'<link rel="stylesheet" href="([^"]+)"', login.text)
+        assert "/assets/brand/colors_and_type.css" in stylesheets
+        for href in stylesheets:
+            stylesheet = client.get(href)
+            assert stylesheet.status_code == 200
+            assert stylesheet.headers["content-type"].startswith("text/css")
+        shared = client.get("/assets/brand/colors_and_type.css").text
+        assert "#EFEBE1" in shared
+        # Every referenced font must ship and be served, not silently fall back
+        # to system fonts because an asset or MIME type was lost in packaging.
+        fonts = re.findall(r"url\('(fonts/[^']+)'\)", shared)
+        assert fonts
+        for font in fonts:
+            asset = client.get(f"/assets/brand/{font}")
+            assert asset.status_code == 200
+            assert asset.headers["content-type"].startswith("font/")
+            assert asset.content.startswith((b"wOF2", b"\x00\x01\x00\x00"))
 
 
 def test_request_table_keeps_status_on_one_line(config: Config) -> None:

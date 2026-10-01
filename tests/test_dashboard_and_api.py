@@ -4011,6 +4011,20 @@ def test_dashboard_serves_the_brand_favicon(config: Config) -> None:
         assert "#C9A45C" in response.text
         assert "#221F19" in response.text
 
+        touch_icon = re.search(
+            r'<link rel="apple-touch-icon" sizes="180x180" href="([^"]+)"', login.text
+        )
+        assert touch_icon is not None
+        icon = client.get(touch_icon.group(1))
+        assert icon.status_code == 200
+        assert icon.headers["content-type"].startswith("image/png")
+        assert icon.content[:8] == b"\x89PNG\r\n\x1a\n"
+        assert int.from_bytes(icon.content[16:20], "big") == 180
+        assert int.from_bytes(icon.content[20:24], "big") == 180
+        assert '<meta name="apple-mobile-web-app-title" content="Media admin">' in login.text
+        _login(client)
+        assert touch_icon.group(0) in client.get("/").text
+
         # Same-origin only, so the strict default-src CSP still allows it.
         assert "default-src 'self'" in login.headers["content-security-policy"]
         stylesheets = re.findall(r'<link rel="stylesheet" href="([^"]+)"', login.text)

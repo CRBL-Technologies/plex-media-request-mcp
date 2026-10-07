@@ -2550,6 +2550,126 @@ async def test_multiple_movie_requesters_and_admin_are_all_notified(config: Conf
     assert set(sent) == {1001, 2002, 9001}
 
 
+@pytest.mark.parametrize("webhook_has_tmdb", [True, False])
+async def test_movie_reindex_does_not_renotify_but_new_requests_do(
+    config: Config, webhook_has_tmdb: bool
+) -> None:
+    app = create_app(config)
+    sent: list[tuple[int, str]] = []
+    with TestClient(app):
+        runtime = app.state.runtime
+        upstream = FakeUpstream()
+        upstream.responses["plex_get_metadata"] = {"Guid": [{"id": "tmdb://1275779"}]}
+        runtime.notifications.upstream = upstream
+
+        async def capture(chat_id: int, _text: str, url: str) -> None:
+            sent.append((chat_id, url))
+
+        runtime.notifications._send = capture  # type: ignore[method-assign]
+
+        async def observe(rating_key: str) -> None:
+            metadata: dict[str, Any] = {
+                "type": "movie",
+                "ratingKey": rating_key,
+                "title": "Disclosure Day",
+            }
+            if webhook_has_tmdb:
+                metadata["Guid"] = [{"id": "tmdb://1275779"}]
+            else:
+                upstream.responses["plex_get_metadata"] = {}
+            before = list(sent)
+            assert await runtime.notifications.observe_plex(
+                {"event": "library.new", "Metadata": metadata}
+            )
+            await runtime.notifications.flush()
+            if not webhook_has_tmdb:
+                assert sent == before  # Do not guess while identity is missing.
+                assert runtime.store.pending_media_events(int(time.time()))
+                upstream.responses["plex_get_metadata"] = {"Guid": [{"id": "tmdb://1275779"}]}
+                await runtime.notifications.flush()
+
+        await observe("9369")
+        assert len(sent) == 1
+        assert sent[0][0] == 9001
+        await observe("12259")
+        assert len(sent) == 1
+        # Retiring operational history must not make an old movie new again.
+        runtime.store.prune(now=int(time.time()) + 61 * 86400)
+        await observe("13000")
+        assert len(sent) == 1
+
+        # An admin who explicitly requests it again, and other requesters,
+        # must still get their own availability message, with the new link.
+        runtime.policy.set_allowed(2002, allowed=True)
+        for user_id in (9001, 1001, 2002):
+            runtime.store.record_request(
+                media_type="movie",
+                external_id=1275779,
+                seasons=(),
+                title="Disclosure Day",
+                year=2026,
+                actor=Actor(user_id=user_id, chat_id=user_id),
+            )
+        await observe("14000")
+        assert sorted(chat for chat, _url in sent[1:]) == [1001, 2002, 9001]
+        assert all("14000" in url for _chat, url in sent[1:])
+        assert all(
+            runtime.store.requests_for(user)[0]["state"] == "available"
+            for user in (9001, 1001, 2002)
+        )
+        await observe("15000")
+        assert len(sent) == 4
+
+
+async def test_movie_reindex_preserves_partial_delivery_after_history_cleanup(
+    config: Config,
+) -> None:
+    app = create_app(config)
+    sent: list[int] = []
+    blocked = True
+    with TestClient(app):
+        runtime = app.state.runtime
+        runtime.notifications.upstream = FakeUpstream()
+        runtime.policy.set_allowed(2002, allowed=True)
+        for user_id in (1001, 2002):
+            runtime.store.record_request(
+                media_type="movie",
+                external_id=123,
+                seasons=(),
+                title="Movie",
+                year=2026,
+                actor=Actor(user_id=user_id, chat_id=user_id),
+            )
+
+        async def capture(chat_id: int, _text: str, _url: str) -> None:
+            if chat_id == 2002 and blocked:
+                raise RuntimeError("temporary failure")
+            sent.append(chat_id)
+
+        runtime.notifications._send = capture  # type: ignore[method-assign]
+        for key in ("old", "new"):
+            await runtime.notifications.observe_plex(
+                {
+                    "event": "library.new",
+                    "Metadata": {
+                        "type": "movie",
+                        "ratingKey": key,
+                        "title": "Movie",
+                        "Guid": [{"id": "tmdb://123"}],
+                    },
+                }
+            )
+            await runtime.notifications.flush()
+            if key == "old":
+                assert set(sent) == {1001, 9001}
+                assert runtime.store.requests_for(1001)[0]["state"] == "requested"
+                runtime.store.prune(now=int(time.time()) + 61 * 86400)
+                blocked = False
+        assert sorted(sent) == [1001, 2002, 9001]
+        assert runtime.store.requests_for(1001)[0]["state"] == "available"
+        assert runtime.store.requests_for(2002)[0]["state"] == "available"
+
+
 @pytest.mark.parametrize("change", ["requester", "destination", "attempt"])
 async def test_movie_request_change_during_delivery_keeps_event_pending(
     config: Config, change: str

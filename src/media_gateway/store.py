@@ -44,8 +44,18 @@ class Store:
         cutoff = (now or int(time.time())) - 60 * 24 * 60 * 60
         with self._db() as db:
             db.execute("DELETE FROM activity WHERE occurred_at < ?", (cutoff,))
-            # Synthetic season receipts have no matching media event.
-            db.execute("DELETE FROM deliveries WHERE delivered_at < ?", (cutoff,))
+            # Movie identity receipts outlive operational history. Otherwise a
+            # Plex reindex after 60 days would announce an old movie again.
+            db.execute(
+                """DELETE FROM deliveries WHERE delivered_at < ?
+                AND event_key NOT LIKE 'movie-available:tmdb:%'
+                AND NOT EXISTS (
+                    SELECT 1 FROM requests WHERE media_type='movie'
+                    AND state IN ('pending','requested','unknown')
+                    AND deliveries.event_key = 'movie-request:' || id || ':' || generation
+                )""",
+                (cutoff,),
+            )
             old_events = db.execute(
                 "SELECT event_key FROM media_events WHERE observed_at < ?", (cutoff,)
             ).fetchall()
@@ -486,6 +496,15 @@ class Store:
             db.execute(
                 "UPDATE media_events SET external_id=? WHERE event_key=?",
                 (external_id, event_key),
+            )
+            # A movie may already have reached admins before Plex exposed its
+            # TMDB ID. Promote those receipts once the identity is resolved.
+            db.execute(
+                """INSERT OR IGNORE INTO deliveries(event_key, chat_id, delivered_at)
+                SELECT 'movie-available:tmdb:' || m.external_id, d.chat_id, d.delivered_at
+                FROM media_events m JOIN deliveries d USING(event_key)
+                WHERE m.event_key=? AND m.media_type='movie' AND m.external_id > 0""",
+                (event_key,),
             )
 
     def set_media_plex_url(self, event_key: str, plex_url: str) -> None:

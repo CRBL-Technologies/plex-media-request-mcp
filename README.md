@@ -111,6 +111,13 @@ URL or a second secret copy. The server-specific Plex Web URL remains the
 fallback when resolution is unavailable.
 
 Webhook events and delivery receipts are durable and deduplicated in SQLite.
+Movie alerts use TMDB identity per chat, not Plex's replaceable library entry ID.
+Those compact receipts remain after the 60-day cleanup. New explicit request
+attempts have separate receipts, so every requester can still be notified.
+Schema migration 4 copies retained movie delivery history into this identity;
+it preserves the original events and receipts and sends no messages. History
+already pruned cannot be recovered from the database. Movie observations without
+a TMDB ID wait for enrichment rather than sending a possible duplicate.
 Unresolved Plex provider IDs remain retryable, and terminal operational data is
 pruned after 60 days, at startup and hourly while running. Delivery failures are
 isolated per recipient: blocked chats are suppressed for that event, while

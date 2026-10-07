@@ -29,6 +29,7 @@ def test_prune_removes_terminal_and_unresolved_operational_data(tmp_path: Path) 
     )
     store.mark_delivered(["episode:old"], 9001)
     store.mark_delivered(["season-complete:123:1:library:10"], 9001)
+    store.mark_delivered(["movie-available:tmdb:123", "movie-request:42:1"], 9001)
     store.record_request(
         media_type="movie",
         external_id=123,
@@ -43,6 +44,8 @@ def test_prune_removes_terminal_and_unresolved_operational_data(tmp_path: Path) 
     assert store.pending_media_events(old + 10_000) == []
     assert store.requests_for(1001) == []
     assert not store.delivered(["season-complete:123:1:library:10"], 9001)
+    assert store.delivered(["movie-available:tmdb:123"], 9001)
+    assert not store.delivered(["movie-request:42:1"], 9001)
 
 
 def test_unversioned_conflicting_database_fails_closed(tmp_path: Path) -> None:
@@ -116,7 +119,7 @@ def test_v1_migration_preserves_request_and_moves_chat_to_destination(tmp_path: 
     assert request["destinations"] == [-10001]
     assert store.recent_activity() == []
     with sqlite3.connect(path) as database:
-        assert database.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert database.execute("PRAGMA user_version").fetchone()[0] == 4
 
 
 def test_v2_migration_preserves_state_and_backfills_available_series(tmp_path: Path) -> None:
@@ -146,6 +149,62 @@ def test_v2_migration_preserves_state_and_backfills_available_series(tmp_path: P
     assert intent["options"] == {"anime": False}
     assert intent["destinations"] == [-10001]
     assert second.delivered(["episode:kept"], -10001)
+    with sqlite3.connect(path) as database:
+        assert database.execute("PRAGMA user_version").fetchone()[0] == 4
+
+
+def test_movie_receipt_migration_preserves_history_and_late_identity(tmp_path: Path) -> None:
+    path = tmp_path / "state.sqlite3"
+    store = Store(path)
+    for key, external_id in (("old", 123), ("new", 123), ("unresolved", None)):
+        store.add_media_event(
+            event_key=f"movie:{key}",
+            media_type="movie",
+            external_id=external_id,
+            rating_key=key,
+            title="Movie",
+            show_title=None,
+            season_number=None,
+            episode_number=None,
+            plex_url=f"https://app.plex.tv/{key}",
+        )
+    store.mark_delivered(["movie:old", "movie:new", "movie:unresolved"], 9001)
+    store.mark_delivered(["movie:old"], 1001)
+    with sqlite3.connect(path) as database:
+        database.execute("PRAGMA user_version=3")
+        before = database.execute("SELECT * FROM deliveries ORDER BY event_key, chat_id").fetchall()
+    Store(path)
+    Store(path)  # Reopening is not a second migration or a second delivery.
+    with sqlite3.connect(path) as database:
+        originals = database.execute(
+            "SELECT * FROM deliveries WHERE event_key LIKE 'movie:%' ORDER BY event_key, chat_id"
+        ).fetchall()
+        migrated = database.execute(
+            "SELECT event_key, chat_id FROM deliveries WHERE event_key LIKE 'movie-available:%'"
+        ).fetchall()
+        assert database.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert originals == before
+    assert set(migrated) == {("movie-available:tmdb:123", 9001), ("movie-available:tmdb:123", 1001)}
+    assert not store.delivered(["movie-available:tmdb:456"], 9001)
+    store.set_media_external_id("movie:unresolved", 456)
+    assert store.delivered(["movie-available:tmdb:456"], 9001)
+    assert not store.delivered(["movie-available:tmdb:456"], 1001)
+
+
+def test_movie_receipt_migration_rolls_back_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "state.sqlite3"
+    Store(path)
+    with sqlite3.connect(path) as database:
+        database.execute("PRAGMA user_version=3")
+
+    def fail(_database: sqlite3.Connection) -> None:
+        raise RuntimeError("validation failed")
+
+    monkeypatch.setattr(migrations, "_validate", fail)
+    with pytest.raises(RuntimeError, match="validation failed"):
+        Store(path)
     with sqlite3.connect(path) as database:
         assert database.execute("PRAGMA user_version").fetchone()[0] == 3
 

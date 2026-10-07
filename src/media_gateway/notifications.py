@@ -754,6 +754,10 @@ class Notifications:
         season_verification_pending = False
         external_id = first.get("external_id")
         season_number = first.get("season_number")
+        # A Plex entry ID alone cannot tell a new movie from a reindexed one.
+        # Keep the observation pending until enrichment can identify it.
+        if first["media_type"] == "movie" and external_id is None:
+            return
         captured_cycle_ids: set[tuple[int, int, int]] = set()
         track_request_cycles = isinstance(external_id, int) and (
             first["media_type"] == "movie" or isinstance(season_number, int)
@@ -820,6 +824,21 @@ class Notifications:
         deferred = False
         for chat_id in recipients:
             completion_keys: list[str] = []
+            if first["media_type"] == "movie" and isinstance(external_id, int):
+                library_key = f"movie-available:tmdb:{external_id}"
+                request_keys = [
+                    f"movie-request:{cycle['request_id']}:{cycle['generation']}"
+                    for cycle in request_cycles
+                    if int(cycle["chat_id"]) == chat_id and int(cycle["user_id"]) in policy.allowed
+                ]
+                completion_keys = [library_key, *request_keys]
+                # Plex observations retain their own IDs and current links.
+                # Delivery identity is the movie, or a fresh explicit request.
+                if self.store.delivered(keys, chat_id) or self.store.delivered(
+                    request_keys or [library_key], chat_id
+                ):
+                    self.store.mark_delivered(keys + completion_keys, chat_id)
+                    continue
             if season_completed and isinstance(external_id, int) and isinstance(season_number, int):
                 import_id = first.get("season_import_id")
                 physical = import_id if isinstance(import_id, str) else str(completed_season_size)

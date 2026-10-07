@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 TABLE_COLUMNS = {
     "users": {
@@ -77,6 +77,9 @@ def migrate(database: sqlite3.Connection) -> None:
     if version == 2:
         _migration_3(database)
         version = 3
+    if version == 3:
+        _migration_4(database)
+        version = 4
     database.execute(f"PRAGMA user_version={version}")
     _validate(database)
 
@@ -211,6 +214,27 @@ def _migration_3(database: sqlite3.Connection) -> None:
             WHERE media_type='series' AND state='available'"""
         )
         database.execute("PRAGMA user_version=3")
+        _validate(database)
+    except Exception:
+        database.rollback()
+        raise
+    else:
+        database.commit()
+
+
+def _migration_4(database: sqlite3.Connection) -> None:
+    """Preserve movie delivery history independently of Plex library entry IDs."""
+
+    database.execute("BEGIN IMMEDIATE")
+    try:
+        database.execute(
+            """INSERT OR IGNORE INTO deliveries(event_key, chat_id, delivered_at)
+            SELECT 'movie-available:tmdb:' || m.external_id, d.chat_id, MIN(d.delivered_at)
+            FROM media_events m JOIN deliveries d USING(event_key)
+            WHERE m.media_type='movie' AND m.external_id > 0
+            GROUP BY m.external_id, d.chat_id"""
+        )
+        database.execute("PRAGMA user_version=4")
         _validate(database)
     except Exception:
         database.rollback()

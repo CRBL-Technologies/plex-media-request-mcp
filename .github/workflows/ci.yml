@@ -2,8 +2,7 @@ name: CI
 
 on:
   pull_request:
-  push:
-    branches: [main]
+  workflow_call:
 
 permissions:
   contents: read
@@ -44,7 +43,10 @@ jobs:
           DASHBOARD_PASSWORD_HASH_FILE: /tmp/password.hash
           DASHBOARD_SESSION_KEY_FILE: /tmp/session.key
           PLEX_WEBHOOK_TOKEN_FILE: /tmp/plex.key
-        run: docker compose -f deployment/compose.yaml config >/dev/null
+          GATEWAY_ONEPASSWORD_FILE: /tmp/onepassword.json
+        run: |
+          docker compose --env-file /dev/null -f deployment/compose.yaml config --quiet
+          docker compose --env-file /dev/null -f deployment/compose.yaml -f deployment/compose.managed.yaml config --quiet
       - name: Build gateway
         run: >-
           docker build --build-arg PYTHON_BASE_IMAGE="$PYTHON_BASE_IMAGE"
@@ -92,6 +94,12 @@ jobs:
           status=$?
           set -e
           test "$status" -eq 124
+      - name: Build managed gateway and verify pinned CLI
+        run: |
+          docker build --target managed --build-arg PYTHON_BASE_IMAGE="$PYTHON_BASE_IMAGE" \
+            --build-arg SOURCE_COMMIT="$GITHUB_SHA" \
+            -f deployment/Dockerfile.gateway -t crbl-media-gateway-managed:ci .
+          test "$(docker run --rm --network none --entrypoint /usr/local/bin/op crbl-media-gateway-managed:ci --version)" = '2.41.1'
       - name: Build Hermes adapter
         run: >-
           docker build --build-arg HERMES_BASE_IMAGE="$HERMES_BASE_IMAGE"

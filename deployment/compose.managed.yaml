@@ -1,0 +1,18 @@
+# Explicit managed-gateway preparation. Combine with compose.yaml only during
+# an approved cutover, with MEDIA_GATEWAY_IMAGE set to the managed image digest.
+# Old gateway.env remains mounted for the first proof stage, but is never read
+# by the managed launcher. Hermes and upstream retain their native contracts.
+services:
+  media-gateway:
+    environment:
+      MEDIA_GATEWAY_HOST: 0.0.0.0
+      MEDIA_GATEWAY_PORT: "18082"
+      MEDIA_GATEWAY_DB_PATH: /opt/data/state/gateway.sqlite3
+      MEDIA_GATEWAY_POLICY_FILE: /opt/hermes-data/.env
+      MEDIA_GATEWAY_TOKEN_FILE: /run/media-secrets/gateway.key
+      MEDIA_GATEWAY_UPSTREAM_TOKEN_FILE: /run/media-secrets/upstream.env
+      MEDIA_GATEWAY_DASHBOARD_PASSWORD_HASH_FILE: /run/media-secrets/dashboard-password.hash
+      MEDIA_GATEWAY_DASHBOARD_SESSION_KEY_FILE: /run/media-secrets/dashboard-session.key
+      MEDIA_GATEWAY_PLEX_WEBHOOK_TOKEN_FILE: /run/media-secrets/plex-webhook.key
+    volumes:
+      - ${GATEWAY_ONEPASSWORD_FILE:?required owner-provisioned bootstrap file}:/run/secrets/onepassword.json:ro

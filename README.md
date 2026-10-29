@@ -255,3 +255,66 @@ python -m venv .venv
 Runtime dependencies are hash-locked in `requirements.txt`. CI repeats the
 checks, validates Compose, and builds both CRBL images from digest-pinned bases.
 Publishing records immutable image digests, SBOMs, and provenance.
+
+### Image channels and runtime migration boundary
+
+The publish workflow runs CI before publishing. A `dev` push publishes `preview`
+and `sha-<full-commit>` for the CRBL images. Only a `main` branch build moves
+`latest`. Release tags keep their existing version tags. Other manually selected
+branches cannot publish. Publication never deploys or restarts a container.
+Record the digest from the workflow summary before an approved update. Use that
+digest to recover the exact image; a channel tag can move. Keep the existing
+database-backup procedure when a release changes its schema.
+
+The default gateway image keeps its documented configuration and secret-file
+contracts. A separate `managed` Docker build target publishes as
+`ghcr.io/crbl-technologies/media-request-companion-managed`. That image always
+retrieves its immutable app options from 1Password before starting. It never
+uses saved app values or `gateway.env` as a retrieval-failure fallback. The
+default image does not include the CLI or require 1Password.
+
+The managed target uses the approved 1Password CLI 2.41.1 at the pinned digest in
+the Dockerfile. The owner must mount an owner-only regular file at
+`/run/secrets/onepassword.json`, read-only and owned by the container user. Its
+JSON object has exactly two string fields: `environment_id` and
+`service_account_token`. Neither value belongs in Git, image layers, Compose
+environment values or Portainer variables. Do not use an assistant credential.
+
+The dedicated Environment must contain all twelve existing app-option names
+listed in `media_gateway.managed_start.APP_KEYS`, including both tag lists even
+when empty. The CLI strips inherited copies before retrieval. Host, port, local
+state paths and file-secret paths remain deployment settings. The managed child
+removes all `OP_*` values before executing the app. Application logs still pass
+through CLI masking; raw CLI diagnostics are suppressed.
+
+Retrieval and validation have a 60-second deadline and one attempt per container
+start. On failure, the process stays unhealthy until an operator corrects the
+configuration and restarts it. There is no local cache or automatic fetch loop.
+Signals still stop the process group. Budget account-wide request use and verify
+real retrieval separately; tests use dummy data and a fake CLI transport.
+
+For a later approved managed cutover, combine `deployment/compose.yaml` with
+`deployment/compose.managed.yaml`. Select the managed digest through the existing
+`MEDIA_GATEWAY_IMAGE` variable. `GATEWAY_ONEPASSWORD_FILE` is only the protected
+host mount path, not the token or Environment ID. Keep the old saved app values
+and configuration mount during the first proof stage. Verify that fetched values
+are used, that missing or failed retrieval does not start the app, and that the
+dashboard still edits policy. Then remove obsolete saved app fields and the old
+`gateway.env` mount/reference from the owning deployment definition, and restart
+and verify again. Keep required file-secret mounts. This preparation performs
+none of those live steps.
+
+File-oriented secret migration and Hermes/upstream startup migration remain
+unresolved. The dashboard changes
+`TELEGRAM_ALLOWED_USERS` in the shared Hermes policy file. Authorization reads
+that file live. Hermes also owns its persisted configuration and session state.
+Replacing those files with a startup Environment export would discard later UI
+changes or restore stale policy after a restart. Resolve that mutable-state
+boundary before migrating those inputs. Do not disable the controls or overwrite
+state to make the migration fit.
+
+Keep gateway, Hermes and upstream access separate. Do not give every service
+the same vault or runtime token. The upstream MCP remains the publisher's native
+image and keeps its native update path; this repository does not fork it for
+secret retrieval. No 1Password identifier, bootstrap token, or private deployment
+inventory belongs in this public repository.

@@ -2,7 +2,7 @@ name: Publish images
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     tags: ["v*.*.*"]
   workflow_dispatch:
 
@@ -17,7 +17,14 @@ env:
   HERMES_BASE_IMAGE: nousresearch/hermes-agent@sha256:e0df6adebddf29b91112aefc999d4aaf6846c9eb544faca5672a16a13590ff79
 
 jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   publish:
+    needs: verify
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -32,8 +39,10 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302
         with:
           images: ghcr.io/crbl-technologies/media-request-companion
+          flavor: latest=false
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=preview,enable=${{ github.ref == 'refs/heads/dev' }}
             type=sha,format=long
             type=ref,event=tag
       - id: gateway
@@ -55,8 +64,10 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302
         with:
           images: ghcr.io/crbl-technologies/hermes-media
+          flavor: latest=false
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=preview,enable=${{ github.ref == 'refs/heads/dev' }}
             type=sha,format=long
             type=ref,event=tag
       - id: hermes
@@ -74,7 +85,34 @@ jobs:
           sbom: true
           provenance: mode=max
 
+      - id: managed_meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302
+        with:
+          images: ghcr.io/crbl-technologies/media-request-companion-managed
+          flavor: latest=false
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=preview,enable=${{ github.ref == 'refs/heads/dev' }}
+            type=sha,format=long
+            type=ref,event=tag
+      - id: managed
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: .
+          file: deployment/Dockerfile.gateway
+          target: managed
+          push: true
+          pull: true
+          build-args: |
+            PYTHON_BASE_IMAGE=${{ env.PYTHON_BASE_IMAGE }}
+            SOURCE_COMMIT=${{ github.sha }}
+          tags: ${{ steps.managed_meta.outputs.tags }}
+          labels: ${{ steps.managed_meta.outputs.labels }}
+          sbom: true
+          provenance: mode=max
+
       - name: Record immutable references
         run: |
           echo "ghcr.io/crbl-technologies/media-request-companion@${{ steps.gateway.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
           echo "ghcr.io/crbl-technologies/hermes-media@${{ steps.hermes.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "ghcr.io/crbl-technologies/media-request-companion-managed@${{ steps.managed.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"

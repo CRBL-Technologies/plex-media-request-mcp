@@ -1,0 +1,14 @@
+# syntax=docker/dockerfile:1.7
+FROM 1password/op:2.41.1@sha256:86c9f8c1961a87f4bcf4780f15c564c21f76ba5822635614b6b6d8a1e22fdbea AS onepassword
+FROM ghcr.io/wyattjoh/media-server-mcp@sha256:f83620da1d008ef18df3324b15e44854572ea41b528eff585033e4054b438377
+ARG SOURCE_COMMIT
+USER root
+RUN mkdir -p /run/media-secrets && chown 1000:1000 /run/media-secrets
+COPY --from=onepassword /usr/local/bin/op /usr/local/bin/op
+COPY deployment/upstream /app/managed
+USER 1000:1000
+RUN deno check /app/managed/runtime.ts /app/managed/start.ts /app/managed/app.ts
+LABEL org.opencontainers.image.source="https://github.com/CRBL-Technologies/plex-media-request-mcp" \
+      org.opencontainers.image.revision="$SOURCE_COMMIT"
+ENTRYPOINT ["deno", "run", "--allow-read", "--allow-write", "--allow-env", "--allow-run", "--allow-sys", "/app/managed/start.ts"]
+CMD ["--http", "--host", "0.0.0.0", "--port", "3000"]

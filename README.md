@@ -266,26 +266,65 @@ Record the digest from the workflow summary before an approved update. Use that
 digest to recover the exact image; a channel tag can move. Keep the existing
 database-backup procedure when a release changes its schema.
 
-The default gateway image keeps its documented configuration and secret-file
-contracts. A separate `managed` Docker build target publishes as
-`ghcr.io/crbl-technologies/media-request-companion-managed`. That image always
-retrieves its immutable app options from 1Password before starting. It never
-uses saved app values or `gateway.env` as a retrieval-failure fallback. The
-default image does not include the CLI or require 1Password.
+The default gateway and Hermes images keep their public startup and file-secret
+contracts. Their separate `managed` build targets publish as
+`ghcr.io/crbl-technologies/media-request-companion-managed` and
+`ghcr.io/crbl-technologies/hermes-media-managed`. The managed upstream recipe
+publishes as `ghcr.io/crbl-technologies/media-server-mcp-managed`. It adds a Deno
+startup wrapper to the pinned vendor image; it does not patch vendor source.
+Upstream updates still start with the vendor release and its compatibility
+checks. The default images and `deployment/compose.yaml` do not require 1Password.
 
-The managed target uses the approved 1Password CLI 2.41.1 at the pinned digest in
-the Dockerfile. The owner must mount an owner-only regular file at
-`/run/secrets/onepassword.json`, read-only and owned by the container user. Its
-JSON object has exactly two string fields: `environment_id` and
-`service_account_token`. Neither value belongs in Git, image layers, Compose
-environment values or Portainer variables. Do not use an assistant credential.
+Each managed service requires its own scoped Environment and bootstrap mount.
+The owner mounts an owner-only regular file at `/run/secrets/onepassword.json`,
+read-only and owned by UID 1000. Its JSON object has exactly two string fields:
+`environment_id` and `service_account_token`. Neither value belongs in Git,
+image layers, Compose environment values or Portainer variables. The approved
+CLI is 2.41.1 at the pinned Dockerfile digest. Do not use an assistant credential.
 
-The dedicated Environment must contain all twelve existing app-option names
-listed in `media_gateway.managed_start.APP_KEYS`, including both tag lists even
-when empty. The CLI strips inherited copies before retrieval. Host, port, local
-state paths and file-secret paths remain deployment settings. The managed child
-removes all `OP_*` values before executing the app. Application logs still pass
-through CLI masking; raw CLI diagnostics are suppressed.
+The gateway Environment must contain all twelve existing app-option names in
+`media_gateway.managed_start.APP_KEYS`, including both tag lists even when empty.
+It must also contain these file-backed values:
+
+| Managed Environment fields | Ephemeral gateway file |
+| --- | --- |
+| `MEDIA_GATEWAY_TOKEN` | `/run/media-secrets/gateway.key` |
+| `MEDIA_GATEWAY_DASHBOARD_PASSWORD_HASH` | `/run/media-secrets/dashboard-password.hash` |
+| `MEDIA_GATEWAY_DASHBOARD_SESSION_KEY` | `/run/media-secrets/dashboard-session.key` |
+| `MEDIA_GATEWAY_PLEX_WEBHOOK_TOKEN` | `/run/media-secrets/plex-webhook.key` |
+| `MCP_AUTH_TOKEN`, `RADARR_URL`, `RADARR_API_KEY`, `SONARR_URL`, `SONARR_API_KEY`, `PLEX_URL`, `PLEX_API_KEY` | `/run/media-secrets/upstream.env` |
+| `TELEGRAM_BOT_TOKEN` | `/run/media-secrets/telegram.env` |
+
+These files retain their existing raw-key or dotenv formats. The managed gateway
+sets `MEDIA_GATEWAY_TELEGRAM_TOKEN_FILE` to the separate Telegram file. The
+public default still reads the token from its policy file. When the separate
+path is set, a missing token file never falls back to the policy file.
+
+The upstream Environment contains the seven upstream fields above, plus
+`TMDB_API_KEY` and `TOOL_PROFILE=full`. Its existing optional `TOOL_BRANCHES`,
+`TOOL_EXCLUDE` and `TOOL_INCLUDE` inputs can also be supplied. They must preserve
+the reviewed gateway tool manifest. The wrapper writes its private
+`/run/media-secrets/upstream.env`, then starts the unmodified vendor command with
+Deno's native `--env-file` option. Native parsing is tested for literal dollar
+signs, quotes and comment characters. Multiline values and `${...}` interpolation
+forms are rejected instead of being silently changed.
+
+The Hermes Environment contains only `TELEGRAM_BOT_TOKEN`,
+`CRBL_MEDIA_GATEWAY_URL` and `CRBL_MEDIA_GATEWAY_TOKEN`. The gateway key is written
+to `/run/media-secrets/gateway.key`. A private `/run/hermes-managed/.env` supplies
+the token, URL and key-file path through Hermes' native managed-scope loader.
+That layer overrides stale startup values without rewriting the user `.env`.
+The wrapper rejects upstream service keys and gateway-only private secrets in
+this Environment. Native `/init` remains PID 1; retrieval runs after the UID
+remap and before profile reconciliation or the CRBL startup checks.
+
+All projected files are owner-only and live on tmpfs. Existing files and symlinks
+are not overwritten. Inherited copies are stripped before retrieval. Gateway
+file-secret values and all `OP_*` fields are removed before app execution.
+Hermes' retrieval hook exits without passing its environment to s6. Gateway and
+upstream logs pass through CLI masking. Hermes retains its native application
+logging after the hook exits. Raw CLI diagnostics are suppressed. Host, port,
+mount paths, native process settings and network/security controls stay in Compose.
 
 Retrieval and validation have a 60-second deadline and one attempt per container
 start. On failure, the process stays unhealthy until an operator corrects the
@@ -293,28 +332,33 @@ configuration and restarts it. There is no local cache or automatic fetch loop.
 Signals still stop the process group. Budget account-wide request use and verify
 real retrieval separately; tests use dummy data and a fake CLI transport.
 
-For a later approved managed cutover, combine `deployment/compose.yaml` with
-`deployment/compose.managed.yaml`. Select the managed digest through the existing
-`MEDIA_GATEWAY_IMAGE` variable. `GATEWAY_ONEPASSWORD_FILE` is only the protected
-host mount path, not the token or Environment ID. Keep the old saved app values
-and configuration mount during the first proof stage. Verify that fetched values
-are used, that missing or failed retrieval does not start the app, and that the
-dashboard still edits policy. Then remove obsolete saved app fields and the old
-`gateway.env` mount/reference from the owning deployment definition, and restart
-and verify again. Keep required file-secret mounts. This preparation performs
-none of those live steps.
+For a later approved cutover, use `deployment/compose.managed.yaml` by itself.
+Do not merge it with the default recipe: old read-only file mounts would cover
+the projection paths. Select managed digests using `MEDIA_GATEWAY_IMAGE`,
+`HERMES_MEDIA_IMAGE` and `MEDIA_UPSTREAM_IMAGE`. `GATEWAY_ONEPASSWORD_FILE`,
+`HERMES_ONEPASSWORD_FILE` and `UPSTREAM_ONEPASSWORD_FILE` identify only protected
+host mount paths, not tokens or Environment IDs.
 
-File-oriented secret migration and Hermes/upstream startup migration remain
-unresolved. The dashboard changes
-`TELEGRAM_ALLOWED_USERS` in the shared Hermes policy file. Authorization reads
-that file live. Hermes also owns its persisted configuration and session state.
-Replacing those files with a startup Environment export would discard later UI
-changes or restore stale policy after a restart. Resolve that mutable-state
-boundary before migrating those inputs. Do not disable the controls or overwrite
-state to make the migration fit.
+Keep old saved Portainer fields and host secret files initially for rollback.
+The managed recipe does not reference them. Verify fetched values, failure with
+missing fields, restart behavior, notifications and live policy edits. Only then
+remove obsolete saved fields and old secret copies, including the old
+`TELEGRAM_BOT_TOKEN` line in the user policy file. Preserve all authorization
+and other state lines. Restart and verify again after cleanup. No cutover or
+cleanup is performed by this preparation.
 
-Keep gateway, Hermes and upstream access separate. Do not give every service
-the same vault or runtime token. The upstream MCP remains the publisher's native
-image and keeps its native update path; this repository does not fork it for
-secret retrieval. No 1Password identifier, bootstrap token, or private deployment
-inventory belongs in this public repository.
+The writable policy file remains the authority for `TELEGRAM_ALLOWED_USERS` and
+`TELEGRAM_ADMIN_USERS`. The dashboard can still edit it while the app runs.
+Hermes model/provider selection, session data and OAuth refresh state also stay
+under native application control. The deployed provider and its active immutable
+credential names cannot be determined from this repository alone. A names-only
+provider review is still required before moving any provider credentials from
+`.env` or `auth.json`. Copying refreshed OAuth state into a startup Environment,
+or pinning empty credentials for every supported provider, would change the
+native UI and refresh contract. This is the remaining provider-state boundary,
+not a fallback for the managed Telegram, gateway or upstream fields.
+
+Keep the three store identities separate. Shared bot/gateway token values are
+needed only by their documented consumers; Hermes must not acquire Radarr,
+Sonarr, Plex, TMDB or gateway dashboard/session keys. No real 1Password identifier,
+bootstrap token, or private deployment inventory belongs in this public repository.

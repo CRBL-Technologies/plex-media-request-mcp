@@ -111,8 +111,59 @@ jobs:
           sbom: true
           provenance: mode=max
 
+      - id: managed_hermes_meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302
+        with:
+          images: ghcr.io/crbl-technologies/hermes-media-managed
+          flavor: latest=false
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=preview,enable=${{ github.ref == 'refs/heads/dev' }}
+            type=sha,format=long
+            type=ref,event=tag
+      - id: managed_hermes
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: .
+          file: deployment/Dockerfile.hermes
+          target: managed
+          push: true
+          pull: true
+          build-args: |
+            HERMES_BASE_IMAGE=${{ env.HERMES_BASE_IMAGE }}
+            SOURCE_COMMIT=${{ github.sha }}
+          tags: ${{ steps.managed_hermes_meta.outputs.tags }}
+          labels: ${{ steps.managed_hermes_meta.outputs.labels }}
+          sbom: true
+          provenance: mode=max
+
+      - id: managed_upstream_meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302
+        with:
+          images: ghcr.io/crbl-technologies/media-server-mcp-managed
+          flavor: latest=false
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=preview,enable=${{ github.ref == 'refs/heads/dev' }}
+            type=sha,format=long
+            type=ref,event=tag
+      - id: managed_upstream
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: .
+          file: deployment/Dockerfile.upstream-managed
+          push: true
+          pull: true
+          build-args: SOURCE_COMMIT=${{ github.sha }}
+          tags: ${{ steps.managed_upstream_meta.outputs.tags }}
+          labels: ${{ steps.managed_upstream_meta.outputs.labels }}
+          sbom: true
+          provenance: mode=max
+
       - name: Record immutable references
         run: |
           echo "ghcr.io/crbl-technologies/media-request-companion@${{ steps.gateway.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
           echo "ghcr.io/crbl-technologies/hermes-media@${{ steps.hermes.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
           echo "ghcr.io/crbl-technologies/media-request-companion-managed@${{ steps.managed.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "ghcr.io/crbl-technologies/hermes-media-managed@${{ steps.managed_hermes.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "ghcr.io/crbl-technologies/media-server-mcp-managed@${{ steps.managed_upstream.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"

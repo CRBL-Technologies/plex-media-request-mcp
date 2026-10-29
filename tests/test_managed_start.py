@@ -5,12 +5,26 @@ import os
 import signal
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from media_gateway.app import Runtime
+from media_gateway.config import Config
 from media_gateway.managed_app import application_environment
-from media_gateway.managed_start import APP_KEYS, read_bootstrap, retrieval_environment
+from media_gateway.managed_files import (
+    SECRET_KEYS,
+    SECRET_PATHS,
+    UPSTREAM_KEYS,
+    project_gateway_files,
+)
+from media_gateway.managed_start import RUNTIME_KEYS, read_bootstrap, retrieval_environment
+from media_gateway.secrets import read_dotenv
+
+
+def secret_values() -> dict[str, str]:
+    return dict.fromkeys(SECRET_KEYS, "dummy-secret-with-more-than-thirty-two-bytes")
 
 
 def test_bootstrap_rejects_extra_duplicate_and_unsafe_files(tmp_path: Path) -> None:
@@ -36,7 +50,7 @@ def test_bootstrap_rejects_extra_duplicate_and_unsafe_files(tmp_path: Path) -> N
 
 
 def test_inherited_app_values_cannot_supply_missing_fetched_options() -> None:
-    inherited = dict.fromkeys(APP_KEYS, "old-value")
+    inherited = dict.fromkeys(RUNTIME_KEYS, "old-value")
     inherited.update(
         {
             "MEDIA_GATEWAY_CONFIG_FILE": "/old/gateway.env",
@@ -46,8 +60,8 @@ def test_inherited_app_values_cannot_supply_missing_fetched_options() -> None:
             "OP_SESSION_OLD": "old-session",
         }
     )
-    retrieved = retrieval_environment(inherited, "dummy-token")
-    assert not APP_KEYS.intersection(retrieved)
+    retrieved = retrieval_environment(inherited, "dummy-token", RUNTIME_KEYS)
+    assert not RUNTIME_KEYS.intersection(retrieved)
     assert "MEDIA_GATEWAY_CONFIG_FILE" not in retrieved
     assert "OP_SESSION_OLD" not in retrieved
     assert retrieved["MEDIA_GATEWAY_PORT"] == "18082"
@@ -55,19 +69,24 @@ def test_inherited_app_values_cannot_supply_missing_fetched_options() -> None:
     assert retrieved["MEDIA_GATEWAY_TOKEN_FILE"] == "/secrets/gateway.key"
     with pytest.raises(ValueError, match="incomplete"):
         application_environment(retrieved)
-    retrieved.update(dict.fromkeys(APP_KEYS, "fetched-value"))
+    retrieved.update(dict.fromkeys(RUNTIME_KEYS, "fetched-value"))
     retrieved["MEDIA_GATEWAY_RADARR_TAG_IDS"] = ""
     retrieved["MEDIA_GATEWAY_SONARR_TAG_IDS"] = ""
     environment = application_environment(retrieved)
     assert environment["MEDIA_GATEWAY_UPSTREAM_URL"] == "fetched-value"
     assert environment["MEDIA_GATEWAY_RADARR_TAG_IDS"] == ""
     assert not any(key.startswith("OP_") for key in environment)
+    assert not SECRET_KEYS.intersection(environment)
 
 
-def test_managed_child_exec_removes_bootstrap_and_keeps_app_stderr() -> None:
+def test_managed_child_exec_removes_bootstrap_and_keeps_app_stderr(tmp_path: Path) -> None:
     launcher = """
 import os, signal, sys
+from pathlib import Path
 from media_gateway import managed_app
+project = managed_app.project_gateway_files
+directory = Path(sys.argv[1])
+managed_app.project_gateway_files = lambda source, ignored: project(source, directory)
 signal.signal(signal.SIGUSR1, lambda *_: None)
 sys.argv = ['managed_app', str(os.getpid())]
 real_exec = os.execve
@@ -77,6 +96,8 @@ def check_exec(executable, args, environment):
 import os, sys
 assert not any(key.startswith('OP_') for key in os.environ)
 assert 'MEDIA_GATEWAY_CONFIG_FILE' not in os.environ
+assert 'MEDIA_GATEWAY_TOKEN' not in os.environ
+assert 'TELEGRAM_BOT_TOKEN' not in os.environ
 assert os.environ['MEDIA_GATEWAY_RADARR_PROFILE_ID'] == '25'
 assert os.environ['MEDIA_GATEWAY_POLICY_FILE'] == '/unchanged/hermes.env'
 print('application stderr survives', file=sys.stderr)
@@ -86,6 +107,8 @@ managed_app.os.execve = check_exec
 sys.exit(managed_app.main())
 """
     environment = dict(os.environ)
+    environment.update(secret_values())
+    environment.update({key: f"/run/media-secrets/{name}" for key, name in SECRET_PATHS.items()})
     environment.update(
         {
             "MEDIA_GATEWAY_UPSTREAM_URL": "http://upstream:3000",
@@ -107,7 +130,7 @@ sys.exit(managed_app.main())
         }
     )
     result = subprocess.run(
-        [sys.executable, "-c", launcher],
+        [sys.executable, "-c", launcher, str(tmp_path)],
         env=environment,
         capture_output=True,
         text=True,
@@ -116,9 +139,10 @@ sys.exit(managed_app.main())
     assert result.returncode == 0
     assert "application stderr survives" in result.stdout
     assert result.stderr == ""
+    assert (tmp_path / "gateway.key").stat().st_mode & 0o777 == 0o600
     environment["MEDIA_GATEWAY_RADARR_PROFILE_ID"] = "invalid-sensitive-value"
     failed = subprocess.run(
-        [sys.executable, "-c", launcher],
+        [sys.executable, "-c", launcher, str(tmp_path)],
         env=environment,
         capture_output=True,
         text=True,
@@ -208,13 +232,65 @@ managed_start.main()
         assert "dummy CLI diagnostic" not in stdout + stderr
         if outcome == "success":
             assert "application log is preserved" in stdout
-            assert "Managed gateway stopped" not in stderr
+            assert "Managed media startup stopped" not in stderr
             assert "stopped" in events.read_text()
         else:
-            assert "Managed gateway stopped" in stderr
+            assert "Managed media startup stopped" in stderr
             if outcome == "timeout":
                 assert "stopped" in events.read_text()
     finally:
         if process.poll() is None:
             process.kill()
             process.wait()
+
+
+def test_gateway_files_preserve_literal_values_and_mutable_policy(
+    config: Config, tmp_path: Path
+) -> None:
+    directory = tmp_path / "projected"
+    directory.mkdir()
+    source = secret_values()
+    source["PLEX_API_KEY"] = 'literal$#=with"quotes"'
+    source["TELEGRAM_BOT_TOKEN"] = "fetched-telegram-token"
+    project_gateway_files(source, directory)
+    assert (
+        read_dotenv(directory / "upstream.env", set(UPSTREAM_KEYS))["PLEX_API_KEY"]
+        == source["PLEX_API_KEY"]
+    )
+    assert all(path.stat().st_mode & 0o777 == 0o600 for path in directory.iterdir())
+    managed = replace(config, telegram_token_file=directory / "telegram.env")
+    runtime = Runtime(managed)
+    original = config.policy_file.read_text()
+    assert runtime.notifications._telegram_token() == "fetched-telegram-token"
+    runtime.policy.set_allowed(42, allowed=True)
+    assert runtime.policy.snapshot().role(42).value == "user"
+    assert "TELEGRAM_BOT_TOKEN=test-token" in config.policy_file.read_text()
+    assert config.policy_file.read_text() != original
+    assert runtime.notifications._telegram_token() == "fetched-telegram-token"
+    assert Runtime(config).notifications._telegram_token() == "test-token"
+    (directory / "telegram.env").unlink()
+    with pytest.raises(FileNotFoundError):
+        runtime.notifications._telegram_token()
+
+
+@pytest.mark.parametrize("missing", sorted(SECRET_KEYS))
+def test_gateway_projection_requires_every_secret(tmp_path: Path, missing: str) -> None:
+    source = secret_values()
+    del source[missing]
+    with pytest.raises(ValueError, match="incomplete"):
+        project_gateway_files(source, tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_gateway_projection_rejects_injection_and_existing_files(tmp_path: Path) -> None:
+    source = secret_values()
+    source["RADARR_API_KEY"] = "key\nOTHER=bad"
+    with pytest.raises(ValueError):
+        project_gateway_files(source, tmp_path)
+    assert list(tmp_path.iterdir()) == []
+    protected = tmp_path / "existing"
+    protected.write_text("unchanged")
+    (tmp_path / "gateway.key").symlink_to(protected)
+    with pytest.raises(OSError):
+        project_gateway_files(secret_values(), tmp_path)
+    assert protected.read_text() == "unchanged"

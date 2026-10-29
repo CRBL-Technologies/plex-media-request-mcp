@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
 ARG HERMES_BASE_IMAGE
-FROM ${HERMES_BASE_IMAGE}
+FROM 1password/op:2.41.1@sha256:86c9f8c1961a87f4bcf4780f15c564c21f76ba5822635614b6b6d8a1e22fdbea AS onepassword
+FROM ${HERMES_BASE_IMAGE} AS runtime
 
 ARG HERMES_BASE_IMAGE
 ARG SOURCE_COMMIT
@@ -34,3 +35,10 @@ LABEL org.opencontainers.image.source="https://github.com/CRBL-Technologies/plex
       org.opencontainers.image.revision="$SOURCE_COMMIT"
 
 CMD ["gateway", "run"]
+
+FROM runtime AS managed
+COPY --from=onepassword /usr/local/bin/op /usr/local/bin/op
+COPY --chmod=0755 deployment/hermes/016-crbl-managed /etc/cont-init.d/016-crbl-managed
+ENV HERMES_MANAGED_DIR=/run/hermes-managed
+
+FROM runtime AS hermes

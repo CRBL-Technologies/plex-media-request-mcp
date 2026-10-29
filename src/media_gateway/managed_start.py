@@ -15,6 +15,8 @@ from contextlib import suppress
 from pathlib import Path
 from types import FrameType
 
+from .managed_files import SECRET_KEYS
+
 BOOTSTRAP_FILE = Path("/run/secrets/onepassword.json")
 APP_KEYS = frozenset(
     {
@@ -33,6 +35,7 @@ APP_KEYS = frozenset(
     }
 )
 STARTUP_TIMEOUT = 60
+RUNTIME_KEYS = APP_KEYS | SECRET_KEYS
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -69,18 +72,20 @@ def read_bootstrap(path: Path) -> tuple[str, str]:
     return environment_id, token
 
 
-def retrieval_environment(source: dict[str, str], token: str) -> dict[str, str]:
+def retrieval_environment(
+    source: dict[str, str], token: str, keys: frozenset[str]
+) -> dict[str, str]:
     environment = {
         key: value
         for key, value in source.items()
-        if not key.startswith("OP_") and key not in APP_KEYS and key != "MEDIA_GATEWAY_CONFIG_FILE"
+        if not key.startswith("OP_") and key not in keys and key != "MEDIA_GATEWAY_CONFIG_FILE"
     }
     environment["OP_SERVICE_ACCOUNT_TOKEN"] = token
     environment["OP_CONFIG_DIR"] = "/tmp/onepassword"
     return environment
 
 
-def main() -> None:
+def run_managed(module: str, keys: frozenset[str]) -> None:
     stopped = threading.Event()
     ready = threading.Event()
     child: subprocess.Popen[bytes] | None = None
@@ -108,10 +113,10 @@ def main() -> None:
                 "--",
                 sys.executable,
                 "-m",
-                "media_gateway.managed_app",
+                module,
                 str(os.getpid()),
             ],
-            env=retrieval_environment(dict(os.environ), token),
+            env=retrieval_environment(dict(os.environ), token, keys),
             stdin=subprocess.DEVNULL,
             # CLI errors can include identifiers. App stderr is redirected to
             # stdout in managed_app and still passes through op's masking.
@@ -123,6 +128,8 @@ def main() -> None:
             if not ready.is_set() and time.monotonic() >= deadline:
                 break
             stopped.wait(0.1)
+        if child.poll() == 0 and ready.is_set():
+            return
     except (OSError, ValueError):
         pass
     finally:
@@ -137,13 +144,17 @@ def main() -> None:
                 child.wait()
     if not stopped.is_set():
         print(
-            "Managed gateway stopped. Check health and configuration; restart to retry.",
+            "Managed media startup stopped. Check health and configuration; restart to retry.",
             file=sys.stderr,
             flush=True,
         )
         # One attempt per container start prevents an automatic restart loop
         # from exhausting the account's shared request quota.
         stopped.wait()
+
+
+def main() -> None:
+    run_managed("media_gateway.managed_app", RUNTIME_KEYS)
 
 
 if __name__ == "__main__":

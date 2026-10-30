@@ -59,6 +59,8 @@ Deno.test("native env-file round-trip preserves fetched values and removes boots
     const clean = projectUpstream(source, path);
     assert.equal(clean.OP_SERVICE_ACCOUNT_TOKEN, undefined);
     assert.equal(clean.RADARR_API_KEY, undefined);
+    assert.equal(clean.TOOL_PROFILE, "full");
+    assert.ok(!Deno.readTextFileSync(path).includes("TOOL_PROFILE"));
     assert.equal(Deno.statSync(path).mode! & 0o777, 0o600);
     const check = `if (Deno.env.get("RADARR_API_KEY") !== ${
       JSON.stringify(source.RADARR_API_KEY)
@@ -88,6 +90,7 @@ Deno.test("inherited values never satisfy a missing fetch; bad scope and injecti
     }, "dummy");
     assert.deepEqual(clean, {
       PATH: "keep",
+      TOOL_PROFILE: "full",
       OP_SERVICE_ACCOUNT_TOKEN: "dummy",
       OP_CONFIG_DIR: "/tmp/onepassword",
     });
@@ -99,6 +102,7 @@ Deno.test("inherited values never satisfy a missing fetch; bad scope and injecti
     assert.throws(() =>
       projectUpstream({ ...fetched(), TELEGRAM_BOT_TOKEN: "wrong-scope" }, path)
     );
+    assert.throws(() => projectUpstream({ ...fetched(), TOOL_PROFILE: "minimal" }, path));
     assert.equal(Array.from(Deno.readDirSync(directory)).length, 0);
     const { TMDB_API_KEY: _omitted, ...withoutTmdb } = fetched();
     projectUpstream(withoutTmdb, path);

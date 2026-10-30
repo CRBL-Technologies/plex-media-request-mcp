@@ -10,15 +10,13 @@ export const requiredKeys = [
   "SONARR_API_KEY",
   "PLEX_URL",
   "PLEX_API_KEY",
-  "TOOL_PROFILE",
 ];
+// TOOL_* selection settings are not secret. They come from Compose and pass
+// through to the vendor unchanged; TOOL_PROFILE must still be "full".
 export const appKeys = new Set([
   ...requiredKeys,
   // Optional in the vendor; without it the TMDB tools are not registered.
   "TMDB_API_KEY",
-  "TOOL_BRANCHES",
-  "TOOL_EXCLUDE",
-  "TOOL_INCLUDE",
 ]);
 const forbiddenKeys = new Set([
   "MEDIA_GATEWAY_TOKEN",

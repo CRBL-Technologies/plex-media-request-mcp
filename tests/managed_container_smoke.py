@@ -104,13 +104,8 @@ with tempfile.TemporaryDirectory(prefix="media-managed-smoke-") as temporary:
             "PLEX_URL": "http://127.0.0.1:9",
             "PLEX_API_KEY": "p" * 40,
             "TMDB_API_KEY": "t" * 40,
-            "TOOL_PROFILE": "full",
         }
-        gateway = {
-            key: value
-            for key, value in upstream.items()
-            if key not in {"TMDB_API_KEY", "TOOL_PROFILE"}
-        }
+        gateway = {key: value for key, value in upstream.items() if key != "TMDB_API_KEY"}
         gateway.update(
             {
                 "TELEGRAM_BOT_TOKEN": "fetched-telegram-token",
@@ -180,7 +175,7 @@ with tempfile.TemporaryDirectory(prefix="media-managed-smoke-") as temporary:
 
         daemon(
             upstream_image,
-            fixture(root, "upstream", upstream),
+            [*fixture(root, "upstream", upstream), "-e", "TOOL_PROFILE=full"],
             [
                 "deno",
                 "eval",

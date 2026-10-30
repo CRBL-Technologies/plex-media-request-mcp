@@ -311,11 +311,12 @@ sets `MEDIA_GATEWAY_TELEGRAM_TOKEN_FILE` to the separate Telegram file. The
 public default still reads the token from its policy file. When the separate
 path is set, a missing token file never falls back to the policy file.
 
-The upstream Environment contains the seven upstream fields above, plus
-`TOOL_PROFILE=full`. `TMDB_API_KEY` is optional: without it the vendor does not
-register its TMDB tools, which matches the current deployment. Its existing optional `TOOL_BRANCHES`,
-`TOOL_EXCLUDE` and `TOOL_INCLUDE` inputs can also be supplied. They must preserve
-the reviewed gateway tool manifest. The wrapper writes its private
+The upstream Environment contains the seven upstream fields above.
+`TMDB_API_KEY` is optional: without it the vendor does not register its TMDB
+tools, which matches the current deployment. `TOOL_PROFILE=full` is a Compose
+setting, not an Environment field; the wrapper still refuses any other profile.
+The optional `TOOL_BRANCHES`, `TOOL_EXCLUDE` and `TOOL_INCLUDE` settings also
+belong in Compose. They must preserve the reviewed gateway tool manifest. The wrapper writes its private
 `/run/media-secrets/upstream.env`, then starts the unmodified vendor command with
 Deno's native `--env-file` option. Native parsing is tested for literal dollar
 signs, quotes and comment characters. Multiline values and `${...}` interpolation

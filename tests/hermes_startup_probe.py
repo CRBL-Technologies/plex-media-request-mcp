@@ -44,7 +44,9 @@ def main() -> None:
     assert os.environ["TELEGRAM_BOT_TOKEN"] == "fetched-telegram-token"
     assert os.environ["CRBL_MEDIA_GATEWAY_URL"] == "http://gateway:18082"
     assert "RADARR_API_KEY" not in os.environ
-    assert Path("/run/media-secrets/gateway.key").read_text().strip() == "g" * 40
+    assert os.environ["CRBL_MEDIA_GATEWAY_TOKEN_FILE"] == "/run/media-keys/gateway.key"
+    assert Path("/run/media-keys/gateway.key").read_text().strip() == "g" * 40
+    assert "CRBL_MEDIA_GATEWAY_TOKEN" not in os.environ
     assert "TELEGRAM_BOT_TOKEN=old-token" in Path("/opt/data/.env").read_text()
     assert os.environ["TELEGRAM_ALLOWED_USERS"] == "10"
     assert os.environ["OPENROUTER_API_KEY"] == "dummy-owner-provider-key"

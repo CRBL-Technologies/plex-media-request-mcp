@@ -8,13 +8,13 @@ import sys
 from pathlib import Path
 
 from .config import Config
-from .managed_files import SECRET_KEYS, SECRET_PATHS, project_gateway_files
+from .managed_files import FILE_KEYS, SECRET_KEYS, SECRET_PATHS, project_gateway_files
 from .managed_start import RUNTIME_KEYS
 
 
 def application_environment(source: dict[str, str]) -> dict[str, str]:
-    if not RUNTIME_KEYS.issubset(source):
-        raise ValueError("incomplete runtime Environment")
+    if not RUNTIME_KEYS.issubset(source) or FILE_KEYS.intersection(source):
+        raise ValueError("incomplete or over-scoped runtime Environment")
     return {
         key: value
         for key, value in source.items()

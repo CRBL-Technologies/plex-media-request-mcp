@@ -5,11 +5,16 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-KEY_FILES = (
-    ("MEDIA_GATEWAY_TOKEN", "gateway.key", 32),
-    ("MEDIA_GATEWAY_DASHBOARD_PASSWORD_HASH", "dashboard-password.hash", 1),
-    ("MEDIA_GATEWAY_DASHBOARD_SESSION_KEY", "dashboard-session.key", 32),
-    ("MEDIA_GATEWAY_PLEX_WEBHOOK_TOKEN", "plex-webhook.key", 32),
+# Locally generated secrets stay in their owner-provisioned host files, mounted
+# read-only. An Environment copy would be a second, unmanaged source.
+FILE_KEYS = frozenset(
+    {
+        "MEDIA_GATEWAY_TOKEN",
+        "MEDIA_GATEWAY_DASHBOARD_PASSWORD_HASH",
+        "MEDIA_GATEWAY_DASHBOARD_SESSION_KEY",
+        "MEDIA_GATEWAY_PLEX_WEBHOOK_TOKEN",
+        "CRBL_MEDIA_GATEWAY_TOKEN",
+    }
 )
 UPSTREAM_KEYS = (
     "MCP_AUTH_TOKEN",
@@ -20,15 +25,9 @@ UPSTREAM_KEYS = (
     "PLEX_URL",
     "PLEX_API_KEY",
 )
-SECRET_KEYS = (
-    frozenset(key for key, _, _ in KEY_FILES) | frozenset(UPSTREAM_KEYS) | {"TELEGRAM_BOT_TOKEN"}
-)
+SECRET_KEYS = frozenset(UPSTREAM_KEYS) | {"TELEGRAM_BOT_TOKEN"}
 SECRET_PATHS = {
-    "MEDIA_GATEWAY_TOKEN_FILE": "gateway.key",
     "MEDIA_GATEWAY_UPSTREAM_TOKEN_FILE": "upstream.env",
-    "MEDIA_GATEWAY_DASHBOARD_PASSWORD_HASH_FILE": "dashboard-password.hash",
-    "MEDIA_GATEWAY_DASHBOARD_SESSION_KEY_FILE": "dashboard-session.key",
-    "MEDIA_GATEWAY_PLEX_WEBHOOK_TOKEN_FILE": "plex-webhook.key",
     "MEDIA_GATEWAY_TELEGRAM_TOKEN_FILE": "telegram.env",
 }
 
@@ -52,13 +51,12 @@ def project_gateway_files(source: dict[str, str], directory: Path) -> None:
         raise ValueError("incomplete runtime secret fields")
     for key in SECRET_KEYS:
         single_line(source[key])
-    files = {
-        filename: single_line(source[key], minimum) + "\n" for key, filename, minimum in KEY_FILES
-    }
     single_line(source["MCP_AUTH_TOKEN"], 32)
     # These files use the gateway's strict non-interpolating dotenv reader.
     # Outer quotes preserve embedded quotes and literal $, #, and = characters.
-    files["upstream.env"] = "".join(f'{key}="{source[key]}"\n' for key in UPSTREAM_KEYS)
-    files["telegram.env"] = f'TELEGRAM_BOT_TOKEN="{source["TELEGRAM_BOT_TOKEN"]}"\n'
+    files = {
+        "upstream.env": "".join(f'{key}="{source[key]}"\n' for key in UPSTREAM_KEYS),
+        "telegram.env": f'TELEGRAM_BOT_TOKEN="{source["TELEGRAM_BOT_TOKEN"]}"\n',
+    }
     for filename, content in files.items():
         write_private(directory / filename, content)

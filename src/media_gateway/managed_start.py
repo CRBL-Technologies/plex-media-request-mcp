@@ -15,7 +15,7 @@ from contextlib import suppress
 from pathlib import Path
 from types import FrameType
 
-from .managed_files import SECRET_KEYS
+from .managed_files import FILE_KEYS, SECRET_KEYS
 
 BOOTSTRAP_FILE = Path("/run/secrets/onepassword.json")
 APP_KEYS = frozenset(
@@ -154,7 +154,9 @@ def run_managed(module: str, keys: frozenset[str]) -> None:
 
 
 def main() -> None:
-    run_managed("media_gateway.managed_app", RUNTIME_KEYS)
+    # Strip inherited generated-key copies too, so any found after retrieval
+    # came from the Environment and is rejected.
+    run_managed("media_gateway.managed_app", RUNTIME_KEYS | FILE_KEYS)
 
 
 if __name__ == "__main__":

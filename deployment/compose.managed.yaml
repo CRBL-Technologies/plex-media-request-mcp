@@ -1,6 +1,8 @@
 # Separate managed recipe. Do not merge with compose.yaml: its old read-only
-# key mounts would cover the private tmpfs projection paths. Saved legacy
-# Portainer fields can remain during proof; they are not read by this recipe.
+# file mounts would cover the private tmpfs projection paths. Locally generated
+# keys stay in their existing host files, mounted read-only under /run/media-keys.
+# Saved legacy Portainer fields can remain during proof; only the host-file paths
+# below are read by this recipe.
 name: hermes-media
 
 services:
@@ -48,16 +50,20 @@ services:
       MEDIA_GATEWAY_PORT: "18082"
       MEDIA_GATEWAY_DB_PATH: /opt/data/state/gateway.sqlite3
       MEDIA_GATEWAY_POLICY_FILE: /opt/hermes-data/.env
-      MEDIA_GATEWAY_TOKEN_FILE: /run/media-secrets/gateway.key
+      MEDIA_GATEWAY_TOKEN_FILE: /run/media-keys/gateway.key
       MEDIA_GATEWAY_UPSTREAM_TOKEN_FILE: /run/media-secrets/upstream.env
-      MEDIA_GATEWAY_DASHBOARD_PASSWORD_HASH_FILE: /run/media-secrets/dashboard-password.hash
-      MEDIA_GATEWAY_DASHBOARD_SESSION_KEY_FILE: /run/media-secrets/dashboard-session.key
-      MEDIA_GATEWAY_PLEX_WEBHOOK_TOKEN_FILE: /run/media-secrets/plex-webhook.key
+      MEDIA_GATEWAY_DASHBOARD_PASSWORD_HASH_FILE: /run/media-keys/dashboard-password.hash
+      MEDIA_GATEWAY_DASHBOARD_SESSION_KEY_FILE: /run/media-keys/dashboard-session.key
+      MEDIA_GATEWAY_PLEX_WEBHOOK_TOKEN_FILE: /run/media-keys/plex-webhook.key
       MEDIA_GATEWAY_TELEGRAM_TOKEN_FILE: /run/media-secrets/telegram.env
     volumes:
       - ${HERMES_DATA_DIR:?required}:/opt/hermes-data:rw
       - ${GATEWAY_STATE_DIR:?required}:/opt/data/state:rw
       - ${GATEWAY_ONEPASSWORD_FILE:?required owner-provisioned bootstrap file}:/run/secrets/onepassword.json:ro
+      - ${GATEWAY_TOKEN_FILE:?required}:/run/media-keys/gateway.key:ro
+      - ${DASHBOARD_PASSWORD_HASH_FILE:?required}:/run/media-keys/dashboard-password.hash:ro
+      - ${DASHBOARD_SESSION_KEY_FILE:?required}:/run/media-keys/dashboard-session.key:ro
+      - ${PLEX_WEBHOOK_TOKEN_FILE:?required}:/run/media-keys/plex-webhook.key:ro
     ports:
       - "18082:18082"
       - "127.0.0.1:18081:18082"
@@ -91,10 +97,11 @@ services:
       HERMES_HOME: /opt/data
       HERMES_DASHBOARD: "false"
       HERMES_MANAGED_DIR: /run/hermes-managed
-      CRBL_MEDIA_GATEWAY_TOKEN_FILE: /run/media-secrets/gateway.key
+      CRBL_MEDIA_GATEWAY_TOKEN_FILE: /run/media-keys/gateway.key
     volumes:
       - ${HERMES_DATA_DIR:?required}:/opt/data:rw
       - ${HERMES_ONEPASSWORD_FILE:?required owner-provisioned bootstrap file}:/run/secrets/onepassword.json:ro
+      - ${GATEWAY_TOKEN_FILE:?required}:/run/media-keys/gateway.key:ro
     networks: [media-bot]
     depends_on:
       media-gateway:

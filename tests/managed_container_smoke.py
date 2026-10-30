@@ -113,10 +113,6 @@ with tempfile.TemporaryDirectory(prefix="media-managed-smoke-") as temporary:
         }
         gateway.update(
             {
-                "MEDIA_GATEWAY_TOKEN": "g" * 40,
-                "MEDIA_GATEWAY_DASHBOARD_PASSWORD_HASH": "dummy-hash",
-                "MEDIA_GATEWAY_DASHBOARD_SESSION_KEY": "d" * 40,
-                "MEDIA_GATEWAY_PLEX_WEBHOOK_TOKEN": "w" * 40,
                 "TELEGRAM_BOT_TOKEN": "fetched-telegram-token",
                 "MEDIA_GATEWAY_UPSTREAM_URL": "http://127.0.0.1:9",
                 "MEDIA_GATEWAY_SECURE_COOKIES": "false",
@@ -133,6 +129,28 @@ with tempfile.TemporaryDirectory(prefix="media-managed-smoke-") as temporary:
             }
         )
         gateway_args = fixture(root, "gateway", gateway)
+        # Locally generated keys stay in owner-provisioned host files.
+        keys = root / "keys"
+        keys.mkdir(mode=0o755)
+        for filename, value in {
+            "gateway.key": "g" * 40,
+            "dashboard-password.hash": "dummy-hash",
+            "dashboard-session.key": "d" * 40,
+            "plex-webhook.key": "w" * 40,
+        }.items():
+            (keys / filename).write_text(value + "\n")
+            (keys / filename).chmod(0o644)
+            gateway_args += ["-v", f"{keys / filename}:/run/media-keys/{filename}:ro"]
+        gateway_args += [
+            "-e",
+            "MEDIA_GATEWAY_TOKEN_FILE=/run/media-keys/gateway.key",
+            "-e",
+            "MEDIA_GATEWAY_DASHBOARD_PASSWORD_HASH_FILE=/run/media-keys/dashboard-password.hash",
+            "-e",
+            "MEDIA_GATEWAY_DASHBOARD_SESSION_KEY_FILE=/run/media-keys/dashboard-session.key",
+            "-e",
+            "MEDIA_GATEWAY_PLEX_WEBHOOK_TOKEN_FILE=/run/media-keys/plex-webhook.key",
+        ]
         policy = root / "policy.env"
         policy.write_text("TELEGRAM_BOT_TOKEN=old-token\nTELEGRAM_ALLOWED_USERS=10\n")
         gateway_args += [
@@ -197,9 +215,9 @@ with tempfile.TemporaryDirectory(prefix="media-managed-smoke-") as temporary:
             {
                 "TELEGRAM_BOT_TOKEN": "fetched-telegram-token",
                 "CRBL_MEDIA_GATEWAY_URL": "http://gateway:18082",
-                "CRBL_MEDIA_GATEWAY_TOKEN": "g" * 40,
             },
         )
+        hermes_args += ["-v", f"{keys / 'gateway.key'}:/run/media-keys/gateway.key:ro"]
         data = root / "data"
         data.mkdir(mode=0o777)
         data.chmod(0o777)

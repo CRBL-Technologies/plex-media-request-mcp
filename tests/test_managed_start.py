@@ -14,6 +14,7 @@ from media_gateway.app import Runtime
 from media_gateway.config import Config
 from media_gateway.managed_app import application_environment
 from media_gateway.managed_files import (
+    FILE_KEYS,
     SECRET_KEYS,
     SECRET_PATHS,
     UPSTREAM_KEYS,
@@ -73,6 +74,9 @@ def test_inherited_app_values_cannot_supply_missing_fetched_options() -> None:
     retrieved["MEDIA_GATEWAY_RADARR_TAG_IDS"] = ""
     retrieved["MEDIA_GATEWAY_SONARR_TAG_IDS"] = ""
     environment = application_environment(retrieved)
+    for key in FILE_KEYS:
+        with pytest.raises(ValueError, match="over-scoped"):
+            application_environment({**retrieved, key: "generated-value-in-environment"})
     assert environment["MEDIA_GATEWAY_UPSTREAM_URL"] == "fetched-value"
     assert environment["MEDIA_GATEWAY_RADARR_TAG_IDS"] == ""
     assert not any(key.startswith("OP_") for key in environment)
@@ -111,6 +115,10 @@ sys.exit(managed_app.main())
     environment.update({key: f"/run/media-secrets/{name}" for key, name in SECRET_PATHS.items()})
     environment.update(
         {
+            "MEDIA_GATEWAY_TOKEN_FILE": "/run/media-keys/gateway.key",
+            "MEDIA_GATEWAY_DASHBOARD_PASSWORD_HASH_FILE": "/run/media-keys/dashboard-password.hash",
+            "MEDIA_GATEWAY_DASHBOARD_SESSION_KEY_FILE": "/run/media-keys/dashboard-session.key",
+            "MEDIA_GATEWAY_PLEX_WEBHOOK_TOKEN_FILE": "/run/media-keys/plex-webhook.key",
             "MEDIA_GATEWAY_UPSTREAM_URL": "http://upstream:3000",
             "MEDIA_GATEWAY_SECURE_COOKIES": "false",
             "MEDIA_GATEWAY_RADARR_PROFILE_ID": "25",
@@ -139,7 +147,8 @@ sys.exit(managed_app.main())
     assert result.returncode == 0
     assert "application stderr survives" in result.stdout
     assert result.stderr == ""
-    assert (tmp_path / "gateway.key").stat().st_mode & 0o777 == 0o600
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["telegram.env", "upstream.env"]
+    assert (tmp_path / "upstream.env").stat().st_mode & 0o777 == 0o600
     environment["MEDIA_GATEWAY_RADARR_PROFILE_ID"] = "invalid-sensitive-value"
     failed = subprocess.run(
         [sys.executable, "-c", launcher, str(tmp_path)],
@@ -290,7 +299,7 @@ def test_gateway_projection_rejects_injection_and_existing_files(tmp_path: Path)
     assert list(tmp_path.iterdir()) == []
     protected = tmp_path / "existing"
     protected.write_text("unchanged")
-    (tmp_path / "gateway.key").symlink_to(protected)
+    (tmp_path / "upstream.env").symlink_to(protected)
     with pytest.raises(OSError):
         project_gateway_files(secret_values(), tmp_path)
     assert protected.read_text() == "unchanged"

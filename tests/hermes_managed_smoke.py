@@ -28,8 +28,8 @@ assert (
 
 with tempfile.TemporaryDirectory() as temporary:
     root = Path(temporary)
-    user, managed, secrets = (root / name for name in ("user", "managed", "secrets"))
-    for directory in (user, managed, secrets):
+    user, managed = (root / name for name in ("user", "managed"))
+    for directory in (user, managed):
         directory.mkdir()
     policy = user / ".env"
     policy.write_text("TELEGRAM_BOT_TOKEN=old-token\nTELEGRAM_ALLOWED_USERS=10\n")
@@ -39,9 +39,7 @@ with tempfile.TemporaryDirectory() as temporary:
         {
             "TELEGRAM_BOT_TOKEN": "fetched-telegram-token",
             "CRBL_MEDIA_GATEWAY_URL": "http://gateway:18082",
-            "CRBL_MEDIA_GATEWAY_TOKEN": "fetched-gateway-key-with-more-than-thirty-two-bytes",
         },
-        secrets,
         managed,
     )
     os.environ["HERMES_HOME"] = str(user)
@@ -57,7 +55,7 @@ with tempfile.TemporaryDirectory() as temporary:
     load_hermes_dotenv(hermes_home=user, load_external_secrets=False)
     assert os.environ["TELEGRAM_ALLOWED_USERS"] == "10,20"
     assert os.environ["TELEGRAM_BOT_TOKEN"] == "fetched-telegram-token"
-    assert (secrets / "gateway.key").stat().st_mode & 0o777 == 0o600
+    assert os.environ["CRBL_MEDIA_GATEWAY_TOKEN_FILE"] == "/run/media-keys/gateway.key"
     assert (managed / ".env").stat().st_mode & 0o777 == 0o600
 print("Native Hermes managed secrets and live policy checks passed.")
 print("Native lock overrides reject unknown versions and incomplete reports.")

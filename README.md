@@ -288,12 +288,23 @@ It must also contain these file-backed values:
 
 | Managed Environment fields | Ephemeral gateway file |
 | --- | --- |
-| `MEDIA_GATEWAY_TOKEN` | `/run/media-secrets/gateway.key` |
-| `MEDIA_GATEWAY_DASHBOARD_PASSWORD_HASH` | `/run/media-secrets/dashboard-password.hash` |
-| `MEDIA_GATEWAY_DASHBOARD_SESSION_KEY` | `/run/media-secrets/dashboard-session.key` |
-| `MEDIA_GATEWAY_PLEX_WEBHOOK_TOKEN` | `/run/media-secrets/plex-webhook.key` |
 | `MCP_AUTH_TOKEN`, `RADARR_URL`, `RADARR_API_KEY`, `SONARR_URL`, `SONARR_API_KEY`, `PLEX_URL`, `PLEX_API_KEY` | `/run/media-secrets/upstream.env` |
 | `TELEGRAM_BOT_TOKEN` | `/run/media-secrets/telegram.env` |
+
+Locally generated keys are not Environment fields. The owner keeps them in the
+existing host files, which Compose mounts read-only:
+
+| Stack variable (host file) | Gateway mount |
+| --- | --- |
+| `GATEWAY_TOKEN_FILE` | `/run/media-keys/gateway.key`, also mounted for Hermes |
+| `DASHBOARD_PASSWORD_HASH_FILE` | `/run/media-keys/dashboard-password.hash` |
+| `DASHBOARD_SESSION_KEY_FILE` | `/run/media-keys/dashboard-session.key` |
+| `PLEX_WEBHOOK_TOKEN_FILE` | `/run/media-keys/plex-webhook.key` |
+
+The wrappers refuse to start if `MEDIA_GATEWAY_TOKEN`,
+`MEDIA_GATEWAY_DASHBOARD_PASSWORD_HASH`, `MEDIA_GATEWAY_DASHBOARD_SESSION_KEY`,
+`MEDIA_GATEWAY_PLEX_WEBHOOK_TOKEN` or `CRBL_MEDIA_GATEWAY_TOKEN` appears in an
+Environment, so each generated key keeps one source.
 
 These files retain their existing raw-key or dotenv formats. The managed gateway
 sets `MEDIA_GATEWAY_TELEGRAM_TOKEN_FILE` to the separate Telegram file. The
@@ -309,10 +320,10 @@ Deno's native `--env-file` option. Native parsing is tested for literal dollar
 signs, quotes and comment characters. Multiline values and `${...}` interpolation
 forms are rejected instead of being silently changed.
 
-The Hermes Environment contains only `TELEGRAM_BOT_TOKEN`,
-`CRBL_MEDIA_GATEWAY_URL` and `CRBL_MEDIA_GATEWAY_TOKEN`. The gateway key is written
-to `/run/media-secrets/gateway.key`. A private `/run/hermes-managed/.env` supplies
-the token, URL and key-file path through Hermes' native managed-scope loader.
+The Hermes Environment contains only `TELEGRAM_BOT_TOKEN` and
+`CRBL_MEDIA_GATEWAY_URL`. The gateway key comes from the read-only host-file
+mount at `/run/media-keys/gateway.key`. A private `/run/hermes-managed/.env`
+supplies the token, URL and key-file path through Hermes' native managed-scope loader.
 That layer overrides stale startup values without rewriting the user `.env`.
 The wrapper rejects upstream service keys and gateway-only private secrets in
 this Environment. Native `/init` remains PID 1; retrieval runs after the UID
@@ -340,9 +351,10 @@ the projection paths. Select managed digests using `MEDIA_GATEWAY_IMAGE`,
 host mount paths, not tokens or Environment IDs.
 
 Keep old saved Portainer fields and host secret files initially for rollback.
-The managed recipe does not reference them. Verify fetched values, failure with
+The managed recipe reads only the four generated-key files listed above. Verify fetched values, failure with
 missing fields, restart behavior, notifications and live policy edits. Only then
-remove obsolete saved fields and old secret copies, including the old
+remove obsolete saved fields and old secret copies (`upstream.env` and
+`gateway.env`, but not the generated-key files), including the old
 `TELEGRAM_BOT_TOKEN` line in the user policy file. Preserve all authorization
 and other state lines. Restart and verify again after cleanup. No cutover or
 cleanup is performed by this preparation.

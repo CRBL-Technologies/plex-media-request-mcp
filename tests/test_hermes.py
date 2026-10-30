@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -18,11 +19,11 @@ from hermes_media.trusted import (
     actor_from_event,
     actor_scope,
     claim_card_slot,
+    current_event,
     current_role,
     require_actor,
 )
 from media_gateway.constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
-from media_gateway.tools import SHARED_SCHEMAS
 from media_gateway.types import Actor, Role
 
 
@@ -119,12 +120,12 @@ class FakeContext:
 def session_owner() -> SimpleNamespace:
     config = SimpleNamespace(group_sessions_per_user=False, thread_sessions_per_user=False)
 
-    def original_key(source: Any) -> str:
+    def original_key(source: Any, key_source: Any = None) -> str:
         from gateway.session import build_session_key
 
         return str(
             build_session_key(
-                source,
+                key_source if key_source is not None else source,
                 group_sessions_per_user=config.group_sessions_per_user,
                 thread_sessions_per_user=config.thread_sessions_per_user,
             )
@@ -138,6 +139,10 @@ def session_owner() -> SimpleNamespace:
             _resolve_profile_for_key=lambda _source: None,
         ),
         _is_user_authorized=lambda source: source.user_id == "1001",
+        _principal_authorized=lambda source, **_kwargs: source.user_id == "1001",
+        _handle_message=lambda _event: None,
+        _adapter_for_source=lambda _source: None,
+        _profile_name_for_source=lambda _source, **_kwargs: None,
     )
 
 
@@ -487,6 +492,8 @@ async def test_a_long_recommendation_reaches_the_model_whole() -> None:
 def test_tool_contracts_describe_capability_not_procedure() -> None:
     """Each description says what the tool does; choosing is the model's job."""
 
+    from media_gateway.tools import SHARED_SCHEMAS
+
     search = SHARED_SCHEMAS["search_media"]["description"]
     assert "seasons_complete" in search and "plex_url" in search
     assert "posted to the chat as a poster" in search
@@ -524,10 +531,10 @@ async def test_adapter_verifies_actor_before_trusting_gateway(
     monkeypatch.setattr(plugin, "_client", gateway)
     adapter = plugin.MediaTelegramAdapter(SimpleNamespace(extra={}))
     adapter.gateway_runner = session_owner()
-    assert adapter.authorization_is_upstream is True
     assert adapter._is_user_authorized_from_message(object()) is True
     allowed = event(1001)
     await adapter.handle_message(allowed)
+    assert allowed.source.role_authorized is True  # type: ignore[attr-defined]
     with pytest.raises(PermissionError, match="not allowed"):
         await adapter.handle_message(event(7777))
 
@@ -564,7 +571,6 @@ async def test_execution_rebinds_actor_role_and_card_budget(
     assert adapter.config.extra == {
         "group_sessions_per_user": True,
         "thread_sessions_per_user": True,
-        "observe_unmentioned_group_messages": False,
     }
 
 
@@ -664,6 +670,10 @@ async def test_pinned_runtime_queued_users_remain_isolated(
         tasks = list(adapter._background_tasks)
         if tasks:
             await asyncio.wait_for(asyncio.gather(*tasks), 2)
+    adapter.set_message_handler(None)
+    assert adapter._message_handler is None
+    await adapter.handle_message(incoming("after drain", 1001))
+    assert len(seen) == 3
 
 
 @pytest.mark.parametrize("photo", [True, False])
@@ -713,20 +723,414 @@ async def test_pinned_runtime_cards_preserve_topic_and_dm_anchor(
     assert sent[0].get("reply_to_message_id") == (456 if chat_type == "dm" else None)
 
 
-def test_pinned_runtime_native_callbacks_keep_runner_authorization(
+async def test_pinned_runtime_callbacks_keep_sender_and_chat_boundaries(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     config_module = pytest.importorskip("gateway.config")
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
+    (tmp_path / ".env").write_text("TELEGRAM_ALLOWED_USERS=1001\n")
     adapter = plugin.MediaTelegramAdapter(config_module.PlatformConfig())
     adapter.gateway_runner = session_owner()
+    compat_module.isolate_actor_sessions(adapter)
     monkeypatch.setenv("TELEGRAM_ALLOWED_USERS", "7777")
+    selected: list[str] = []
+
+    async def choose(_chat_id: str, value: str) -> str:
+        selected.append(value)
+        return "selected"
+
+    async def answer(**_kwargs: Any) -> None:
+        return None
+
+    adapter._choice_picker_state["1001"] = {
+        "choices": [{"value": "safe"}],
+        "on_choice_selected": choose,
+        "msg_id": 321,
+        "session_key": adapter._source_session_key(
+            adapter.build_source(chat_id="1001", user_id="1001")
+        ),
+    }
+
+    def tap(sender: int, chat: int) -> SimpleNamespace:
+        return SimpleNamespace(
+            callback_query=SimpleNamespace(
+                data="cp:0",
+                from_user=SimpleNamespace(id=sender, first_name="Caller"),
+                message=SimpleNamespace(
+                    chat_id=chat,
+                    chat=SimpleNamespace(type="private"),
+                    from_user=SimpleNamespace(id=1001),
+                    message_thread_id=None,
+                    message_id=321,
+                ),
+                answer=answer,
+                edit_message_text=answer,
+            )
+        )
+
+    await adapter._handle_callback_query(tap(1001, 2002), None)
+    await adapter._handle_callback_query(tap(7777, 1001), None)
+    assert selected == []
+    assert "1001" in adapter._choice_picker_state
+    await adapter._handle_callback_query(tap(1001, 1001), None)
+    assert selected == ["safe"]
+
+
+def test_pinned_runtime_session_key_preserves_native_two_argument_contract(tmp_path: Path) -> None:
+    config_module = pytest.importorskip("gateway.config")
+    session_module = pytest.importorskip("gateway.session")
+    store = session_module.SessionStore(
+        tmp_path,
+        config_module.GatewayConfig(group_sessions_per_user=False, multiplex_profiles=True),
+    )
+    adapter = plugin.MediaTelegramAdapter(config_module.PlatformConfig())
+    adapter.gateway_runner = SimpleNamespace(session_store=store)
+    compat_module.isolate_actor_sessions(adapter)
+    source = session_module.SessionSource(
+        platform=config_module.Platform.SLACK,
+        chat_id="current",
+        user_id="U1",
+        chat_type="group",
+        profile="owner",
+    )
+    key_source = session_module.SessionSource(
+        platform=config_module.Platform.SLACK,
+        chat_id="legacy",
+        user_id="U2",
+        chat_type="group",
+        profile="not-owner",
+    )
+    assert store._generate_session_key(source, key_source) == session_module.build_session_key(
+        key_source,
+        group_sessions_per_user=False,
+        profile="owner",
+    )
+
+
+async def test_pinned_runtime_injected_callback_auth_rejects_unlisted_users(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from media_gateway.policy import Policy
+
+    config_module = pytest.importorskip("gateway.config")
+    runner_module = pytest.importorskip("gateway.run")
+    base = pytest.importorskip("gateway.platforms.base")
+    session_module = pytest.importorskip("gateway.session")
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
+    policy_file = tmp_path / ".env"
+    policy_file.write_text("TELEGRAM_ALLOWED_USERS=1001,9001\n")
+    policy = Policy(policy_file)
+    adapter = plugin.MediaTelegramAdapter(config_module.PlatformConfig())
+    runner = object.__new__(runner_module.GatewayRunner)
+    runner.config = config_module.GatewayConfig()
+    runner.adapters = {config_module.Platform.TELEGRAM: adapter}
+    runner.session_store = session_owner().session_store
+    adapter.gateway_runner = runner
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USERS", "1001")
+    monkeypatch.delenv("GATEWAY_ALLOW_ALL_USERS", raising=False)
+    monkeypatch.setattr(plugin, "_client", FakeGateway())
 
     async def handler(_event: Any) -> None:
         pass
 
     adapter.set_message_handler(handler)
+    adapter.set_authorization_check(runner._make_adapter_auth_check(adapter.platform))
     assert adapter._is_callback_user_authorized("1001", chat_id="1001") is True
     assert adapter._is_callback_user_authorized("7777", chat_id="7777") is False
+    approved = base.MessageEvent(
+        text="approved by the gateway",
+        message_type=base.MessageType.TEXT,
+        raw_message=SimpleNamespace(
+            from_user=SimpleNamespace(id=9001),
+            chat=SimpleNamespace(id=9001),
+        ),
+        source=session_module.SessionSource(
+            platform=config_module.Platform.TELEGRAM,
+            chat_id="9001",
+            user_id="9001",
+        ),
+    )
+    assert runner._is_user_authorized(approved.source) is True
+    await adapter._message_handler(approved)
+    assert runner._is_user_authorized(approved.source) is True
+    approved.source.is_bot = True
+    monkeypatch.setattr(
+        runner, "_bot_loop_guard_instance", lambda: SimpleNamespace(blocked=lambda _key: True)
+    )
+    assert runner._is_user_authorized(approved.source) is False
+    approved.source.is_bot = False
+    policy.set_allowed(9001, allowed=False)
+    assert adapter._is_callback_user_authorized("9001", chat_id="9001") is False
+    # A previously marked source and the process allowlist cannot restore access.
+    assert runner._is_user_authorized(approved.source) is False
+    policy.set_allowed(1001, allowed=False)
+    policy.set_allowed(7777, allowed=True)
+    assert policy.snapshot().role(7777) is Role.USER, policy_file.read_text()
+    assert adapter._is_callback_user_authorized("1001", chat_id="1001") is False
+    assert adapter._is_callback_user_authorized("7777", chat_id="7777") is True
+    policy_file.write_text("TELEGRAM_ALLOWED_USERS=invalid\n")
+    assert adapter._is_callback_user_authorized("1001", chat_id="1001") is False
+    assert runner._is_user_authorized(approved.source) is False
+    policy_file.unlink()
+    assert adapter._is_callback_user_authorized("1001", chat_id="1001") is False
+    monkeypatch.setenv("GATEWAY_ALLOW_ALL_USERS", "true")
+    assert runner._is_user_authorized(approved.source) is False
+    # Other platforms retain the native authorization contract.
+    slack = session_module.SessionSource(
+        platform=config_module.Platform.SLACK, chat_id="C1", user_id="U1"
+    )
+    assert runner._is_user_authorized(slack) is True
+
+
+async def test_pinned_runtime_callbacks_use_receiving_profile_policy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config_module = pytest.importorskip("gateway.config")
+    runner_module = pytest.importorskip("gateway.run")
+    session_module = pytest.importorskip("gateway.session")
+    primary, secondary = tmp_path / "primary", tmp_path / "secondary"
+    primary.mkdir()
+    secondary.mkdir()
+    (primary / ".env").write_text("TELEGRAM_ALLOWED_USERS=1001\n")
+    (secondary / ".env").write_text("TELEGRAM_ALLOWED_USERS=1002\n")
+    monkeypatch.setenv("HERMES_HOME", str(primary))
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USERS", "1001")
+    monkeypatch.setenv("GATEWAY_ALLOW_ALL_USERS", "true")
+    adapter = plugin.MediaTelegramAdapter(config_module.PlatformConfig(extra={}))
+    adapter.set_owner_profile("secondary")
+    runner = object.__new__(runner_module.GatewayRunner)
+    runner.config = config_module.GatewayConfig()
+    runner.adapters = {}
+    runner._profile_adapters = {"secondary": {config_module.Platform.TELEGRAM: adapter}}
+    runner._multiplex_on = lambda: True
+    runner._routed_profile_home = lambda _name: secondary
+    runner.session_store = session_module.SessionStore(tmp_path / "sessions", runner.config)
+    adapter.gateway_runner = runner
+
+    async def handler(_event: Any) -> None:
+        pass
+
+    adapter.set_message_handler(handler)
+    assert adapter._is_callback_user_authorized("1001", chat_id="1001") is False
+    adapter.set_authorization_check(
+        runner._make_adapter_auth_check(config_module.Platform.TELEGRAM, "secondary")
+    )
+    assert adapter._is_callback_user_authorized("1001", chat_id="1001") is False
+    assert adapter._is_callback_user_authorized("1002", chat_id="1002") is True
+    (secondary / ".env").write_text("TELEGRAM_ALLOWED_USERS=\n")
+    assert adapter._is_callback_user_authorized("1002", chat_id="1002") is False
+    (secondary / ".env").unlink()
+    assert adapter._is_callback_user_authorized("1001", chat_id="1001") is False
+
+
+@pytest.mark.parametrize("user_id", [1001, 9001])
+async def test_pinned_runtime_durable_turn_rechecks_live_policy_and_context(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, user_id: int
+) -> None:
+    """Exercise the native persisted envelope, preflight and direct runner replay."""
+    config_module = pytest.importorskip("gateway.config")
+    runner_module = pytest.importorskip("gateway.run")
+    session_module = pytest.importorskip("gateway.session")
+    base = pytest.importorskip("gateway.platforms.base")
+    envelope = pytest.importorskip("gateway.session_envelope")
+    ingress = pytest.importorskip("gateway.session_ingress")
+    context = pytest.importorskip("gateway.session_ingress_context")
+    state = pytest.importorskip("hermes_state")
+    runtime = pytest.importorskip("hermes_state_runtime")
+    from media_gateway.policy import Policy
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USERS", "1001")
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
+    policy_file = tmp_path / ".env"
+    policy_file.write_text("TELEGRAM_ALLOWED_USERS=1001\nTELEGRAM_ADMIN_USERS=9001\n")
+    adapter = plugin.MediaTelegramAdapter(config_module.PlatformConfig(extra={}))
+    runner = object.__new__(runner_module.GatewayRunner)
+    runner.config = config_module.GatewayConfig()
+    runner.adapters = {config_module.Platform.TELEGRAM: adapter}
+    runner.session_store = session_module.SessionStore(tmp_path / "sessions", runner.config)
+    runner._adapter_credential_fingerprint = lambda _adapter: None
+    adapter.gateway_runner = runner
+    observed: list[tuple[int, Role | None, bool, bool]] = []
+
+    async def handler(incoming: Any) -> None:
+        assert adapter._media_delivery_loop is asyncio.get_running_loop()
+        observed.append(
+            (
+                require_actor().user_id,
+                current_role(),
+                claim_card_slot(),
+                current_event() is incoming,
+            )
+        )
+        assert not claim_card_slot()
+
+    runner._handle_message = handler
+    db = state.SessionDB(tmp_path / "state.db")
+    authority = SimpleNamespace(
+        runner=runner,
+        db=db,
+        profile_id=str(tmp_path),
+        sessions={},
+        native_waiters=set(),
+        pending_results={},
+        pending_deliveries={},
+    )
+    runner.session_authority = authority
+    context.register_transport_home(runner, None, tmp_path)
+    monkeypatch.setattr(plugin, "_client", FakeGateway())
+    adapter.set_message_handler(runner._primary_message_handler())
+    incoming = base.MessageEvent(
+        text="queued request",
+        message_id="123",
+        raw_message=SimpleNamespace(
+            from_user=SimpleNamespace(id=user_id), chat=SimpleNamespace(id=-100)
+        ),
+        source=adapter.build_source(
+            chat_id="-100",
+            user_id=str(user_id),
+            chat_type="group",
+        ),
+    )
+    compat_module.mark_authorized_event(incoming)
+
+    # Do not hydrate profile secrets in this offline synthetic fixture.
+    async def execution_scope(_authority: Any, _home: Any) -> Any:
+        return nullcontext()
+
+    monkeypatch.setattr(ingress, "_execution_scope", execution_scope)
+    try:
+        with context.native_callback(runner, incoming, tmp_path):
+            payload = await envelope.prepare_native(runner, incoming)
+        payload = json.loads(json.dumps(payload))  # No raw update or ContextVar survives storage.
+        entry = runner.session_store.get_or_create_session(incoming.source)
+        ref = SimpleNamespace(session_id=entry.session_id)
+        route = runner.session_store._generate_session_key(incoming.source)
+        authority.sessions[ref.session_id] = SimpleNamespace(source=incoming.source, route=route)
+        row = {"admission_id": "queued-1", "request_id": "123", "generation": 1, "payload": payload}
+
+        if user_id == 1001:
+            Policy(policy_file).set_allowed(user_id, allowed=False)
+            with pytest.raises(runtime.RuntimeStoreError):
+                await envelope.check_native_route(
+                    runner, payload, ref.session_id, incoming.source, adapter
+                )
+            Policy(policy_file).set_allowed(user_id, allowed=True)
+        await envelope.check_native_route(runner, payload, ref.session_id, incoming.source, adapter)
+        await ingress.execute_admission(authority, ref, row)
+        expected_role = Role.ADMIN if user_id == 9001 else Role.USER
+        assert observed == [(user_id, expected_role, True, True)]
+        with pytest.raises(TrustError, match="no trusted"):
+            require_actor()
+        # Replay must reset an unrelated inherited actor and spent card budget too.
+        with actor_scope(Actor(user_id=7777, chat_id=7777), Role.ADMIN):
+            assert claim_card_slot()
+            await ingress.execute_admission(authority, ref, row)
+            assert require_actor().user_id == 7777
+            assert not claim_card_slot()
+        assert observed == [(user_id, expected_role, True, True)] * 2
+
+        if user_id == 1001:
+            Policy(policy_file).set_allowed(user_id, allowed=False)
+        else:
+            policy_file.write_text("TELEGRAM_ALLOWED_USERS=1001\nTELEGRAM_ADMIN_USERS=\n")
+        with pytest.raises(runtime.RuntimeStoreError):
+            await envelope.check_native_route(
+                runner, payload, ref.session_id, incoming.source, adapter
+            )
+        # Also close a revocation between preflight and execution.
+        with pytest.raises(PermissionError):
+            await ingress.execute_admission(authority, ref, row)
+        assert len(observed) == 2
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("picker", ["model", "choice"])
+@pytest.mark.parametrize("thread_id", [None, "77"])
+async def test_pinned_runtime_picker_requires_owner_session_and_message(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, picker: str, thread_id: str | None
+) -> None:
+    config_module = pytest.importorskip("gateway.config")
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
+    policy_file = tmp_path / ".env"
+    policy_file.write_text("TELEGRAM_ALLOWED_USERS=1001,1002\nTELEGRAM_ADMIN_USERS=9001\n")
+    adapter = plugin.MediaTelegramAdapter(config_module.PlatformConfig(extra={}))
+    adapter.gateway_runner = session_owner()
+    compat_module.isolate_actor_sessions(adapter)
+    selected: list[tuple[Any, ...]] = []
+    replies: list[dict[str, Any]] = []
+
+    async def choose(*args: Any) -> str:
+        selected.append(args)
+        return "selected"
+
+    async def answer(**kwargs: Any) -> None:
+        replies.append(kwargs)
+
+    def tap(sender: int, *, message_id: int = 321, topic: str | None = thread_id) -> Any:
+        return SimpleNamespace(
+            callback_query=SimpleNamespace(
+                data="mc:0" if picker == "model" else "cp:0",
+                from_user=SimpleNamespace(id=sender, first_name="Caller"),
+                message=SimpleNamespace(
+                    chat_id=-100,
+                    chat=SimpleNamespace(id=-100, type="supergroup", is_forum=topic is not None),
+                    message_id=message_id,
+                    message_thread_id=int(topic) if topic else None,
+                    is_topic_message=topic is not None,
+                    from_user=SimpleNamespace(id=42),  # The bot is not the picker owner.
+                ),
+                answer=answer,
+                edit_message_text=answer,
+            )
+        )
+
+    source = adapter.build_source(
+        chat_id="-100",
+        user_id="9001",
+        chat_type="forum" if thread_id else "group",
+        thread_id=thread_id,
+    )
+    state = {
+        "session_key": adapter._source_session_key(source),
+        "msg_id": 321,
+        "choices": [{"value": "high"}],
+        "on_choice_selected": choose,
+        "model_list": ["test-model"],
+        "selected_provider": "test-provider",
+        "on_model_selected": choose,
+    }
+    states = getattr(adapter, f"_{picker}_picker_state")
+    states["-100"] = state
+    for update in (tap(1001), tap(1002), tap(9001, message_id=320), tap(9001, topic="88")):
+        await adapter._handle_callback_query(update, None)
+        assert selected == []
+        assert states["-100"] is state
+    if picker == "model":
+        for action in ("mp:test", "mpg:0", "mpv:0", "mm:0", "mb", "mx", "mg:0"):
+            other_user = tap(1001)
+            other_user.callback_query.data = action
+            await adapter._handle_callback_query(other_user, None)
+            assert states["-100"] is state
+            assert selected == []
+    for field in ("session_key", "msg_id"):
+        value = state.pop(field)
+        await adapter._handle_callback_query(tap(9001), None)
+        assert states["-100"] is state
+        assert selected == []
+        state[field] = value
+    policy_file.write_text("TELEGRAM_ALLOWED_USERS=1001,1002\nTELEGRAM_ADMIN_USERS=\n")
+    await adapter._handle_callback_query(tap(9001), None)
+    assert states["-100"] is state
+    assert selected == []
+    policy_file.write_text("TELEGRAM_ALLOWED_USERS=1001,1002\nTELEGRAM_ADMIN_USERS=9001\n")
+    await adapter._handle_callback_query(tap(9001), None)
+    expected = ("-100", "test-model", "test-provider") if picker == "model" else ("-100", "high")
+    assert selected == [expected]
+    assert "-100" not in states
 
 
 def test_platform_visibility_adds_search_only_for_media_telegram(
@@ -849,7 +1253,9 @@ def _fake_hermes(
         @staticmethod
         def get(_name: str) -> object:
             on_registry_get(system_prompt)
-            return SimpleNamespace(plugin_name="crbl-media")
+            return SimpleNamespace(
+                plugin_name="crbl-media", platform_hint=f"BUILTIN\n\n{plugin.PLATFORM_HINT}"
+            )
 
     module("gateway.platform_registry", platform_registry=Registry())
     module("gateway", platform_registry=sys.modules["gateway.platform_registry"])
@@ -866,16 +1272,20 @@ def _fake_hermes(
     module("hermes_cli", tools_config=None)
     module("hermes_cli.tools_config", _get_platform_tools=resolver)
     sys.modules["hermes_cli"].tools_config = sys.modules["hermes_cli.tools_config"]
+    module(
+        "hermes_cli.version_info",
+        get_version_info=lambda: SimpleNamespace(
+            display_version=compat_module.PINNED_HERMES_RELEASE.removeprefix("v"),
+            commit=compat_module.PINNED_HERMES_COMMIT,
+        ),
+    )
 
     adapter = type("TelegramAdapter", (), {"_handle_callback_query": lambda self, u, c: None})
     module("plugins.platforms.telegram.adapter", TelegramAdapter=adapter)
+    module("plugins.platforms.telegram.adapter_hint", PLATFORM_HINT="BUILTIN")
     module("plugins.platforms.telegram")
     module("plugins.platforms")
     module("plugins")
-    monkeypatch.setattr(
-        "hermes_media.compat.importlib.metadata.version",
-        lambda _name: compat_module.PINNED_HERMES_PACKAGE_VERSION,
-    )
     return system_prompt
 
 
@@ -959,7 +1369,7 @@ def test_the_identity_names_no_tool_and_no_procedure() -> None:
     itself in its own schema; this file explains who is calling them.
     """
 
-    for name in set(SHARED_SCHEMAS) | {"repair_blocked_imports"}:
+    for name in set(SHARED_TOOLS) | {"repair_blocked_imports"}:
         assert name not in SOUL_MD, name
     for procedure in ("requested_by_", "Which season", "numbered", "Use `"):
         assert procedure not in SOUL_MD, procedure

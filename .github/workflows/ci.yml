@@ -9,7 +9,7 @@ permissions:
 
 env:
   PYTHON_BASE_IMAGE: python:3.12-slim@sha256:dd29372629eeba2dd003fd9e9d35a5b8236c44727875a0364254b5127af88e65
-  HERMES_BASE_IMAGE: nousresearch/hermes-agent@sha256:e0df6adebddf29b91112aefc999d4aaf6846c9eb544faca5672a16a13590ff79
+  HERMES_BASE_IMAGE: nousresearch/hermes-agent@sha256:9c5561579f3ffdf333401797094ac3a743738d6c25d40f4331c7bf77b694238d
 
 jobs:
   verify:
@@ -108,6 +108,16 @@ jobs:
           docker build --build-arg HERMES_BASE_IMAGE="$HERMES_BASE_IMAGE"
           --build-arg SOURCE_COMMIT="$GITHUB_SHA"
           -f deployment/Dockerfile.hermes -t crbl-hermes-media:ci .
+      - name: Verify native Hermes compatibility
+        run: |
+          python -m pip install --target "$RUNNER_TEMP/hermes-test-deps" 'pytest>=8.4,<9' 'pytest-asyncio>=1.1,<2'
+          docker run --rm --network none --entrypoint /opt/hermes/.venv/bin/python \
+            --tmpfs /opt/data --tmpfs /tmp \
+            -e HERMES_HOME=/opt/data -e PYTHONPATH=/testdeps:/opt/hermes \
+            -v "$RUNNER_TEMP/hermes-test-deps:/testdeps:ro" \
+            -v "$GITHUB_WORKSPACE:/tests:ro" \
+            crbl-hermes-media:ci -m pytest -q -c /tests/pyproject.toml \
+            /tests/tests/test_hermes.py -k pinned_runtime -p no:cacheprovider
       - name: Build and verify managed media images
         run: |
           docker build --target managed --build-arg HERMES_BASE_IMAGE="$HERMES_BASE_IMAGE" \

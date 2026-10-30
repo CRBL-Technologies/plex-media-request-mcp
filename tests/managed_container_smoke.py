@@ -204,9 +204,18 @@ with tempfile.TemporaryDirectory(prefix="media-managed-smoke-") as temporary:
         data.mkdir(mode=0o777)
         data.chmod(0o777)
         (data / "config.yaml").write_bytes((tests / "hermes_config_smoke.yaml").read_bytes())
-        (data / ".env").write_text("TELEGRAM_BOT_TOKEN=old-token\nTELEGRAM_ALLOWED_USERS=10\n")
+        (data / ".env").write_text(
+            "TELEGRAM_BOT_TOKEN=old-token\nTELEGRAM_ALLOWED_USERS=10\n"
+            "OPENROUTER_API_KEY=dummy-owner-provider-key\n"
+        )
         hermes_name = f"media-managed-hermes-{suffix}"
         containers.append(hermes_name)
+        launcher_hook = root / "launcher_probe.pth"
+        launcher_hook.write_text(
+            "import atexit, runpy, sys; atexit.register(lambda run=runpy.run_path, runtime=sys: "
+            "run('/probe.py', run_name='launcher_check')['check_native_launcher']() "
+            "if runtime.argv[0] == 'hermes' else None)\n"
+        )
         result = docker(
             "run",
             "--rm",
@@ -234,12 +243,17 @@ with tempfile.TemporaryDirectory(prefix="media-managed-smoke-") as temporary:
             f"{data}:/opt/data",
             "-v",
             f"{tests / 'hermes_startup_probe.py'}:/probe.py:ro",
+            "-v",
+            f"{launcher_hook}:/opt/hermes/.venv/lib/python3.14/site-packages/crbl_launcher_probe.pth:ro",
             *hermes_args,
             hermes_image,
             "/opt/hermes/.venv/bin/python",
             "/probe.py",
         )
         assert "Native s6 managed startup" in result.stdout
+        for line in result.stdout.splitlines():
+            if line.startswith(("Native gateway process:", "Real Hermes CLI launcher")):
+                print(line)
         print("Managed native Hermes s6 startup and isolated credentials passed.")
     finally:
         for container in containers:

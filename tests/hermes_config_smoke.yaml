@@ -4,6 +4,9 @@
 # max_web_searches is a native Hermes setting with no counterpart in this repo,
 # so it stays here as the canonical value.
 _config_version: 36
+model:
+  default: owner-selected-model
+  provider: openrouter
 tool_loop_guardrails:
   loop_caps:
     max_web_searches: 10

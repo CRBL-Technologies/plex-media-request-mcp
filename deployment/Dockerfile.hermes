@@ -8,22 +8,39 @@ ARG SOURCE_COMMIT
 RUN /opt/hermes/.venv/bin/python -c 'import re,sys; sys.exit(0 if re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", sys.argv[1]) else 1)' "$HERMES_BASE_IMAGE"
 
 ENV S6_BEHAVIOUR_IF_STAGE2_FAILS=2 \
-    PYTHONPATH=/app/src:/opt/hermes
+    PYTHONPATH=/opt/hermes
 WORKDIR /opt/hermes
 
 COPY deployment/hermes-requirements.txt /tmp/crbl-hermes-requirements.txt
-# Hermes v0.20.6 itself pins cryptography 50 while its bundled msal metadata
-# still declares <49. Allow exactly that upstream baseline conflict, but fail
-# the image for any additional incompatibility.
-RUN cd /tmp \
-    && uv pip install --python /opt/hermes/.venv/bin/python --no-deps --require-hashes \
-      -r /tmp/crbl-hermes-requirements.txt \
-    && check="$(uv pip check --python /opt/hermes/.venv/bin/python 2>&1 || true)" \
-    && test "$(printf '%s\n' "$check" | grep -c '^The package ')" -eq 1 \
-    && printf '%s\n' "$check" | grep -Fqx 'The package `msal` requires `cryptography>=2.5,<49`, but `50.0.0` is installed' \
-    && /opt/hermes/.venv/bin/python -c 'import ddgs'
+# Use the image's pinned installer and its own lock-aware dependency check.
+# Only security overrides already recorded by the vendor lock are accepted.
+RUN /opt/hermes/.venv/bin/python - <<'PY'
+import subprocess
+import sys
+from pathlib import Path
 
-COPY src /app/src
+from pm import uv_launcher
+from pm.pip_check import unexpected_incompatibilities
+
+uv = uv_launcher("uv")
+assert uv is not None, "pinned Hermes installer is unavailable"
+subprocess.run([
+    str(uv), "pip", "install", "--python", sys.executable,
+    "--no-cache", "--no-deps", "--require-hashes", "-r", "/tmp/crbl-hermes-requirements.txt",
+], cwd="/tmp", check=True)
+check = subprocess.run(
+    [str(uv), "pip", "check", "--python", sys.executable],
+    cwd="/tmp", capture_output=True, text=True,
+)
+report = check.stdout + check.stderr
+if check.returncode and unexpected_incompatibilities(report, Path("/opt/hermes/uv.lock")) != []:
+    raise SystemExit(report)
+import ddgs
+PY
+
+# Native launchers replace PYTHONPATH with the immutable install root and the
+# selected dependency generation. Keep CRBL packages in that install root.
+COPY src /opt/hermes
 COPY deployment/hermes/plugin /opt/hermes/plugins/platforms/zzzz-crbl-media
 COPY --chmod=0755 deployment/hermes/03-crbl-media /etc/cont-init.d/03-crbl-media
 

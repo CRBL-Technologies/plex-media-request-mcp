@@ -7,8 +7,24 @@ import tempfile
 from pathlib import Path
 
 from hermes_cli.env_loader import load_hermes_dotenv
+from pm.pip_check import unexpected_incompatibilities
 
 from hermes_media.managed_app import project_hermes_files
+
+lock = Path("/opt/hermes/uv.lock")
+expected = (
+    "Found 1 incompatibility\n"
+    "The package `browser-harness` requires `pillow==12.3.0`, but `13.0.0` is installed\n"
+)
+assert unexpected_incompatibilities(expected, lock) == []
+assert unexpected_incompatibilities(expected.split("\n", 1)[1], lock) is None
+assert unexpected_incompatibilities(expected.replace("13.0.0", "12.0.0"), lock)
+assert (
+    unexpected_incompatibilities(
+        expected.replace("Found 1 incompatibility", "Found 2 incompatibilities"), lock
+    )
+    is None
+)
 
 with tempfile.TemporaryDirectory() as temporary:
     root = Path(temporary)
@@ -44,3 +60,4 @@ with tempfile.TemporaryDirectory() as temporary:
     assert (secrets / "gateway.key").stat().st_mode & 0o777 == 0o600
     assert (managed / ".env").stat().st_mode & 0o777 == 0o600
 print("Native Hermes managed secrets and live policy checks passed.")
+print("Native lock overrides reject unknown versions and incomplete reports.")

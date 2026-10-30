@@ -1,20 +1,37 @@
-"""All compatibility code for the pinned Hermes v2026.8.27 runtime."""
+"""All compatibility code for the pinned Hermes v0.22.5 runtime."""
 
 from __future__ import annotations
 
-import importlib.metadata
 import inspect
 import logging
 from collections.abc import Callable, Mapping
 from types import SimpleNamespace
 from typing import Any
 
-PINNED_HERMES_RELEASE = "v2026.8.27"
-PINNED_HERMES_PACKAGE_VERSION = "0.20.6"
+from media_gateway.policy import Policy
+from media_gateway.types import Actor, Role
+
+from .trusted import actor_for_turn, actor_from_event
+
+PINNED_HERMES_RELEASE = "v0.22.5"
+PINNED_HERMES_COMMIT = "bf0203a794a07aac3ff764972ab9087baa4e4f4e"
 NATIVE_MODULE = "plugins.platforms.telegram.adapter"
 NATIVE_CLASS = "TelegramAdapter"
 
 logger = logging.getLogger(__name__)
+
+
+def _policy_allows(user_id: str) -> bool:
+    """Read the live policy under the native caller's transport-profile scope."""
+
+    from hermes_constants import get_hermes_home  # type: ignore[import-not-found]
+
+    if not isinstance(user_id, str) or not user_id.isascii() or not user_id.isdecimal():
+        return False
+    try:
+        return Policy(get_hermes_home() / ".env").snapshot().role(int(user_id)) is not Role.BLOCKED
+    except (OSError, ValueError):
+        return False
 
 
 def isolate_actor_sessions(adapter: Any) -> None:
@@ -32,24 +49,20 @@ def isolate_actor_sessions(adapter: Any) -> None:
         or not isinstance(extra, dict)
     ):
         raise RuntimeError("Hermes session isolation boundary is unavailable")
-    # Native observation intentionally erases sender IDs to build shared history.
-    # It cannot coexist with this adapter's per-user authority and history.
-    # The explicit extra also takes precedence over the legacy key/environment.
-    extra["observe_unmentioned_group_messages"] = False
     for key in ("group_sessions_per_user", "thread_sessions_per_user"):
         extra[key] = True
     if getattr(original, "__crbl_media_isolation__", False):
         return
 
-    def session_key(source: Any) -> str:
+    def session_key(source: Any, key_source: Any = None) -> str:
         platform = getattr(source.platform, "value", source.platform)
         if platform != "telegram":
-            return str(original(source))
+            return str(original(source, key_source))
         from gateway.session import build_session_key  # type: ignore[import-not-found]
 
         return str(
             build_session_key(
-                source,
+                key_source if key_source is not None else source,
                 group_sessions_per_user=True,
                 thread_sessions_per_user=True,
                 profile=resolve_profile(source),
@@ -63,9 +76,82 @@ def isolate_actor_sessions(adapter: Any) -> None:
 
 
 def preserve_handler_owner(adapter: Any, handler: Callable[[Any], Any]) -> None:
-    """Native Telegram callbacks inspect this bound-owner attribute for auth."""
+    """Preserve native runner ownership on the wrapped message handler."""
 
     handler.__self__ = adapter.gateway_runner  # type: ignore[attr-defined]
+
+
+def install_runner_boundary(adapter: Any) -> None:
+    """Cover native persisted replay, which bypasses the adapter handler."""
+
+    runner = adapter.gateway_runner
+    principal = getattr(runner, "_principal_authorized", None)
+    execute = getattr(runner, "_handle_message", None)
+    if not callable(principal) or not callable(execute):
+        raise RuntimeError("Hermes runner authorization boundary is unavailable")
+    if getattr(principal, "__crbl_media_policy__", False):
+        return
+
+    def current_adapter(source: Any) -> Any:
+        if getattr(source.platform, "value", source.platform) != "telegram":
+            return None
+        current = runner._adapter_for_source(source)
+        # Resolve at use time: an adapter can be replaced after registration.
+        return current if isinstance(current, type(adapter)) else None
+
+    def authorize(source: Any, *, allow_adapter_delegation: bool) -> bool:
+        current = current_adapter(source)
+        if current is None:
+            return bool(principal(source, allow_adapter_delegation=allow_adapter_delegation))
+        # Replace only the principal verdict; native bot-loop protection remains.
+        return _policy_allows(source.user_id)
+
+    async def dispatch(event: Any) -> Any:
+        current = current_adapter(event.source)
+        if current is None:
+            return await execute(event)
+        if not runner._is_user_authorized_for_source(event.source):
+            raise PermissionError("Telegram user is not allowed")
+        return await current._execute_media_turn(event, execute)
+
+    authorize.__crbl_media_policy__ = True  # type: ignore[attr-defined]
+    runner._principal_authorized = authorize
+    runner._handle_message = dispatch
+
+
+def execution_actor(adapter: Any, event: Any) -> Actor:
+    """Accept restored identity only inside native admitted execution."""
+
+    if getattr(event, "raw_message", None) is None:
+        try:
+            from gateway.session_ingress import (  # type: ignore[import-not-found]
+                executing_admission,
+            )
+        except ImportError:
+            return actor_for_turn(event)
+
+        source = event.source
+        transport = getattr(source, "_transport_adapter_ref", None)
+        if executing_admission.get() is True and callable(transport) and transport() is adapter:
+            # Native envelope restoration verifies the persisted source and its
+            # current transport binding. Reuse the ordinary strict ID checks.
+            try:
+                sender = SimpleNamespace(id=int(source.user_id))
+                chat = SimpleNamespace(id=int(source.chat_id))
+            except (TypeError, ValueError) as error:
+                raise PermissionError("Invalid admitted Telegram identity") from error
+            return actor_from_event(
+                SimpleNamespace(
+                    source=source, raw_message=SimpleNamespace(from_user=sender, chat=chat)
+                )
+            )
+    return actor_for_turn(event)
+
+
+def mark_authorized_event(event: Any) -> None:
+    """Forward the gateway's completed authorization for this message only."""
+
+    event.source.role_authorized = True
 
 
 def native_adapter(fallback: type) -> type:
@@ -86,9 +172,73 @@ def native_adapter(fallback: type) -> type:
     if not inspect.isclass(candidate):
         return fallback
 
-    # Nothing to intercept: CRBL cards carry no callback buttons, so Telegram
-    # callbacks belong entirely to Hermes.
-    return candidate
+    class IsolatedTelegramAdapter(candidate):  # type: ignore[misc, valid-type]
+        def _telegram_observe_unmentioned_group_messages(self) -> bool:
+            # Native observation erases sender IDs. No environment override can
+            # enable that shared history in this per-user policy adapter.
+            return False
+
+        def _is_callback_user_authorized(
+            self,
+            user_id: str,
+            *,
+            chat_id: str | None = None,
+            chat_type: str | None = None,
+            thread_id: str | None = None,
+            user_name: str | None = None,
+        ) -> bool:
+            # The injected check enters the receiving bot's transport profile.
+            # Its runner principal is wrapped above, so it reads the live file
+            # instead of falling back to stale environment grants.
+            if getattr(self, "_authorization_check", None) is not None:
+                return (
+                    self._is_sender_authorized(
+                        user_id,
+                        chat_type=self._normalize_chat_type(
+                            chat_type, is_forum=thread_id is not None
+                        ),
+                        chat_id=str(chat_id or user_id),
+                        thread_id=str(thread_id) if thread_id is not None else None,
+                    )
+                    is True
+                )
+            if getattr(self, "_owner_profile", None):
+                # A secondary bot must never borrow the ambient primary policy.
+                return False
+            return _policy_allows(user_id)
+
+        def _media_picker_owned(self, query: Any, state: Any, chat_id: str) -> bool:
+            message = query.message
+            if not isinstance(state, dict) or message is None:
+                return False
+            message_id = getattr(message, "message_id", None)
+            if not isinstance(message_id, int) or isinstance(message_id, bool):
+                return False
+            if state.get("msg_id") != message_id or not state.get("session_key"):
+                return False
+            source = self.build_source(
+                chat_id=chat_id,
+                user_id=str(query.from_user.id),
+                chat_type=self._normalize_chat_type(
+                    message.chat.type, is_forum=bool(getattr(message.chat, "is_forum", False))
+                ),
+                thread_id=getattr(message, "message_thread_id", None),
+            )
+            return bool(state["session_key"] == self._source_session_key(source))
+
+        async def _handle_model_picker_callback(self, query: Any, data: str, chat_id: str) -> None:
+            if not self._media_picker_owned(query, self._model_picker_state.get(chat_id), chat_id):
+                await query.answer(text="This control belongs to another or expired session.")
+                return
+            await super()._handle_model_picker_callback(query, data, chat_id)
+
+        async def _handle_choice_picker_callback(self, query: Any, data: str, chat_id: str) -> None:
+            if not self._media_picker_owned(query, self._choice_picker_state.get(chat_id), chat_id):
+                await query.answer(text="This control belongs to another or expired session.")
+                return
+            await super()._handle_choice_picker_callback(query, data, chat_id)
+
+    return IsolatedTelegramAdapter
 
 
 def install_tool_visibility(
@@ -122,20 +272,24 @@ def install_tool_visibility(
     tools_config._get_platform_tools = visible
 
 
+def native_telegram_hint() -> str:
+    """Read the formatting guidance shipped by the pinned Telegram plugin."""
+
+    try:
+        from plugins.platforms.telegram.adapter_hint import (  # type: ignore[import-not-found]
+            PLATFORM_HINT,
+        )
+    except ImportError:
+        return ""
+    return str(PLATFORM_HINT)
+
+
 def install_platform_hint(*, platform: str, platform_hint: str) -> None:
     """Append the CRBL guidance to the resolved prompt for one platform.
 
-    Hermes resolves a platform's default hint from its own built-in
-    ``PLATFORM_HINTS`` table and only consults a plugin's registered
-    ``platform_hint`` for platforms it does not know, so the value CRBL passes
-    to ``register_platform`` never reaches a Telegram prompt. The only other
-    door is ``config.yaml``'s ``platform_hints`` override, which would make an
-    ungoverned file on the host a second source of truth for text that has to
-    change in lockstep with the tools it describes.
-
-    Wrapping the resolver keeps that single source in code. The guidance is
-    appended to whatever Hermes resolved, so a config override still applies
-    and is not silently discarded.
+    The registered hint includes native formatting and CRBL guidance. This
+    wrapper keeps CRBL guidance present when a user config override replaces
+    that default. The override still applies and is not silently discarded.
     """
 
     try:
@@ -252,7 +406,6 @@ def verify_pinned_runtime(
 
     from agent import system_prompt  # type: ignore[import-not-found,unused-ignore]
     from agent.prompt_builder import (  # type: ignore[import-not-found]
-        PLATFORM_HINTS,
         load_soul_md,
     )
     from agent.web_search_registry import (  # type: ignore[import-not-found]
@@ -260,10 +413,15 @@ def verify_pinned_runtime(
     )
     from gateway.platform_registry import platform_registry  # type: ignore[import-not-found]
     from hermes_cli import tools_config
+    from hermes_cli.version_info import get_version_info  # type: ignore[import-not-found]
     from toolsets import TOOLSETS  # type: ignore[import-not-found]
 
-    if importlib.metadata.version("hermes-agent") != PINNED_HERMES_PACKAGE_VERSION:
-        raise RuntimeError("pinned Hermes package version changed")
+    version = get_version_info()
+    if (
+        version.display_version != PINNED_HERMES_RELEASE.removeprefix("v")
+        or version.commit != PINNED_HERMES_COMMIT
+    ):
+        raise RuntimeError("pinned Hermes build identity changed")
     if native_adapter(SimpleNamespace) is SimpleNamespace:
         raise RuntimeError("native Hermes Telegram adapter is unavailable")
     provider = get_active_search_provider()
@@ -292,21 +450,23 @@ def verify_pinned_runtime(
     resolve_hint = getattr(system_prompt, "_resolve_platform_hint", None)
     if not callable(resolve_hint) or not getattr(resolve_hint, "__crbl_media__", False):
         raise RuntimeError("CRBL platform-hint installer is not active")
-    if "telegram" not in PLATFORM_HINTS:
-        raise RuntimeError("Hermes no longer resolves a built-in Telegram hint")
+    native_hint = native_telegram_hint()
+    registered_hint = getattr(entry, "platform_hint", "")
+    if not native_hint or native_hint not in registered_hint:
+        raise RuntimeError("native Telegram formatting guidance is absent from the registered hint")
     # Resolve with no config override at all: the guidance must reach the
     # assembled prompt from the code constant alone, or the single source of
     # truth is not actually installed.
     effective = resolve_hint(
         SimpleNamespace(_platform_hint_overrides={}),
         "telegram",
-        PLATFORM_HINTS["telegram"],
+        registered_hint,
     )
     if platform_hint not in effective:
         raise RuntimeError("CRBL media guidance is absent from the effective Telegram prompt")
     # The built-in hint must survive alongside it; replacing Hermes' own
     # Telegram formatting guidance would break MarkdownV2 output.
-    if PLATFORM_HINTS["telegram"] not in effective:
+    if native_hint not in effective:
         raise RuntimeError("CRBL guidance replaced rather than extended the Telegram hint")
     # The identity slot is an ordinary file read from HERMES_HOME, so a skipped
     # install, a host copy edited by hand and a context limit that truncates the

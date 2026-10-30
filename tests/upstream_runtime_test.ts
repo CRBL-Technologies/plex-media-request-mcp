@@ -100,6 +100,9 @@ Deno.test("inherited values never satisfy a missing fetch; bad scope and injecti
       projectUpstream({ ...fetched(), TELEGRAM_BOT_TOKEN: "wrong-scope" }, path)
     );
     assert.equal(Array.from(Deno.readDirSync(directory)).length, 0);
+    const { TMDB_API_KEY: _omitted, ...withoutTmdb } = fetched();
+    projectUpstream(withoutTmdb, path);
+    assert.ok(!Deno.readTextFileSync(path).includes("TMDB_API_KEY"));
   } finally {
     Deno.removeSync(directory, { recursive: true });
   }

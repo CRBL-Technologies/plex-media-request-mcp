@@ -10,11 +10,12 @@ export const requiredKeys = [
   "SONARR_API_KEY",
   "PLEX_URL",
   "PLEX_API_KEY",
-  "TMDB_API_KEY",
   "TOOL_PROFILE",
 ];
 export const appKeys = new Set([
   ...requiredKeys,
+  // Optional in the vendor; without it the TMDB tools are not registered.
+  "TMDB_API_KEY",
   "TOOL_BRANCHES",
   "TOOL_EXCLUDE",
   "TOOL_INCLUDE",

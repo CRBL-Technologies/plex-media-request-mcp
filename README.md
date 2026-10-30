@@ -312,7 +312,8 @@ public default still reads the token from its policy file. When the separate
 path is set, a missing token file never falls back to the policy file.
 
 The upstream Environment contains the seven upstream fields above, plus
-`TMDB_API_KEY` and `TOOL_PROFILE=full`. Its existing optional `TOOL_BRANCHES`,
+`TOOL_PROFILE=full`. `TMDB_API_KEY` is optional: without it the vendor does not
+register its TMDB tools, which matches the current deployment. Its existing optional `TOOL_BRANCHES`,
 `TOOL_EXCLUDE` and `TOOL_INCLUDE` inputs can also be supplied. They must preserve
 the reviewed gateway tool manifest. The wrapper writes its private
 `/run/media-secrets/upstream.env`, then starts the unmodified vendor command with

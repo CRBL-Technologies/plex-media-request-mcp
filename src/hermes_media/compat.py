@@ -272,6 +272,20 @@ def install_tool_visibility(
     tools_config._get_platform_tools = visible
 
 
+def native_telegram_environment() -> dict[str, object]:
+    """Keep the pinned Telegram plugin's credential and settings bridge."""
+
+    from plugins.platforms.telegram.gateway_env import (  # type: ignore[import-not-found]
+        ENV_ENABLE_CREDENTIALS,
+        ENV_OVERRIDES,
+    )
+
+    return {
+        "env_overrides": ENV_OVERRIDES,
+        "env_enable_credentials": ENV_ENABLE_CREDENTIALS,
+    }
+
+
 def native_telegram_hint() -> str:
     """Read the formatting guidance shipped by the pinned Telegram plugin."""
 
@@ -476,3 +490,34 @@ def verify_pinned_runtime(
     identity = load_soul_md()
     if identity is None or soul.strip() not in identity:
         raise RuntimeError("CRBL SOUL.md is not the identity Hermes loads")
+
+
+def gateway_healthy() -> bool:
+    """Require a current live gateway with its Telegram adapter connected."""
+
+    from gateway.status import (  # type: ignore[import-not-found]
+        get_runtime_status_running_pid,
+        read_runtime_status,
+        runtime_status_is_stale,
+    )
+
+    status = read_runtime_status()
+    if (
+        not isinstance(status, dict)
+        or status.get("gateway_state") != "running"
+        or runtime_status_is_stale(status)
+    ):
+        return False
+    pid = get_runtime_status_running_pid(status)
+    if pid is None or status.get("start_time") is None:
+        return False
+    platforms = status.get("platforms")
+    if not isinstance(platforms, dict):
+        return False
+    telegram = platforms.get("telegram")
+    return (
+        isinstance(telegram, dict)
+        and telegram.get("state") == "connected"
+        and telegram.get("writer_pid") == pid
+        and telegram.get("writer_start_time") == status["start_time"]
+    )

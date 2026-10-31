@@ -151,6 +151,7 @@ async def test_plugin_registers_closed_inventory_and_binds_actor(
 ) -> None:
     gateway = FakeGateway()
     monkeypatch.setattr(plugin, "_client", gateway)
+    monkeypatch.setattr(plugin, "native_telegram_environment", lambda: {})
     context = FakeContext()
     plugin.register(context)
     assert len(context.platforms) == 1
@@ -579,6 +580,41 @@ def test_missing_native_source_identity_is_not_a_shared_session_fallback() -> No
     incoming.source.user_id = None  # type: ignore[attr-defined]
     with pytest.raises(TrustError, match="identities differ"):
         actor_from_event(incoming)
+
+
+def test_pinned_runtime_telegram_receives_managed_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config_module = pytest.importorskip("gateway.config")
+    config_env = pytest.importorskip("gateway.config_env")
+    from hermes_cli.env_loader import load_hermes_dotenv  # type: ignore[import-not-found]
+
+    from hermes_media.managed_app import project_hermes_files
+
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".env").write_text("TELEGRAM_BOT_TOKEN=stale-owner-token\n")
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    project_hermes_files(
+        {
+            "TELEGRAM_BOT_TOKEN": "fetched-telegram-token",
+            "CRBL_MEDIA_GATEWAY_URL": "http://gateway:18082",
+        },
+        managed,
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_MANAGED_DIR", str(managed))
+    load_hermes_dotenv(hermes_home=home, load_external_secrets=False)
+    monkeypatch.setattr(plugin, "_client", FakeGateway())
+    context = FakeContext()
+    plugin.register(context)
+    platform = config_module.Platform.TELEGRAM
+    config = config_module.GatewayConfig()
+    config.platforms[platform] = config_module.PlatformConfig(enabled=True)
+    config_env._apply_plugin_env_overrides(config, [SimpleNamespace(**context.platforms[0])])
+    adapter = context.platforms[0]["adapter_factory"](config.platforms[platform])
+    assert adapter.config.token == "fetched-telegram-token"
 
 
 @pytest.mark.parametrize("chat_type,thread_id", [("group", None), ("forum", "77")])

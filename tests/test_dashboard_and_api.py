@@ -3,15 +3,26 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import socket
 import time
 import xml.etree.ElementTree as ET
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any, ClassVar
 
 import httpx
 import pytest
+import uvicorn
 from conftest import FakeUpstream
+from mcp.server.fastmcp import FastMCP
+from starlette.applications import Starlette
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from starlette.requests import Request
+from starlette.responses import RedirectResponse, Response
+from starlette.routing import Route
 from starlette.testclient import TestClient
+from starlette.types import ASGIApp
 
 from media_gateway import plex_watch
 from media_gateway.app import COOKIE, create_app
@@ -929,6 +940,90 @@ def test_download_status_includes_both_queues_for_regular_users(config: Config) 
         assert result["movie_downloads"][0]["title"] == "Movie download"
         assert result["series_downloads"][0]["title"] == "Series download"
         assert result["unavailable_sources"] == []
+
+
+@asynccontextmanager
+async def _local_http_server(app: ASGIApp) -> AsyncIterator[str]:
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        server = uvicorn.Server(uvicorn.Config(app, log_level="error"))
+        task = asyncio.create_task(server.serve(sockets=[listener]))
+        try:
+            async with asyncio.timeout(5):
+                while not server.started:
+                    if task.done():
+                        await task
+                    await asyncio.sleep(0.01)
+            yield f"http://127.0.0.1:{listener.getsockname()[1]}"
+        finally:
+            server.should_exit = True
+            await asyncio.wait_for(task, timeout=5)
+
+
+@pytest.mark.parametrize("json_response", [False, True])
+async def test_upstream_real_mcp_initializes_lists_and_calls_with_bearer(
+    config: Config, json_response: bool
+) -> None:
+    sdk = FastMCP("local-test", stateless_http=True, json_response=json_response)
+
+    @sdk.tool()
+    def echo(value: str) -> dict[str, str]:
+        """Return the supplied value."""
+        return {"value": value}
+
+    @sdk.tool(structured_output=False)
+    def message() -> str:
+        """Return a plain text result."""
+        return "local MCP reply"
+
+    methods: list[str] = []
+
+    async def record(request: Request, call_next: RequestResponseEndpoint) -> Response:
+        assert request.headers["authorization"] == "Bearer upstream-secret-with-at-least-32-bytes"
+        if request.method == "POST":
+            methods.append((await request.json())["method"])
+        return await call_next(request)
+
+    app = sdk.streamable_http_app()
+    app.add_middleware(BaseHTTPMiddleware, dispatch=record)
+    async with _local_http_server(app) as url:
+        upstream = Upstream(url, config.upstream_token_file)
+        tools = {tool["name"]: tool for tool in await upstream.list_tools()}
+        assert set(tools) == {"echo", "message"}
+        assert tools["echo"]["description"] == "Return the supplied value."
+        assert tools["echo"]["inputSchema"]["required"] == ["value"]
+        assert await upstream.call("echo", {"value": "harmless input"}) == {
+            "value": "harmless input"
+        }
+        assert await upstream.call("message", {}) == {"message": "local MCP reply"}
+    assert methods.count("initialize") == 3
+    assert methods.count("notifications/initialized") == 3
+    assert methods.count("tools/list") >= 1
+    assert methods.count("tools/call") == 2
+
+
+@pytest.mark.parametrize("status_code", [307, 308])
+async def test_upstream_does_not_forward_mcp_requests_to_another_origin(
+    config: Config, status_code: int
+) -> None:
+    forwarded: list[bytes] = []
+
+    async def capture(request: Request) -> Response:
+        forwarded.append(await request.body())
+        return Response(status_code=400)
+
+    sink = Starlette(routes=[Route("/capture", capture, methods=["POST"])])
+    async with _local_http_server(sink) as sink_url:
+
+        async def redirect(_request: Request) -> Response:
+            return RedirectResponse(f"{sink_url}/capture", status_code=status_code)
+
+        source = Starlette(routes=[Route("/mcp", redirect, methods=["POST"])])
+        async with _local_http_server(source) as source_url:
+            upstream = Upstream(source_url, config.upstream_token_file)
+            with pytest.raises(UpstreamError, match="upstream MCP connection failed"):
+                await upstream.list_tools()
+    assert forwarded == []
 
 
 def test_upstream_errors_do_not_leak_provider_details(config: Config) -> None:

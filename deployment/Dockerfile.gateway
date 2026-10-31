@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
 ARG PYTHON_BASE_IMAGE
-FROM ${PYTHON_BASE_IMAGE}
+FROM 1password/op:2.41.1@sha256:86c9f8c1961a87f4bcf4780f15c564c21f76ba5822635614b6b6d8a1e22fdbea AS onepassword
+FROM ${PYTHON_BASE_IMAGE} AS runtime
 
 ARG PYTHON_BASE_IMAGE
 ARG SOURCE_COMMIT
@@ -29,3 +30,11 @@ LABEL org.opencontainers.image.source="https://github.com/CRBL-Technologies/plex
 USER 1000:1000
 EXPOSE 18082
 ENTRYPOINT ["python", "-m", "media_gateway.app"]
+
+# Explicit opt-in image target. The default/public target below keeps the
+# original entrypoint and file-based configuration contract.
+FROM runtime AS managed
+COPY --from=onepassword /usr/local/bin/op /usr/local/bin/op
+ENTRYPOINT ["python", "-m", "media_gateway.managed_start"]
+
+FROM runtime AS gateway

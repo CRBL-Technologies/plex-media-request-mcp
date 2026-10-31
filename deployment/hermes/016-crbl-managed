@@ -1,0 +1,15 @@
+#!/command/with-contenv sh
+set -eu
+
+# Keep native /init as PID 1. Run after the UID remap, before native profile
+# reconciliation and the existing CRBL gateway-contract startup check.
+mkdir -p /run/media-secrets /run/hermes-managed
+chown hermes:hermes /run/media-secrets /run/hermes-managed
+chmod 0700 /run/media-secrets /run/hermes-managed
+# s6 keeps the original Docker environment in its private tmpfs. The retrieval
+# child cleans its own environment; also keep inherited bootstrap fields out
+# of later native services. Never read or log the contents of these files.
+for field in /run/s6/container_environment/OP_*; do
+    [ ! -f "$field" ] || rm -f "$field"
+done
+exec s6-setuidgid hermes /opt/hermes/.venv/bin/python -m hermes_media.managed_start

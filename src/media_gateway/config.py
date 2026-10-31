@@ -13,6 +13,7 @@ CONFIG_KEYS = {
     "MEDIA_GATEWAY_PORT",
     "MEDIA_GATEWAY_DB_PATH",
     "MEDIA_GATEWAY_POLICY_FILE",
+    "MEDIA_GATEWAY_TELEGRAM_TOKEN_FILE",
     "MEDIA_GATEWAY_TOKEN_FILE",
     "MEDIA_GATEWAY_UPSTREAM_URL",
     "MEDIA_GATEWAY_UPSTREAM_TOKEN_FILE",
@@ -88,9 +89,18 @@ class Config:
     plex_machine_id: str
     notification_delay_seconds: int
     telegram_identity_sync: bool
+    # The public default keeps the token in the policy file. Managed images
+    # explicitly select a separate immutable token file, without a fallback.
+    telegram_token_file: Path | None = None
 
     @classmethod
     def from_env(cls) -> Config:
+        token_path = os.getenv("MEDIA_GATEWAY_TELEGRAM_TOKEN_FILE")
+        telegram_token_file = None
+        if token_path is not None:
+            if not token_path:
+                raise ValueError("MEDIA_GATEWAY_TELEGRAM_TOKEN_FILE cannot be empty")
+            telegram_token_file = Path(token_path)
         return cls(
             # Deployment opts into a LAN bind explicitly. An incomplete local
             # configuration remains loopback-only.
@@ -139,6 +149,7 @@ class Config:
             plex_machine_id=os.environ["MEDIA_GATEWAY_PLEX_MACHINE_ID"],
             notification_delay_seconds=_int("MEDIA_GATEWAY_NOTIFICATION_DELAY_SECONDS", 5),
             telegram_identity_sync=_bool("MEDIA_GATEWAY_TELEGRAM_IDENTITY_SYNC", True),
+            telegram_token_file=telegram_token_file,
         )
 
 

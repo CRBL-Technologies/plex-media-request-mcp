@@ -2,15 +2,14 @@ name: CI
 
 on:
   pull_request:
-  push:
-    branches: [main]
+  workflow_call:
 
 permissions:
   contents: read
 
 env:
   PYTHON_BASE_IMAGE: python:3.12-slim@sha256:dd29372629eeba2dd003fd9e9d35a5b8236c44727875a0364254b5127af88e65
-  HERMES_BASE_IMAGE: nousresearch/hermes-agent@sha256:e0df6adebddf29b91112aefc999d4aaf6846c9eb544faca5672a16a13590ff79
+  HERMES_BASE_IMAGE: nousresearch/hermes-agent@sha256:9c5561579f3ffdf333401797094ac3a743738d6c25d40f4331c7bf77b694238d
 
 jobs:
   verify:
@@ -44,7 +43,13 @@ jobs:
           DASHBOARD_PASSWORD_HASH_FILE: /tmp/password.hash
           DASHBOARD_SESSION_KEY_FILE: /tmp/session.key
           PLEX_WEBHOOK_TOKEN_FILE: /tmp/plex.key
-        run: docker compose -f deployment/compose.yaml config >/dev/null
+          GATEWAY_ONEPASSWORD_FILE: /tmp/onepassword.json
+          HERMES_ONEPASSWORD_FILE: /tmp/hermes-onepassword.json
+          UPSTREAM_ONEPASSWORD_FILE: /tmp/upstream-onepassword.json
+          MEDIA_UPSTREAM_IMAGE: ghcr.io/crbl-technologies/media-server-mcp-managed@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+        run: |
+          docker compose --env-file /dev/null -f deployment/compose.yaml config --quiet
+          docker compose --env-file /dev/null -f deployment/compose.managed.yaml config --quiet
       - name: Build gateway
         run: >-
           docker build --build-arg PYTHON_BASE_IMAGE="$PYTHON_BASE_IMAGE"
@@ -92,11 +97,42 @@ jobs:
           status=$?
           set -e
           test "$status" -eq 124
+      - name: Build managed gateway and verify pinned CLI
+        run: |
+          docker build --target managed --build-arg PYTHON_BASE_IMAGE="$PYTHON_BASE_IMAGE" \
+            --build-arg SOURCE_COMMIT="$GITHUB_SHA" \
+            -f deployment/Dockerfile.gateway -t crbl-media-gateway-managed:ci .
+          test "$(docker run --rm --network none --entrypoint /usr/local/bin/op crbl-media-gateway-managed:ci --version)" = '2.41.1'
       - name: Build Hermes adapter
         run: >-
           docker build --build-arg HERMES_BASE_IMAGE="$HERMES_BASE_IMAGE"
           --build-arg SOURCE_COMMIT="$GITHUB_SHA"
           -f deployment/Dockerfile.hermes -t crbl-hermes-media:ci .
+      - name: Verify native Hermes compatibility
+        run: |
+          python -m pip install --target "$RUNNER_TEMP/hermes-test-deps" 'pytest>=8.4,<9' 'pytest-asyncio>=1.1,<2'
+          docker run --rm --network none --entrypoint /opt/hermes/.venv/bin/python \
+            --tmpfs /opt/data --tmpfs /tmp \
+            -e HERMES_HOME=/opt/data -e PYTHONPATH=/testdeps:/opt/hermes \
+            -v "$RUNNER_TEMP/hermes-test-deps:/testdeps:ro" \
+            -v "$GITHUB_WORKSPACE:/tests:ro" \
+            crbl-hermes-media:ci -m pytest -q -c /tests/pyproject.toml \
+            /tests/tests/test_hermes.py -k pinned_runtime -p no:cacheprovider
+      - name: Build and verify managed media images
+        run: |
+          docker build --target managed --build-arg HERMES_BASE_IMAGE="$HERMES_BASE_IMAGE" \
+            --build-arg SOURCE_COMMIT="$GITHUB_SHA" \
+            -f deployment/Dockerfile.hermes -t crbl-hermes-media-managed:ci .
+          docker build --build-arg SOURCE_COMMIT="$GITHUB_SHA" \
+            -f deployment/Dockerfile.upstream-managed -t crbl-media-upstream-managed:ci .
+          docker run --rm --network none --entrypoint deno \
+            -v "$GITHUB_WORKSPACE/tests/upstream_runtime_test.ts:/app/tests/upstream_runtime_test.ts:ro" \
+            crbl-media-upstream-managed:ci test --allow-read --allow-write --allow-env --allow-run --allow-sys /app/tests/upstream_runtime_test.ts
+          docker run --rm --network none --entrypoint /opt/hermes/.venv/bin/python \
+            -v "$GITHUB_WORKSPACE/tests/hermes_managed_smoke.py:/tests/hermes_managed_smoke.py:ro" \
+            crbl-hermes-media-managed:ci /tests/hermes_managed_smoke.py
+          python tests/managed_container_smoke.py \
+            crbl-media-gateway-managed:ci crbl-hermes-media-managed:ci crbl-media-upstream-managed:ci
       - name: Verify Hermes adapter under s6-overlay
         shell: bash
         run: |

@@ -1027,7 +1027,10 @@ class Notifications:
             )
 
     def _telegram_token(self) -> str:
-        values = read_dotenv(self.config.policy_file, {"TELEGRAM_BOT_TOKEN"})
+        token_file = self.config.telegram_token_file
+        if token_file is None:
+            token_file = self.config.policy_file
+        values = read_dotenv(token_file, {"TELEGRAM_BOT_TOKEN"})
         token = values.get("TELEGRAM_BOT_TOKEN")
         if not token:
             raise RuntimeError("Telegram bot token is missing")

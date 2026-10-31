@@ -14,8 +14,8 @@ from pathlib import Path
 from .types import Role
 
 _ASSIGNMENT = re.compile(
-    r"^(?P<prefix>\s*(?:export\s+)?)(?P<key>TELEGRAM_(?:ALLOWED|ADMIN)_USERS)"
-    r"(?P<equals>\s*=\s*)(?P<value>.*?)(?P<newline>\r?\n?)$"
+    r"^(?P<prefix>[ \t]*(?:export[ \t]+)?)(?P<key>TELEGRAM_(?:ALLOWED|ADMIN)_USERS)"
+    r"(?P<equals>[ \t]*=[ \t]*)(?P<value>.*?)(?P<newline>\r?\n?)$"
 )
 _ID = re.compile(r"[1-9][0-9]*")
 

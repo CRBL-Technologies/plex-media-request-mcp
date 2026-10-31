@@ -1,0 +1,137 @@
+# Separate managed recipe. Do not merge with compose.yaml: its old read-only
+# file mounts would cover the private tmpfs projection paths. Locally generated
+# keys stay in their existing host files, mounted read-only under /run/media-keys.
+# Saved legacy Portainer fields can remain during proof; only the host-file paths
+# below are read by this recipe.
+name: hermes-media
+
+services:
+  media-server-mcp:
+    image: ${MEDIA_UPSTREAM_IMAGE:?required managed upstream digest}
+    restart: unless-stopped
+    user: "1000:1000"
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    command: [--http, --host, 0.0.0.0, --port, "3000"]
+    environment:
+      TOOL_PROFILE: full
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+      - /run/media-secrets:rw,noexec,nosuid,nodev,size=1m,uid=1000,gid=1000,mode=0700
+    volumes:
+      - ${UPSTREAM_ONEPASSWORD_FILE:?required owner-provisioned bootstrap file}:/run/secrets/onepassword.json:ro
+    expose: ["3000"]
+    networks: [media-mcp, media]
+    healthcheck:
+      test: [CMD-SHELL, "wget -q -O /dev/null http://127.0.0.1:3000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  media-gateway:
+    image: ${MEDIA_GATEWAY_IMAGE:?required managed gateway digest}
+    restart: unless-stopped
+    user: "1000:1000"
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+      - /run/media-secrets:rw,noexec,nosuid,nodev,size=1m,uid=1000,gid=1000,mode=0700
+    environment:
+      MEDIA_GATEWAY_HOST: 0.0.0.0
+      MEDIA_GATEWAY_PORT: "18082"
+      MEDIA_GATEWAY_DB_PATH: /opt/data/state/gateway.sqlite3
+      MEDIA_GATEWAY_POLICY_FILE: /opt/hermes-data/.env
+      MEDIA_GATEWAY_TOKEN_FILE: /run/media-keys/gateway.key
+      MEDIA_GATEWAY_UPSTREAM_TOKEN_FILE: /run/media-secrets/upstream.env
+      MEDIA_GATEWAY_DASHBOARD_PASSWORD_HASH_FILE: /run/media-keys/dashboard-password.hash
+      MEDIA_GATEWAY_DASHBOARD_SESSION_KEY_FILE: /run/media-keys/dashboard-session.key
+      MEDIA_GATEWAY_PLEX_WEBHOOK_TOKEN_FILE: /run/media-keys/plex-webhook.key
+      MEDIA_GATEWAY_TELEGRAM_TOKEN_FILE: /run/media-secrets/telegram.env
+    volumes:
+      - ${HERMES_DATA_DIR:?required}:/opt/hermes-data:rw
+      - ${GATEWAY_STATE_DIR:?required}:/opt/data/state:rw
+      - ${GATEWAY_ONEPASSWORD_FILE:?required owner-provisioned bootstrap file}:/run/secrets/onepassword.json:ro
+      - ${GATEWAY_TOKEN_FILE:?required}:/run/media-keys/gateway.key:ro
+      - ${DASHBOARD_PASSWORD_HASH_FILE:?required}:/run/media-keys/dashboard-password.hash:ro
+      - ${DASHBOARD_SESSION_KEY_FILE:?required}:/run/media-keys/dashboard-session.key:ro
+      - ${PLEX_WEBHOOK_TOKEN_FILE:?required}:/run/media-keys/plex-webhook.key:ro
+    ports:
+      - "18082:18082"
+      - "127.0.0.1:18081:18082"
+    networks: [media-bot, media-mcp, media]
+    depends_on:
+      media-server-mcp:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18082/readyz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  hermes-media:
+    image: ${HERMES_MEDIA_IMAGE:?required managed Hermes digest}
+    restart: unless-stopped
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=128m
+      - /run:rw,exec,nosuid,nodev,size=64m
+    command: [gateway, run]
+    environment:
+      HERMES_UID: "1000"
+      HERMES_GID: "1000"
+      HERMES_HOME: /opt/data
+      HERMES_DASHBOARD: "false"
+      HERMES_MANAGED_DIR: /run/hermes-managed
+      CRBL_MEDIA_GATEWAY_TOKEN_FILE: /run/media-keys/gateway.key
+    volumes:
+      - ${HERMES_DATA_DIR:?required}:/opt/data:rw
+      - ${HERMES_ONEPASSWORD_FILE:?required owner-provisioned bootstrap file}:/run/secrets/onepassword.json:ro
+      - ${GATEWAY_TOKEN_FILE:?required}:/run/media-keys/gateway.key:ro
+    networks: [media-bot]
+    depends_on:
+      media-gateway:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, pgrep, -f, "^/opt/hermes/[.]venv/bin/python -P -c .* gateway run --replace$"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+networks:
+  media-bot:
+    name: media-bot
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.40.0/24
+          gateway: 172.30.40.1
+  media-mcp:
+    name: media-mcp
+    internal: true
+    driver: bridge
+  media:
+    name: media
+    external: true

@@ -33,6 +33,19 @@ def test_policy_never_removes_admin(tmp_path: Path) -> None:
         Policy(path).set_allowed(99, allowed=False)
 
 
+def test_policy_can_grant_after_revoking_the_last_regular_user(tmp_path: Path) -> None:
+    path = tmp_path / ".env"
+    path.write_text("SECRET=untouched\nTELEGRAM_ALLOWED_USERS=10\nTELEGRAM_ADMIN_USERS=99\n")
+    policy = Policy(path)
+    policy.set_allowed(10, allowed=False)
+    policy.set_allowed(20, allowed=True)
+    assert path.read_text() == (
+        "SECRET=untouched\nTELEGRAM_ALLOWED_USERS=20\nTELEGRAM_ADMIN_USERS=99\n"
+    )
+    assert policy.snapshot().role(20) is Role.USER
+    assert policy.snapshot().role(99) is Role.ADMIN
+
+
 def test_policy_rejects_duplicate_or_malformed_assignments(tmp_path: Path) -> None:
     path = tmp_path / ".env"
     path.write_text("TELEGRAM_ALLOWED_USERS=10\nTELEGRAM_ALLOWED_USERS=20\n", encoding="utf-8")

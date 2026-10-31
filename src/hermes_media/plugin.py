@@ -1,4 +1,4 @@
-"""Minimal Hermes v2026.8.27 Telegram adapter and role-aware tools."""
+"""Minimal Hermes v0.22.5 Telegram adapter and role-aware tools."""
 
 from __future__ import annotations
 
@@ -18,15 +18,18 @@ from media_gateway.types import Role
 
 from .client import GatewayClient
 from .compat import (
+    execution_actor,
     install_platform_hint,
+    install_runner_boundary,
     install_tool_visibility,
     isolate_actor_sessions,
+    mark_authorized_event,
     native_adapter,
+    native_telegram_hint,
     preserve_handler_owner,
     send_single_result_card,
 )
 from .trusted import (
-    actor_for_turn,
     actor_from_event,
     actor_scope,
     claim_card_slot,
@@ -74,7 +77,7 @@ class _FallbackAdapter:
     async def handle_message(self, event: object) -> object:
         return event
 
-    def set_message_handler(self, handler: Callable[[Any], Any]) -> None:
+    def set_message_handler(self, handler: Callable[[Any], Any] | None) -> None:
         self._message_handler = handler
 
 
@@ -94,28 +97,30 @@ class MediaTelegramAdapter(_NativeAdapter):  # type: ignore[misc, valid-type]
         super().__init__(config)
         self._media_delivery_loop: asyncio.AbstractEventLoop | None = None
 
-    def set_message_handler(self, handler: Callable[[Any], Any]) -> None:
+    def set_message_handler(self, handler: Callable[[Any], Any] | None) -> None:
+        if handler is None:
+            super().set_message_handler(None)
+            return
         isolate_actor_sessions(self)
+        install_runner_boundary(self)
 
         async def trusted_handler(event: object) -> object:
-            actor = actor_for_turn(event)
-            role = await _gateway().observe(actor)
-            if role is Role.BLOCKED:
-                raise PermissionError("Telegram user is not allowed")
-            # Native queued turns are spawned from the previous turn's task.
-            # Rebind at execution, not just at intake, including the card budget.
-            with actor_scope(actor, role, event=event):
-                result = handler(event)
-                return await result if inspect.isawaitable(result) else result
+            return await self._execute_media_turn(event, handler)
 
         preserve_handler_owner(self, trusted_handler)
         super().set_message_handler(trusted_handler)
 
-    @property
-    def authorization_is_upstream(self) -> bool:
-        """Report the gateway's authenticated actor decision to Hermes."""
-
-        return True
+    async def _execute_media_turn(self, event: object, handler: Callable[[Any], Any]) -> object:
+        self._media_delivery_loop = asyncio.get_running_loop()
+        actor = execution_actor(self, event)
+        role = await _gateway().observe(actor)
+        if role is Role.BLOCKED:
+            raise PermissionError("Telegram user is not allowed")
+        mark_authorized_event(event)
+        # Both native replay and ordinary queued turns need a fresh context.
+        with actor_scope(actor, role, event=event):
+            result = handler(event)
+            return await result if inspect.isawaitable(result) else result
 
     def _is_user_authorized_from_message(self, message: object) -> bool:
         """Defer the intake decision to the gateway's live file-backed policy.
@@ -131,12 +136,12 @@ class MediaTelegramAdapter(_NativeAdapter):  # type: ignore[misc, valid-type]
         return True
 
     async def handle_message(self, event: object) -> object:
-        self._media_delivery_loop = asyncio.get_running_loop()
         actor = actor_from_event(event)
         isolate_actor_sessions(self)
         role = await _gateway().observe(actor)
         if role is Role.BLOCKED:
             raise PermissionError("Telegram user is not allowed")
+        mark_authorized_event(event)
         with actor_scope(actor, role, event=event):
             result = super().handle_message(event)
             return await result if inspect.isawaitable(result) else result
@@ -438,7 +443,7 @@ def register(ctx: object) -> None:
         emoji="✈️",
         max_message_length=4096,
         allow_update_command=True,
-        platform_hint=PLATFORM_HINT,
+        platform_hint=f"{native_telegram_hint()}\n\n{PLATFORM_HINT}".strip(),
     )
     schemas = _gateway().schemas()
     names: set[str] = set()

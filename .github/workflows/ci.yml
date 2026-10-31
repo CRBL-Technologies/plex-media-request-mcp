@@ -133,6 +133,7 @@ jobs:
             crbl-hermes-media-managed:ci /tests/hermes_managed_smoke.py
           python tests/managed_container_smoke.py \
             crbl-media-gateway-managed:ci crbl-hermes-media-managed:ci crbl-media-upstream-managed:ci
+          python tests/container_hardening_smoke.py crbl-hermes-media-managed:ci
       - name: Verify Hermes adapter under s6-overlay
         shell: bash
         run: |

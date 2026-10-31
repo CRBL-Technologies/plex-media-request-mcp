@@ -94,6 +94,10 @@ services:
   hermes-media:
     image: ${HERMES_MEDIA_IMAGE:?required digest reference}
     restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    # Native s6 bootstrap, data ownership checks, UID drop, and service shutdown.
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, KILL]
     security_opt: [no-new-privileges:true]
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=128m

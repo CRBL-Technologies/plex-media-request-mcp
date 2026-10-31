@@ -238,6 +238,52 @@ fails closed on an incompatible schema. Deployment takes and verifies a SQLite
 backup before any schema-changing release. The one-time legacy importer was
 retired after its production recovery was completed and verified.
 
+### Container restrictions and remaining exceptions
+
+Both Compose recipes keep the gateway and upstream at UID/GID `1000:1000`,
+with read-only root filesystems, no Linux capabilities, and
+`no-new-privileges`. The gateway database directory remains writable.
+
+Hermes now has a read-only root filesystem. Its image prepares the established
+UID/GID `1000:1000` at build time, so startup does not need to edit `/etc/passwd`
+or `/etc/group`. The two recipes require this identity. Do not change those
+runtime IDs with a read-only root filesystem. `/tmp` and `/run` remain tmpfs;
+the existing native Hermes data directory remains writable. No host ownership
+migration is part of this change.
+
+Hermes is **not a fully non-root container**. Its pinned vendor s6 supervisor
+still starts as root and drops the application to UID/GID `1000:1000`. The
+application has no effective capabilities. The supervisor drops all default
+capabilities, then retains only these startup and shutdown requirements:
+
+| Capability | Required operation |
+| --- | --- |
+| `CHOWN` | Set ownership of s6 control paths and managed tmpfs directories. |
+| `DAC_OVERRIDE` | Access s6 control paths after their ownership moves to the application user. |
+| `FOWNER` | Set permissions on managed directories after their ownership changes. |
+| `SETUID`, `SETGID` | Start native services and managed retrieval as the application user. |
+| `KILL` | Stop supervised processes owned by the application user. |
+
+The gateway's broad writable Hermes-data mount is a remaining exception.
+The gateway needs the canonical `.env` policy, but it does not need Hermes'
+model configuration, logs, sessions, or OAuth state. Its policy editor creates
+a lock file and a temporary file beside `.env`, then atomically replaces `.env`.
+A read-only parent prevents dashboard allowlist edits. A single-file bind mount
+cannot support replacement of that mount point. Removing this exposure needs
+a separately approved native policy-layout change; it is not solved by these
+container restrictions. Preserve policy edits and the native state layout until
+that change has its own migration and rollback proof.
+
+Run `python tests/container_hardening_smoke.py MANAGED_HERMES_IMAGE` to check the
+packaged native startup, exact plugin contract, managed dummy retrieval, real
+launcher, process privileges, read-only root filesystem, and graceful stop.
+The test uses synthetic files, an anonymous data volume, and a loopback stub.
+It has no external network or host mounts. It does not verify real credential
+retrieval, Telegram delivery, model calls, or the destination host's permissions.
+Those checks remain gates for a separately approved rollout. Pair the new
+Compose restrictions with an image built from this Dockerfile; older images
+still try to change the account database during startup.
+
 ## Development
 
 Python 3.12 is required.

@@ -102,27 +102,36 @@ def run_managed(module: str, keys: frozenset[str]) -> None:
     signal.signal(signal.SIGTERM, forward)
     signal.signal(signal.SIGINT, forward)
     signal.signal(signal.SIGUSR1, started)
+    environment: dict[str, str] = {}
+    token = ""
     try:
         environment_id, token = read_bootstrap(BOOTSTRAP_FILE)
-        child = subprocess.Popen(
-            [
-                "/usr/local/bin/op",
-                "run",
-                "--environment",
-                environment_id,
-                "--",
-                sys.executable,
-                "-m",
-                module,
-                str(os.getpid()),
-            ],
-            env=retrieval_environment(dict(os.environ), token, keys),
-            stdin=subprocess.DEVNULL,
-            # CLI errors can include identifiers. App stderr is redirected to
-            # stdout in managed_app and still passes through op's masking.
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        environment = retrieval_environment(dict(os.environ), token, keys)
+        try:
+            child = subprocess.Popen(
+                [
+                    "/usr/local/bin/op",
+                    "run",
+                    "--environment",
+                    environment_id,
+                    "--",
+                    sys.executable,
+                    "-m",
+                    module,
+                    str(os.getpid()),
+                ],
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                # CLI errors can include identifiers. App stderr is redirected to
+                # stdout in managed_app and still passes through op's masking.
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        finally:
+            token = ""
+            environment.clear()
+        if stopped.is_set():
+            forward(signal.SIGTERM, None)
         deadline = time.monotonic() + STARTUP_TIMEOUT
         while child.poll() is None and not stopped.is_set():
             if not ready.is_set() and time.monotonic() >= deadline:
@@ -133,6 +142,8 @@ def run_managed(module: str, keys: frozenset[str]) -> None:
     except (OSError, ValueError):
         pass
     finally:
+        token = ""
+        environment.clear()
         if child is not None:
             with suppress(ProcessLookupError):
                 os.killpg(child.pid, signal.SIGTERM)

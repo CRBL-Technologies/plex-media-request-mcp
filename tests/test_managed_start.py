@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import signal
 import subprocess
 import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -83,32 +85,82 @@ def test_inherited_app_values_cannot_supply_missing_fetched_options() -> None:
     assert not SECRET_KEYS.intersection(environment)
 
 
-def test_managed_child_exec_removes_bootstrap_and_keeps_app_stderr(tmp_path: Path) -> None:
+@pytest.mark.parametrize("stop_when", ["running", "backoff", "forced-stop"])
+def test_managed_child_retries_without_reprojection_and_stops(
+    tmp_path: Path, stop_when: str
+) -> None:
     launcher = """
-import os, signal, sys
+import os, signal, subprocess, sys, threading
 from pathlib import Path
 from media_gateway import managed_app
 project = managed_app.project_gateway_files
 directory = Path(sys.argv[1])
-managed_app.project_gateway_files = lambda source, ignored: project(source, directory)
+sources = []
+def project_once(source, ignored):
+    sources.append(source)
+    assert len(sources) == 1
+    project(source, directory)
+managed_app.project_gateway_files = project_once
 signal.signal(signal.SIGUSR1, lambda *_: None)
+stop_when = sys.argv[2]
 sys.argv = ['managed_app', str(os.getpid())]
-real_exec = os.execve
-def check_exec(executable, args, environment):
+real_popen = subprocess.Popen
+children = []
+wait = threading.Event.wait
+delays = []
+def fast_wait(event, timeout=None):
+    if stop_when == 'running' and timeout is not None and timeout >= 1:
+        delays.append(timeout)
+        timeout = 0.01
+    return wait(event, timeout)
+threading.Event.wait = fast_wait
+def check_spawn(args, **kwargs):
     assert args[1:] == ['-m', 'media_gateway.app']
+    assert sources == [{}], 'fetched secret dictionary was retained'
+    assert not any(key.startswith('OP_') for key in os.environ)
     probe = '''
-import os, sys
+import os, signal, sys, time
 assert not any(key.startswith('OP_') for key in os.environ)
 assert 'MEDIA_GATEWAY_CONFIG_FILE' not in os.environ
 assert 'MEDIA_GATEWAY_TOKEN' not in os.environ
 assert 'TELEGRAM_BOT_TOKEN' not in os.environ
 assert os.environ['MEDIA_GATEWAY_RADARR_PROFILE_ID'] == '25'
 assert os.environ['MEDIA_GATEWAY_POLICY_FILE'] == '/unchanged/hermes.env'
-print('application stderr survives', file=sys.stderr)
+print('application stderr survives', file=sys.stderr, flush=True)
+attempt, stop_when = int(sys.argv[1]), sys.argv[2]
+crashes = {'running': 7, 'backoff': 1, 'forced-stop': 1}[stop_when]
+if attempt <= crashes:
+    sys.exit(1)
+def stopped(signum, frame):
+    if stop_when == 'forced-stop':
+        return
+    print('child received stop', flush=True)
+    sys.exit(0)
+signal.signal(signal.SIGTERM, stopped)
+os.kill(os.getppid(), signal.SIGTERM)
+while True:
+    time.sleep(0.1)
 '''
-    real_exec(executable, [executable, '-c', probe], environment)
-managed_app.os.execve = check_exec
-sys.exit(managed_app.main())
+    child = real_popen([sys.executable, '-c', probe, str(len(children) + 1), stop_when], **kwargs)
+    children.append(child)
+    return child
+subprocess.Popen = check_spawn
+# The old wrapper execs the application once. Keep that regression path
+# synthetic too, so the failing test cannot launch a real gateway.
+real_exec = os.execve
+def old_exec(executable, args, environment):
+    real_exec(executable, [executable, '-c',
+        "import sys; print('application stderr survives', flush=True); sys.exit(1)"], environment)
+os.execve = old_exec
+result = managed_app.main()
+assert children and all(child.returncode is not None for child in children)
+if stop_when != 'backoff':
+    assert len(children) == {'running': 8, 'forced-stop': 2}[stop_when]
+if stop_when == 'running':
+    assert delays == [1, 2, 4, 8, 16, 30, 30]
+if stop_when == 'forced-stop':
+    assert children[-1].returncode == -signal.SIGKILL
+sys.exit(result)
 """
     environment = dict(os.environ)
     environment.update(secret_values())
@@ -137,21 +189,41 @@ sys.exit(managed_app.main())
             "OP_SESSION_OLD": "dummy-session",
         }
     )
-    result = subprocess.run(
-        [sys.executable, "-c", launcher, str(tmp_path)],
+    process = subprocess.Popen(
+        [sys.executable, "-c", launcher, str(tmp_path), stop_when],
         env=environment,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=5,
     )
-    assert result.returncode == 0
-    assert "application stderr survives" in result.stdout
-    assert result.stderr == ""
+    try:
+        if stop_when == "backoff":
+            assert process.stdout is not None
+            output = ""
+            deadline = time.monotonic() + 5
+            while "retrying in 1 seconds" not in output:
+                remaining = deadline - time.monotonic()
+                assert remaining > 0 and select.select([process.stdout], [], [], remaining)[0]
+                chunk = os.read(process.stdout.fileno(), 8192)
+                assert chunk, output
+                output += chunk.decode()
+            assert "application stderr survives" in output
+            process.send_signal(signal.SIGTERM)
+        stdout, stderr = process.communicate(timeout=8)
+        assert process.returncode == 0, stdout + stderr
+        if stop_when == "running":
+            assert stdout.count("application stderr survives") == 8
+            assert "child received stop" in stdout
+        assert stderr == ""
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
     assert sorted(path.name for path in tmp_path.iterdir()) == ["telegram.env", "upstream.env"]
     assert (tmp_path / "upstream.env").stat().st_mode & 0o777 == 0o600
     environment["MEDIA_GATEWAY_RADARR_PROFILE_ID"] = "invalid-sensitive-value"
     failed = subprocess.run(
-        [sys.executable, "-c", launcher, str(tmp_path)],
+        [sys.executable, "-c", launcher, str(tmp_path), stop_when],
         env=environment,
         capture_output=True,
         text=True,
@@ -219,8 +291,6 @@ managed_start.main()
         text=True,
     )
     try:
-        import time
-
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             if events.exists():

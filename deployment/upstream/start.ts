@@ -27,26 +27,36 @@ process.on("SIGUSR1", () => ready = true);
 
 try {
   const data = readBootstrap("/run/secrets/onepassword.json");
-  child = spawn("/usr/local/bin/op", [
-    "run",
-    "--environment",
-    data.environment_id,
-    "--",
-    Deno.execPath(),
-    "run",
-    "--allow-read",
-    "--allow-write",
-    "--allow-env",
-    "--allow-run",
-    "--allow-sys",
-    "/app/managed/app.ts",
-    String(process.pid),
-    ...Deno.args,
-  ], {
-    env: retrievalEnvironment(Deno.env.toObject(), data.service_account_token),
-    detached: true,
-    stdio: ["ignore", "inherit", "ignore"],
-  });
+  const environment = retrievalEnvironment(
+    Deno.env.toObject(),
+    data.service_account_token,
+  );
+  try {
+    child = spawn("/usr/local/bin/op", [
+      "run",
+      "--environment",
+      data.environment_id,
+      "--",
+      Deno.execPath(),
+      "run",
+      "--allow-read",
+      "--allow-write",
+      "--allow-env",
+      "--allow-run",
+      "--allow-sys",
+      "/app/managed/app.ts",
+      String(process.pid),
+      ...Deno.args,
+    ], {
+      env: environment,
+      detached: true,
+      stdio: ["ignore", "inherit", "ignore"],
+    });
+  } finally {
+    data.environment_id = "";
+    data.service_account_token = "";
+    for (const key of Object.keys(environment)) delete environment[key];
+  }
   if (stopped) signalGroup("SIGTERM");
   const deadline = setTimeout(() => {
     if (!ready) {

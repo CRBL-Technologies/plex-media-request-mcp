@@ -117,7 +117,7 @@ jobs:
             -v "$RUNNER_TEMP/hermes-test-deps:/testdeps:ro" \
             -v "$GITHUB_WORKSPACE:/tests:ro" \
             crbl-hermes-media:ci -m pytest -q -c /tests/pyproject.toml \
-            /tests/tests/test_hermes.py -k pinned_runtime -p no:cacheprovider
+            /tests/tests/test_hermes.py /tests/tests/test_managed_hermes.py -k pinned_runtime -p no:cacheprovider
       - name: Build and verify managed media images
         run: |
           docker build --target managed --build-arg HERMES_BASE_IMAGE="$HERMES_BASE_IMAGE" \

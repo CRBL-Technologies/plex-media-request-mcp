@@ -25,6 +25,7 @@ from .compat import (
     isolate_actor_sessions,
     mark_authorized_event,
     native_adapter,
+    native_telegram_environment,
     native_telegram_hint,
     preserve_handler_owner,
     send_single_result_card,
@@ -435,6 +436,7 @@ def register(ctx: object) -> None:
         validate_config=_configured,
         is_connected=_configured,
         required_env=["TELEGRAM_BOT_TOKEN"],
+        **native_telegram_environment(),
         allowed_users_env="TELEGRAM_ALLOWED_USERS",
         # If this plugin fails to register, the native Telegram adapter and
         # its ordinary TELEGRAM_ALLOWED_USERS gate remain in force.

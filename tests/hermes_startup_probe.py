@@ -35,6 +35,7 @@ def check_launcher() -> str:
 
 
 def main() -> None:
+    from gateway.config import Platform, load_gateway_config
     from hermes_cli.config import load_config_readonly
     from hermes_cli.env_loader import load_hermes_dotenv
     from pm.environments import install_state_dir, runtime_facts_path, site_packages
@@ -54,6 +55,9 @@ def main() -> None:
     config = load_config_readonly()
     assert config["model"]["default"] == "owner-selected-model"
     assert config["model"]["provider"] == "openrouter"
+    telegram = load_gateway_config().platforms[Platform.TELEGRAM]
+    assert telegram.enabled
+    assert telegram.token == "fetched-telegram-token"
 
     home = Path("/opt/data")
     before = {name: (home / name).read_bytes() for name in (".env", "config.yaml")}

@@ -48,6 +48,10 @@ RUN /opt/hermes/.venv/bin/python -c 'import httpx; import hermes_media.plugin' \
     && /opt/hermes/.venv/bin/python -c 'from hermes_media.soul import SOUL_MD; assert SOUL_MD.strip()' \
     && test -f /opt/hermes/plugins/platforms/zzzz-crbl-media/plugin.yaml
 
+# Match the established runtime identity before the root filesystem is sealed.
+# Native s6 still owns startup and drops the application to this user.
+RUN groupmod --gid 1000 hermes && usermod --uid 1000 --gid 1000 hermes
+
 LABEL org.opencontainers.image.source="https://github.com/CRBL-Technologies/plex-media-request-mcp" \
       org.opencontainers.image.revision="$SOURCE_COMMIT"
 

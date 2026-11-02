@@ -40,6 +40,24 @@ def main() -> None:
     from hermes_cli.env_loader import load_hermes_dotenv
     from pm.environments import install_state_dir, runtime_facts_path, site_packages
 
+    assert os.getuid() == os.geteuid() == 1000
+    assert os.getgid() == os.getegid() == 1000
+    status = Path("/proc/self/status").read_text()
+    assert "CapEff:\t0000000000000000" in status
+    assert "NoNewPrivs:\t1" in status
+    supervisor = Path("/proc/1/status").read_text()
+    assert "Uid:\t0\t0\t0\t0" in supervisor
+    for name in ("CapEff", "CapBnd"):
+        mask = next(line.split()[1] for line in supervisor.splitlines() if line.startswith(name))
+        assert int(mask, 16) & ~0xEB == 0
+    assert " ro," in next(
+        line for line in Path("/proc/mounts").read_text().splitlines() if line.split()[1] == "/"
+    )
+    print(
+        "Restricted runtime: UID/GID 1000, zero effective capabilities, "
+        "no-new-privileges, read-only root."
+    )
+
     assert not any(key.startswith("OP_") for key in os.environ)
     load_hermes_dotenv(load_external_secrets=False)
     assert os.environ["TELEGRAM_BOT_TOKEN"] == "fetched-telegram-token"

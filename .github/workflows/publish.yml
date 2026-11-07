@@ -17,10 +17,17 @@ env:
   HERMES_BASE_IMAGE: nousresearch/hermes-agent@sha256:e0df6adebddf29b91112aefc999d4aaf6846c9eb544faca5672a16a13590ff79
 
 jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
   publish:
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
         with:

@@ -6,11 +6,11 @@ import asyncio
 import re
 from collections.abc import Callable
 from typing import Any
-from urllib.parse import urlsplit
 
 from . import plex_watch
 from .config import Config
 from .constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
+from .library import apply_series_availability, poster_url, read_seasons
 from .store import Store
 from .types import Actor, Role
 from .upstream import Upstream, UpstreamError
@@ -114,31 +114,6 @@ def _bool(value: object) -> bool:
     return value is True
 
 
-def _poster_url(item: dict[str, Any]) -> str | None:
-    """Return the provider's public poster URL, never its private relative path."""
-
-    candidates: list[object] = [item.get("remotePoster")]
-    images = item.get("images")
-    if isinstance(images, list):
-        candidates.extend(
-            image.get("remoteUrl")
-            for image in images
-            if isinstance(image, dict) and image.get("coverType") == "poster"
-        )
-    for candidate in candidates:
-        if not isinstance(candidate, str) or len(candidate) > 2048:
-            continue
-        parsed = urlsplit(candidate)
-        if (
-            parsed.scheme == "https"
-            and parsed.hostname
-            and parsed.username is None
-            and parsed.password is None
-        ):
-            return candidate
-    return None
-
-
 def _season_numbers(item: dict[str, Any]) -> list[int]:
     """Every season Sonarr knows, including 0 for specials."""
 
@@ -155,49 +130,6 @@ def _season_numbers(item: dict[str, Any]) -> list[int]:
     return sorted(set(result))
 
 
-def _season_states(item: dict[str, Any]) -> list[dict[str, Any]]:
-    """Per-season episode counts, so a caller can tell complete from missing.
-
-    ``monitored`` alone is not availability: a season can be monitored with no
-    files at all, which means it was asked for and is still searching.
-    """
-
-    raw = item.get("seasons")
-    if not isinstance(raw, list):
-        return []
-    states: list[dict[str, Any]] = []
-    for season in raw:
-        if not isinstance(season, dict):
-            continue
-        number = _first(season, "seasonNumber", "season_number")
-        if not isinstance(number, int) or isinstance(number, bool) or number < 0:
-            continue
-        stats = season.get("statistics")
-        stats = stats if isinstance(stats, dict) else {}
-        files = stats.get("episodeFileCount")
-        # Sonarr's episodeCount is what has aired; totalEpisodeCount also
-        # includes future episodes. Availability is complete when every aired
-        # episode is held, not only after an ongoing season broadcasts its
-        # finale.
-        total = _first(stats, "episodeCount", "totalEpisodeCount")
-        files = files if isinstance(files, int) and files >= 0 else 0
-        total = total if isinstance(total, int) and total >= 0 else 0
-        state: dict[str, Any] = {
-            "number": number,
-            "files": files,
-            "episodes": total,
-            "monitored": season.get("monitored") is True,
-            "complete": total > 0 and files >= total,
-            "partial": 0 < files < total,
-        }
-        next_airing = stats.get("nextAiring")
-        if isinstance(next_airing, str) and next_airing:
-            state["status"] = "airing"
-            state["next_airing"] = next_airing[:40]
-        states.append(state)
-    return sorted(states, key=lambda state: int(state["number"]))
-
-
 def _movie_candidate(item: dict[str, Any]) -> dict[str, Any] | None:
     external_id = _first(item, "tmdbId", "tmdb_id")
     title = _first(item, "title", "originalTitle")
@@ -210,9 +142,15 @@ def _movie_candidate(item: dict[str, Any]) -> dict[str, Any] | None:
         "title": title,
         "year": _year(_first(item, "year", "releaseDate", "inCinemas")),
         "overview": str(item.get("overview") or "")[:1000],
-        "poster_url": _poster_url(item),
+        "poster_url": poster_url(item),
         "in_radarr": isinstance(radarr_id, int) and radarr_id > 0,
-        "downloaded": _bool(item.get("hasFile")),
+        "downloaded": (
+            item["hasFile"]
+            if isinstance(item.get("hasFile"), bool)
+            else None
+            if isinstance(radarr_id, int) and radarr_id > 0
+            else False
+        ),
     }
 
 
@@ -228,7 +166,7 @@ def _series_candidate(item: dict[str, Any]) -> dict[str, Any] | None:
         "title": title,
         "year": _year(_first(item, "year", "firstAired")),
         "overview": str(item.get("overview") or "")[:1000],
-        "poster_url": _poster_url(item),
+        "poster_url": poster_url(item),
         "seasons": _season_numbers(item),
         "in_sonarr": isinstance(sonarr_id, int) and sonarr_id > 0,
         "status": str(item.get("status") or "unknown")[:40],
@@ -242,7 +180,8 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
             "media type, poster_url, and whether the file is held: downloaded for a movie, and "
             "for a series season_states, seasons_complete, and seasons_missing. A season state "
             "marked airing reports files out of episodes aired so far plus next_airing; complete "
-            "then means all aired episodes are held, not that the season has finished. A lone held "
+            "then means all aired episodes are held, not that the season has finished. Null "
+            "availability or counts mean unknown, never missing. A lone held "
             "title also carries plex_url. When exactly one title matches, it is posted to the chat "
             "as a poster."
         ),
@@ -344,8 +283,8 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
         "description": (
             "Report every season of a series with how many episodes Sonarr holds, so a reply "
             "can say which seasons are complete, partial or missing. Season 0 is specials. A "
-            "search result carries no per-season counts, so this is the way to answer a season "
-            "question."
+            "search result already includes these counts when available. Null counts mean "
+            "unknown, never zero."
         ),
         "inputSchema": {
             "type": "object",
@@ -356,11 +295,20 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "request_status": {
         "description": (
-            "Show historical requests visible to this user and their availability state. This "
+            "Show historical requests visible to this user with freshly checked availability "
+            "and ongoing season subscriptions. Stored provider_status is the original command "
+            "outcome, not an active download or search. This "
             "answers questions about earlier requests; it is not confirmation of a request "
             "mutation."
         ),
-        "inputSchema": {"type": "object", "additionalProperties": False},
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "minimum": 1, "maximum": 25},
+                "offset": {"type": "integer", "minimum": 0},
+            },
+            "additionalProperties": False,
+        },
     },
     "download_status": {
         "description": "Show active Sonarr downloads and monitored missing movies.",
@@ -481,7 +429,7 @@ class ToolService:
                 group.append(candidate)
             groups.append(group)
         results = _interleave(groups, limit)
-        await asyncio.gather(
+        enrichment_errors = await asyncio.gather(
             self._enrich_from_library(
                 results=results,
                 library_ids=library_ids,
@@ -498,10 +446,15 @@ class ToolService:
                 kind="series",
                 id_field="tvdb_id",
                 tool="sonarr_get_series_by_id",
-                apply=self._apply_series_availability,
+                apply=None,
             ),
         )
-        return results, errors
+        errors.extend(
+            kind
+            for kind, failed in zip(("movie", "series"), enrichment_errors, strict=True)
+            if failed
+        )
+        return results, sorted(set(errors))
 
     async def _enrich_from_library(
         self,
@@ -511,9 +464,9 @@ class ToolService:
         kind: str,
         id_field: str,
         tool: str,
-        apply: Callable[[dict[str, Any], dict[str, Any]], None],
+        apply: Callable[[dict[str, Any], dict[str, Any]], None] | None,
         skip: Callable[[dict[str, Any]], bool] = lambda _candidate: False,
-    ) -> None:
+    ) -> bool:
         """Read each tracked candidate's library record and fold it back in.
 
         Both providers answer "does this exist" from their lookup and "do we
@@ -533,47 +486,30 @@ class ToolService:
             if provider_id is not None:
                 targets.append((candidate, provider_id))
         if not targets:
-            return
+            return False
 
         async def resolve(candidate: dict[str, Any], provider_id: int) -> None:
             record = _record(await self.upstream.call(tool, {"id": provider_id}))
-            if record is not None:
+            if record is None:
+                raise UpstreamError("library record is unavailable")
+            if apply is None:
+                apply_series_availability(candidate, await read_seasons(self.upstream, record))
+            else:
                 apply(candidate, record)
 
         outcomes = await asyncio.gather(
             *(resolve(candidate, provider_id) for candidate, provider_id in targets),
             return_exceptions=True,
         )
-        for outcome in outcomes:
+        failed = False
+        for (candidate, _), outcome in zip(targets, outcomes, strict=True):
             if isinstance(outcome, BaseException) and not isinstance(outcome, Exception):
                 raise outcome
-
-    @staticmethod
-    def _apply_series_availability(candidate: dict[str, Any], record: dict[str, Any]) -> None:
-        """Say which seasons a tracked series already has.
-
-        Sonarr's lookup carries season numbers but null statistics, so a search
-        result cannot tell a series that is fully held from one merely tracked.
-        """
-
-        states = _season_states(record)
-        if not states:
-            return
-        candidate["season_states"] = states
-        complete = [int(state["number"]) for state in states if state["complete"]]
-        # A season Sonarr lists with no episodes has not aired yet, so it is
-        # not missing: there is nothing to acquire, and counting it would keep
-        # every ongoing show permanently unavailable.
-        missing = [
-            int(state["number"])
-            for state in states
-            if not state["complete"] and int(state["episodes"]) > 0
-        ]
-        candidate["seasons_complete"] = complete
-        candidate["seasons_missing"] = missing
-        # "Downloaded" for a series means every aired season is complete, so
-        # the model never calls a half-held show available.
-        candidate["downloaded"] = bool(complete) and not missing
+            if isinstance(outcome, Exception):
+                candidate["downloaded"] = None
+                candidate["availability_error"] = "library availability is temporarily unavailable"
+                failed = True
+        return failed
 
     @staticmethod
     def _apply_movie_availability(candidate: dict[str, Any], record: dict[str, Any]) -> None:
@@ -585,8 +521,9 @@ class ToolService:
         the bot offer to add films the user can already watch.
         """
 
-        if _bool(record.get("hasFile")):
-            candidate["downloaded"] = True
+        if not isinstance(record.get("hasFile"), bool):
+            raise UpstreamError("movie availability is unavailable")
+        candidate["downloaded"] = record["hasFile"]
 
     async def _enrich_plex_urls(self, results: list[dict[str, Any]]) -> None:
         """Attach ``plex_url`` to a lone held result, at a cost of one call.
@@ -877,11 +814,10 @@ class ToolService:
 
         if not isinstance(existing_id, int) or existing_id <= 0:
             return False
-        try:
-            record = _record(await self.upstream.call("radarr_get_movie", {"id": existing_id}))
-        except UpstreamError:
-            return False
-        return record is not None and _bool(record.get("hasFile"))
+        record = _record(await self.upstream.call("radarr_get_movie", {"id": existing_id}))
+        if record is None or not isinstance(record.get("hasFile"), bool):
+            raise UpstreamError("movie availability is unavailable")
+        return _bool(record["hasFile"])
 
     async def _fulfill_movie_request(
         self,
@@ -894,6 +830,7 @@ class ToolService:
         if held:
             return "available"
         if isinstance(existing_id, int) and existing_id > 0:
+            await self.upstream.call("radarr_update_movie", {"id": existing_id, "monitored": True})
             await self.upstream.call("radarr_search_movie_releases", {"id": existing_id})
             return "search_started"
         await self.upstream.call(
@@ -944,7 +881,7 @@ class ToolService:
             "title": candidate["title"],
             "year": candidate["year"],
             "in_sonarr": isinstance(sonarr_id, int) and sonarr_id > 0,
-            "seasons": _season_states(record),
+            "seasons": await read_seasons(self.upstream, record),
         }
 
     async def _request_series(self, arguments: object, actor: Actor, _role: Role) -> dict[str, Any]:
@@ -1026,6 +963,7 @@ class ToolService:
             if current is None:
                 raise ToolError("Sonarr returned incomplete series settings")
             updated_series = dict(current)
+            updated_series["monitored"] = True
             options = current.get("seasons")
             if not isinstance(options, list):
                 raise ToolError("Sonarr returned incomplete season settings")
@@ -1176,8 +1114,70 @@ class ToolService:
         )
 
     async def _request_status(self, arguments: object, actor: Actor, role: Role) -> dict[str, Any]:
-        _exact(arguments, set())
-        return {"requests": self.store.requests_for(actor.user_id, all_users=role is Role.ADMIN)}
+        args = _exact(arguments, {"limit", "offset"})
+        limit, offset = args.get("limit", 10), args.get("offset", 0)
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 25:
+            raise ToolError("limit must be between 1 and 25")
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ToolError("offset must be non-negative")
+        rows = self.store.requests_for(
+            actor.user_id, all_users=role is Role.ADMIN, limit=limit + 1, offset=offset
+        )
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        gate = asyncio.Semaphore(4)
+        identities = {(row["media_type"], row["external_id"]) for row in rows}
+
+        async def read(kind: str, external_id: int) -> dict[str, Any]:
+            async with gate:
+                try:
+                    if kind == "series":
+                        record = _record(
+                            await self.upstream.call(
+                                "sonarr_get_series_by_id", {"tvdbId": external_id}
+                            )
+                        )
+                        if record is None:
+                            raise UpstreamError("series availability is unavailable")
+                        return {"seasons": await read_seasons(self.upstream, record)}
+                    found = await self.upstream.call(
+                        "radarr_search_movie", {"term": f"tmdb:{external_id}", "limit": 10}
+                    )
+                    source = next(
+                        (item for item in _rows(found) if item.get("tmdbId") == external_id), None
+                    )
+                    if source is None:
+                        return {"status": "unknown"}
+                    return {
+                        "status": "available"
+                        if await self._movie_is_held(source.get("id"))
+                        else "missing"
+                    }
+                except UpstreamError:
+                    return {"status": "unknown"}
+
+        ordered = sorted(identities)
+        values = await asyncio.gather(*(read(kind, external_id) for kind, external_id in ordered))
+        availability = dict(zip(ordered, values, strict=True))
+        for row in rows:
+            current = availability[row["media_type"], row["external_id"]]
+            row["subscribed_seasons"] = row["seasons"] if row["media_type"] == "series" else []
+            if "seasons" in current:
+                states = [item for item in current["seasons"] if item["number"] in row["seasons"]]
+                if len(states) != len(row["seasons"]) or any(s["complete"] is None for s in states):
+                    status = "unknown"
+                elif all(s["episodes"] == 0 for s in states):
+                    status = "upcoming"
+                elif all(s["complete"] or s["episodes"] == 0 for s in states):
+                    status = "available"
+                elif any(s["files"] for s in states):
+                    status = "partial"
+                else:
+                    status = "missing"
+                row["availability"] = {"status": status, "seasons": states}
+            else:
+                row["availability"] = current
+        return {"requests": rows, "next_offset": offset + limit if has_more else None}
 
     async def _download_status(
         self, arguments: object, _actor: Actor, _role: Role

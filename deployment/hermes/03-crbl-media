@@ -55,15 +55,15 @@ install_soul(get_hermes_home())
 manager = PluginManager()
 manager.discover_and_load()
 expected = set(SHARED_TOOLS) | ADMIN_UPSTREAM_TOOLS
-# max_web_searches is a native Hermes setting with no copy in this repo, so it
-# is still read from config. The platform hint is not: it lives only in
-# PLATFORM_HINT and is installed by the plugin, and verify_pinned_runtime
-# confirms it reached the assembled prompt.
-validate_search_guardrail(load_config_readonly())
+# Check the settings Hermes actually loads. Telegram hint overrides must not
+# replace native formatting or resurrect obsolete CRBL instructions.
+config = load_config_readonly()
+validate_search_guardrail(config)
 verify_pinned_runtime(
     manager=manager,
     expected_tools=expected,
     platform_hint=PLATFORM_HINT,
     soul=SOUL_MD,
+    config=config,
 )
 PY

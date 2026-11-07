@@ -19,8 +19,11 @@ Before changing the pinned digest:
    preferring its built-in `PLATFORM_HINTS["telegram"]` over a plugin's
    registered hint, the wrapper can be dropped in favour of the value already
    passed to `register_platform`. `verify_pinned_runtime` fails closed when the
-   wrapper is inactive or when the guidance no longer reaches a prompt resolved
-   with no config override.
+   wrapper is inactive or the loaded configuration produces anything other than
+   native Telegram formatting plus current CRBL guidance. Telegram overrides are
+   deliberately ignored without rewriting the config. The smoke fixture includes
+   obsolete append/replace instructions to verify they cannot reappear; other
+   platforms' overrides must remain effective.
 4. Verify the identity slot still loads from a file. `hermes_constants.get_hermes_home`
    and `agent.prompt_builder.load_soul_md` are the two names the init script uses
    to install `SOUL.md` and to read it back; `load_soul_md` returning `None` for

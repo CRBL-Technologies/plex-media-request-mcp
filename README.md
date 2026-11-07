@@ -23,12 +23,14 @@ The Portainer definition owns only those three media services. General Hermes
 and accountant agents use a separate stack and release lifecycle while sharing
 the external `media` network where required.
 
-The gateway exposes exactly eight media tools to an allowed Telegram user:
+The gateway exposes ten media tools to an allowed Telegram user:
 
 - `search_media`
 - `recommend_media`
 - `request_movie`
 - `request_series`
+- `request_titles`
+- `series_seasons`
 - `request_status`
 - `download_status`
 - `browse_library`
@@ -49,13 +51,13 @@ Configured administrators also receive the reviewed Plex/Radarr/Sonarr tools
 discovered from the pinned upstream MCP. Future upstream tools are not admitted
 automatically. Retaining that broad operations surface in the same bot is a
 deliberate product decision: only explicit administrators see it, while regular
-users remain limited to eight normalized tools. No selection token is used:
+users remain limited to ten normalized tools. No selection token is used:
 requests take the TMDB or TVDB ID returned by a current search.
 
 Search results retain the provider's public poster URL. A search that resolves
 to exactly one result is posted as that poster, carrying an `Open in Plex` link
-when the title is held and no button at all otherwise. That link is the only
-control a card has ever offered: there is no picker and no button that acts.
+when the title is held and no button at all otherwise. The former blocking
+picker has been removed: requesting and choosing titles happen conversationally.
 At most one poster is posted per user message, however many searches a turn
 makes. Remote poster URLs are never sent through Hermes' local-file `MEDIA:`
 convention.
@@ -76,9 +78,23 @@ hint over a plugin's registered one, so the plugin installs its text on Hermes'
 hint resolver at registration instead of mirroring it into
 `platform_hints.telegram.append`; a config file that is not in this repository
 must never be a second source of truth for text that changes with the tools it
-describes. The image startup gate resolves the prompt with no config override at
-all and refuses to start unless the guidance arrived and Hermes' own Telegram
-hint survived beside it.
+describes. Telegram-specific append/replace overrides are ignored at assembly,
+without rewriting the host config; other platforms retain their overrides.
+The startup gate uses the loaded configuration and checks the exact assembled
+Telegram hint against native formatting plus the current CRBL guidance.
+
+Radarr and Sonarr report file availability. Series counts come from episode
+records, including unmonitored episodes: `episodeCount` is not an aired count.
+`complete` means every aired/held episode is present; `finished` separately
+requires season-ending evidence (a finale marker, an ended show, or a later
+ordinary season). Future episodes and unknown dates are not missing episodes.
+Null availability/counts mean unknown, never zero or unavailable.
+
+`request_status` checks current availability, separately from the stored request
+outcome and ongoing season subscriptions. It defaults to ten requests, accepts
+`limit` up to 25 and `offset`, and returns `next_offset` when more remain. Repeated
+requests retain every destination; completed series retain their subscriptions.
+The dashboard labels historical command outcomes explicitly, not as active searches.
 
 Upstream 2.3.0 lists `radarr_get_queue` in its full profile but does not register
 the tool. The gateway therefore contains one narrow read-only Radarr queue call;
@@ -89,12 +105,17 @@ all other provider operations go through upstream MCP.
 Plex `library.new` webhooks are the availability authority. Movie, show,
 season, and episode payloads are supported. Every movie and grouped show or
 season arrival notifies each configured administrator. A lone weekly episode
-is requester-only, so an administrator receives it only after requesting that
-season through the bot. Every currently allowed requester of the matching movie
+is requester-only, except when a verified season completion is being announced.
+Completion requires all known episodes of a finished season to be held by Sonarr
+and the corresponding Plex season to contain them. The completion message has a
+separate per-season/per-chat receipt: an earlier gap filling or a delayed webhook
+cannot be mislabeled as the finale or announce the same completion repeatedly.
+Missing metadata defers the completion claim, not other recipients or titles.
+Every currently allowed requester of the matching movie
 or season is notified at the chat where they made the request. Plex's related
 show, season and episode events are coalesced before delivery; a season batch
-waits until the latest event has been quiet for the configured delay, so a bulk
-import sends one message while weekly episodes remain individual messages.
+waits until the latest event has been quiet for the configured delay. This groups
+nearby import events; quiet alone does not prove a whole season has arrived.
 Each message contains an `Open in Plex` button.
 When Plex supplies its catalog slug, that button uses a `watch.plex.tv` universal
 link so supported mobile clients open the Plex app; the browser remains the
@@ -104,8 +125,12 @@ URL or a second secret copy. The server-specific Plex Web URL remains the
 fallback when resolution is unavailable.
 
 Webhook events and delivery receipts are durable and deduplicated in SQLite.
+Temporary Telegram failures retry only unfinished destinations and never stop
+other deliveries. Permanent blocked/deactivated/not-found chat failures receive
+an explicit blocked receipt and an activity entry; they are not reported as sent.
 Unresolved Plex provider IDs remain retryable, and terminal operational data is
-pruned after 60 days. Acquisition intent and every Telegram destination are
+pruned after 60 days. Ongoing series subscriptions and season-completion receipts
+are retained. Acquisition intent and every Telegram destination are
 committed before Radarr or Sonarr is mutated. Provider outcomes are recorded
 afterward; interrupted or unknown operations are reconciled idempotently at
 gateway startup. A repeat request by one user from another chat therefore adds
@@ -169,8 +194,8 @@ The startup gate then reads it back through Hermes' own loader and refuses to
 serve if the identity it was built with is not the one the agent will use.
 
 A Plex arrival is announced once the title has been quiet for
-`MEDIA_GATEWAY_NOTIFICATION_DELAY_SECONDS` (5 seconds), so a season import is
-one message rather than one per episode. A movie is its own batch with nothing
+`MEDIA_GATEWAY_NOTIFICATION_DELAY_SECONDS` (5 seconds). Nearby season-import events
+are batched; a movie is its own batch with nothing
 to group with, so it is sent on the next pass instead of serving out a window
 that can only delay it.
 
@@ -207,4 +232,7 @@ python -m venv .venv
 
 Runtime dependencies are hash-locked in `requirements.txt`. CI repeats the
 checks, validates Compose, and builds both CRBL images from digest-pinned bases.
-Publishing records immutable image digests, SBOMs, and provenance.
+Publishing depends on that reusable CI job succeeding for the exact same commit,
+for main, tagged, and manual releases. It records immutable image digests, SBOMs,
+and provenance. These checks do not exercise a paid model conversation or perform
+production deployment.

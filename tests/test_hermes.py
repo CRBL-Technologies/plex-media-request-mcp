@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -13,7 +14,14 @@ import pytest
 from hermes_media import compat as compat_module
 from hermes_media import plugin
 from hermes_media.soul import SOUL_MD, install_soul
-from hermes_media.trusted import TrustError, actor_from_event, actor_scope
+from hermes_media.trusted import (
+    TrustError,
+    actor_from_event,
+    actor_scope,
+    claim_card_slot,
+    current_role,
+    require_actor,
+)
 from media_gateway.constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
 from media_gateway.tools import SHARED_SCHEMAS
 from media_gateway.types import Actor, Role
@@ -203,7 +211,7 @@ async def test_recommendations_return_conversational_status_without_picker(
         ],
         "media_type": "movie",
     }
-    with actor_scope(actor, Role.USER, "agent:main:telegram:dm:1001"):
+    with actor_scope(actor, Role.USER):
         raw = await plugin._handler("recommend_media")(arguments)
 
     result = json.loads(raw)
@@ -214,8 +222,10 @@ async def test_recommendations_return_conversational_status_without_picker(
     assert gateway.calls == [(1001, "recommend_media", arguments)]
 
 
+@pytest.mark.parametrize("downloaded", [True, False])
 async def test_one_resolved_recommendation_sends_its_poster_and_plex_link(
     monkeypatch: pytest.MonkeyPatch,
+    downloaded: bool,
 ) -> None:
     class RecommendationGateway(FakeGateway):
         async def call(self, actor: Actor, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -231,7 +241,8 @@ async def test_one_resolved_recommendation_sends_its_poster_and_plex_link(
                         "year": 2016,
                         "overview": "A linguist tries to understand visitors from another world.",
                         "poster_url": "https://image.tmdb.org/arrival.jpg",
-                        "plex_url": "https://watch.plex.tv/movie/arrival",
+                        "downloaded": downloaded,
+                        "plex_url": "https://watch.plex.tv/movie/arrival" if downloaded else None,
                     }
                 ],
             }
@@ -275,9 +286,14 @@ async def test_one_resolved_recommendation_sends_its_poster_and_plex_link(
     assert len(adapter.photos) == 1
     card = adapter.photos[0]
     assert card["photo"] == "https://image.tmdb.org/arrival.jpg"
-    button = card["reply_markup"].inline_keyboard[0][0]
-    assert button.text == "▶ Open in Plex"
-    assert button.url == "https://watch.plex.tv/movie/arrival"
+    if downloaded:
+        button = card["reply_markup"].inline_keyboard[0][0]
+        assert button.text == "▶ Open in Plex"
+        assert button.url == "https://watch.plex.tv/movie/arrival"
+    else:
+        assert card["reply_markup"] is None
+    # Resolving a choice shows its poster but does not request the movie.
+    assert gateway.calls == [(1001, "recommend_media", arguments)]
 
 
 def test_a_card_offers_a_plex_link_or_no_button(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -480,6 +496,15 @@ async def test_adapter_verifies_actor_before_trusting_gateway(
 ) -> None:
     gateway = FakeGateway()
     monkeypatch.setattr(plugin, "_client", gateway)
+
+    async def native_handler(_adapter: object, incoming: object) -> object:
+        assert require_actor() == actor_from_event(incoming)
+        assert current_role() is Role.USER
+        assert claim_card_slot() is True
+        assert claim_card_slot() is False
+        return incoming
+
+    monkeypatch.setattr(plugin._NativeAdapter, "handle_message", native_handler)
     adapter = plugin.MediaTelegramAdapter(object())
     assert adapter.authorization_is_upstream is True
     assert adapter._is_user_authorized_from_message(object()) is True
@@ -487,6 +512,9 @@ async def test_adapter_verifies_actor_before_trusting_gateway(
     assert await adapter.handle_message(allowed) is allowed
     with pytest.raises(PermissionError, match="not allowed"):
         await adapter.handle_message(event(7777))
+    assert current_role() is None
+    with pytest.raises(TrustError, match="no trusted Telegram actor"):
+        require_actor()
 
 
 def test_platform_visibility_adds_search_only_for_media_telegram(
@@ -525,16 +553,34 @@ def test_web_search_guardrail_uses_canonical_hermes_config() -> None:
         )
 
 
-def test_platform_hint_is_installed_from_code_without_any_config(
+@pytest.mark.parametrize(
+    "override",
+    [
+        None,
+        "Use the obsolete numbered picker.",
+        {"append": "Call repair_blocked_imports."},
+        {"replace": "Obsolete formatting."},
+        {"replace": "Obsolete formatting.", "append": "Call repair_blocked_imports."},
+        plugin.PLATFORM_HINT,
+    ],
+    ids=["absent", "shorthand", "append", "replace", "replace-and-append", "current-copy"],
+)
+def test_platform_hint_is_code_owned_without_changing_other_config(
     monkeypatch: pytest.MonkeyPatch,
+    override: object,
 ) -> None:
-    """PLATFORM_HINT is the only copy, so it must reach the prompt unaided."""
+    """Old instructions cannot survive or replace native Telegram formatting."""
 
     from hermes_media.compat import install_platform_hint
 
     def native(agent: Any, platform_key: str, default_hint: str) -> str:
-        override = getattr(agent, "_platform_hint_overrides", {}).get(platform_key)
-        return f"{default_hint}\n\n{override}".strip() if override else default_hint
+        spec = agent._platform_hint_overrides.get(platform_key)
+        if isinstance(spec, str):
+            return f"{default_hint}\n\n{spec}".strip()
+        if isinstance(spec, dict):
+            base = spec.get("replace", default_hint)
+            return f"{base}\n\n{spec.get('append', '')}".strip()
+        return default_hint
 
     system_prompt = ModuleType("agent.system_prompt")
     system_prompt._resolve_platform_hint = native  # type: ignore[attr-defined]
@@ -547,19 +593,16 @@ def test_platform_hint_is_installed_from_code_without_any_config(
     resolve = system_prompt._resolve_platform_hint
     assert getattr(resolve, "__crbl_media__", False) is True
 
-    # No config override anywhere: the guidance still lands, and Hermes' own
-    # Telegram formatting hint survives next to it.
-    empty = SimpleNamespace(_platform_hint_overrides={})
-    effective = resolve(empty, "telegram", "BUILTIN TELEGRAM HINT")
-    assert plugin.PLATFORM_HINT in effective
-    assert "BUILTIN TELEGRAM HINT" in effective
-
-    # Other platforms are untouched.
-    assert resolve(empty, "discord", "DISCORD HINT") == "DISCORD HINT"
-
-    # A config override that already carries the guidance must not double it.
-    duplicated = SimpleNamespace(_platform_hint_overrides={"telegram": plugin.PLATFORM_HINT})
-    assert resolve(duplicated, "telegram", "BUILTIN").count(plugin.PLATFORM_HINT) == 1
+    config = {
+        "platform_hints": {"telegram": override, "discord": {"append": "Generic guidance"}},
+        "unrelated": {"setting": True},
+    }
+    before = deepcopy(config)
+    configured = SimpleNamespace(_platform_hint_overrides=config["platform_hints"])
+    effective = resolve(configured, "telegram", "BUILTIN TELEGRAM HINT")
+    assert effective == f"BUILTIN TELEGRAM HINT\n\n{plugin.PLATFORM_HINT}"
+    assert resolve(configured, "discord", "DISCORD HINT") == "DISCORD HINT\n\nGeneric guidance"
+    assert config == before
 
     # Installing twice must not append twice.
     install_platform_hint(platform="telegram", platform_hint=plugin.PLATFORM_HINT)
@@ -661,6 +704,7 @@ def test_startup_gate_sees_a_patch_installed_while_it_runs(
         expected_tools=set(SHARED_TOOLS) | ADMIN_UPSTREAM_TOOLS,
         platform_hint=plugin.PLATFORM_HINT,
         soul=SOUL_MD,
+        config={"platform_hints": {"telegram": {"append": "Obsolete guidance"}}},
     )
 
 
@@ -676,6 +720,7 @@ def test_startup_gate_fails_closed_when_the_installer_never_ran(
             expected_tools=set(SHARED_TOOLS) | ADMIN_UPSTREAM_TOOLS,
             platform_hint=plugin.PLATFORM_HINT,
             soul=SOUL_MD,
+            config={},
         )
 
 
@@ -707,7 +752,45 @@ def test_startup_gate_fails_closed_when_the_host_identity_is_not_ours(
             expected_tools=set(SHARED_TOOLS) | ADMIN_UPSTREAM_TOOLS,
             platform_hint=plugin.PLATFORM_HINT,
             soul=SOUL_MD,
+            config={},
         )
+
+
+@pytest.mark.parametrize("override", ["Old picker instructions", {"replace": "Old formatting"}])
+def test_startup_gate_checks_configured_prompt_not_an_empty_override(
+    monkeypatch: pytest.MonkeyPatch,
+    override: object,
+) -> None:
+    overrides = {"telegram": override}
+    observed: list[object] = []
+
+    def install(system_prompt: ModuleType) -> None:
+        # Simulate the old append-only installer: code guidance is present,
+        # but configured stale instructions still survive beside it.
+        def incorrect(agent: Any, _key: str, default: str) -> str:
+            observed.append(agent._platform_hint_overrides)
+            extra = agent._platform_hint_overrides.get("telegram", "")
+            if isinstance(extra, dict):
+                return f"{extra['replace']}\n\n{plugin.PLATFORM_HINT}"
+            native = f"{default}\n\n{extra}".strip() if extra else default
+            return f"{native}\n\n{plugin.PLATFORM_HINT}"
+
+        incorrect.__crbl_media__ = True  # type: ignore[attr-defined]
+        system_prompt._resolve_platform_hint = incorrect  # type: ignore[attr-defined]
+
+    _fake_hermes(monkeypatch, on_registry_get=install)
+    manager = SimpleNamespace(_plugin_tool_names=set(SHARED_TOOLS) | ADMIN_UPSTREAM_TOOLS)
+
+    with pytest.raises(RuntimeError, match="differs from the code-owned hint"):
+        compat_module.verify_pinned_runtime(
+            manager=manager,
+            expected_tools=set(SHARED_TOOLS) | ADMIN_UPSTREAM_TOOLS,
+            platform_hint=plugin.PLATFORM_HINT,
+            soul=SOUL_MD,
+            config={"platform_hints": overrides},
+        )
+    assert observed == [overrides]
+    assert observed[0] is overrides
 
 
 def test_the_identity_names_no_tool_and_no_procedure() -> None:
@@ -791,7 +874,7 @@ async def test_only_one_card_is_pushed_per_user_message(monkeypatch: pytest.Monk
     monkeypatch.setattr(plugin, "_active_adapter", adapter)
     actor = Actor(user_id=1001, chat_id=1001)
 
-    with actor_scope(actor, Role.USER, "agent:main:telegram:dm:1001"):
+    with actor_scope(actor, Role.USER):
         first = json.loads(await plugin._handler("search_media")({"query": "Arrival"}))
         second = json.loads(await plugin._handler("search_media")({"query": "Ex Machina"}))
 
@@ -803,7 +886,7 @@ async def test_only_one_card_is_pushed_per_user_message(monkeypatch: pytest.Monk
     assert "already sent" in first["telegram_presentation"]["instruction"]
     assert "already sent" not in second["telegram_presentation"]["instruction"]
     # The next message earns its own card.
-    with actor_scope(actor, Role.USER, "agent:main:telegram:dm:1001"):
+    with actor_scope(actor, Role.USER):
         await plugin._handler("search_media")({"query": "Dark City"})
     assert len(adapter.sent) == 2
 

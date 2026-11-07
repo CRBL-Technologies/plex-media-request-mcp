@@ -9,12 +9,12 @@ import time
 from collections import defaultdict
 from contextlib import suppress
 from typing import Any
-from urllib.parse import urlsplit
 
 import httpx
 
 from . import plex_watch
 from .config import Config
+from .library import poster_url, read_seasons
 from .policy import Policy
 from .secrets import read_dotenv
 from .store import Store
@@ -26,6 +26,12 @@ LOGGER = logging.getLogger(__name__)
 # each pass tests rather than a timer that fires, so this cycle sets the floor
 # on how soon an arrival can be announced.
 FLUSH_INTERVAL_SECONDS = 5
+
+
+class TelegramDeliveryError(RuntimeError):
+    def __init__(self, status: int, *, permanent: bool = False):
+        super().__init__(f"Telegram notification failed ({status})")
+        self.permanent = permanent
 
 
 def _positive(value: object) -> int | None:
@@ -76,31 +82,6 @@ def _provider_rows(value: object) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, dict)]
-
-
-def _public_poster_url(item: dict[str, Any]) -> str | None:
-    """Select a provider-hosted HTTPS poster that Telegram can retrieve."""
-
-    candidates: list[object] = [item.get("remotePoster")]
-    images = item.get("images")
-    if isinstance(images, list):
-        candidates.extend(
-            image.get("remoteUrl")
-            for image in images
-            if isinstance(image, dict) and image.get("coverType") == "poster"
-        )
-    for candidate in candidates:
-        if not isinstance(candidate, str) or len(candidate) > 2048:
-            continue
-        parsed = urlsplit(candidate)
-        if (
-            parsed.scheme == "https"
-            and parsed.hostname
-            and parsed.username is None
-            and parsed.password is None
-        ):
-            return candidate
-    return None
 
 
 def _external_id(metadata: dict[str, Any], provider: str) -> int | None:
@@ -442,13 +423,16 @@ class Notifications:
                     asked_sonarr = True
                 if arriving and self._matches_queue(batch[0], arriving):
                     continue
-            batch = await self._enrich(batch)
-            await self._deliver_batch(batch)
+            try:
+                batch = await self._enrich(batch)
+                await self._deliver_batch(batch)
+            except Exception:
+                LOGGER.exception("notification batch failed; continuing other titles")
 
     async def _enrich(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         ready: list[dict[str, Any]] = []
         resolved_slugs: dict[tuple[str, int], str | None] = {}
-        resolved_posters: dict[tuple[str, int], str | None] = {}
+        resolved_records: dict[tuple[str, int], dict[str, Any] | None] = {}
         for event in events:
             if event.get("external_id") is None:
                 is_series = event.get("media_type") == "series"
@@ -509,25 +493,34 @@ class Notifications:
                     self.store.set_media_plex_url(str(event["event_key"]), plex_url)
             if isinstance(external_id, int) and media_type in {"movie", "series"}:
                 poster_key = media_type, external_id
-                if poster_key not in resolved_posters:
+                if poster_key not in resolved_records:
                     try:
-                        resolved_posters[poster_key] = await self._poster_url(
+                        resolved_records[poster_key] = await self._provider_record(
                             media_type=media_type, external_id=external_id
                         )
                     except Exception:
                         # Artwork is optional. A provider outage must not hold
                         # back an otherwise valid availability notification.
                         LOGGER.warning("poster lookup failed for a Plex notification")
-                        resolved_posters[poster_key] = None
-                poster_url = resolved_posters[poster_key]
-                if poster_url is not None:
-                    event["poster_url"] = poster_url
+                        resolved_records[poster_key] = None
+                poster = poster_url(resolved_records[poster_key] or {})
+                if poster is not None:
+                    event["poster_url"] = poster
             ready.append(event)
-        if _is_single_episode(ready):
-            ready[0]["completed_season_size"] = await self._completed_season_size(ready[0])
+        if ready and ready[0].get("media_type") == "series":
+            source = next(
+                (item for item in ready if _event_kind(item) in {"season", "episode"}), ready[0]
+            )
+            source_id = source.get("external_id")
+            provider_record = (
+                resolved_records.get(("series", source_id)) if isinstance(source_id, int) else None
+            )
+            ready[0]["completed_season_size"] = await self._completed_season_size(
+                source, provider_record
+            )
         return ready
 
-    async def _poster_url(self, *, media_type: str, external_id: int) -> str | None:
+    async def _provider_record(self, *, media_type: str, external_id: int) -> dict[str, Any] | None:
         if media_type == "movie":
             response = await self.upstream.call(
                 "radarr_search_movie", {"term": f"tmdb:{external_id}", "limit": 10}
@@ -540,34 +533,27 @@ class Notifications:
             id_fields = ("tvdbId", "tvdb_id")
         for item in _provider_rows(response):
             if any(_positive(item.get(field)) == external_id for field in id_fields):
-                return _public_poster_url(item)
+                return item
         return None
 
-    async def _completed_season_size(self, event: dict[str, Any]) -> int | None:
+    async def _completed_season_size(
+        self, event: dict[str, Any], source: dict[str, Any] | None
+    ) -> int | None:
         """Return a finished season's episode count, zero, or None on lookup failure."""
 
         external_id = event.get("external_id")
         season_number = event.get("season_number")
         if (
-            not isinstance(external_id, int)
+            _event_kind(event) not in {"season", "episode"}
+            or not isinstance(external_id, int)
             or isinstance(external_id, bool)
             or not isinstance(season_number, int)
             or isinstance(season_number, bool)
         ):
             return 0
         try:
-            lookup = await self.upstream.call(
-                "sonarr_search_series", {"term": f"tvdb:{external_id}", "limit": 10}
-            )
-            source = next(
-                (
-                    item
-                    for item in _provider_rows(lookup)
-                    if _positive(item.get("tvdbId")) == external_id
-                    or _positive(item.get("tvdb_id")) == external_id
-                ),
-                None,
-            )
+            if source is None:
+                source = await self._provider_record(media_type="series", external_id=external_id)
             sonarr_id = _positive(source.get("id")) if source is not None else None
             if sonarr_id is None:
                 return 0
@@ -578,30 +564,39 @@ class Notifications:
             LOGGER.warning("season completion lookup failed for a Plex notification")
             return None
         record = raw.get("data", raw) if isinstance(raw, dict) else None
-        seasons = record.get("seasons") if isinstance(record, dict) else None
-        if not isinstance(seasons, list):
-            return 0
-        for season in seasons:
-            if not isinstance(season, dict) or season.get("seasonNumber") != season_number:
-                continue
-            stats = season.get("statistics")
-            if not isinstance(stats, dict):
+        if not isinstance(record, dict):
+            return None
+        record = {**record, "id": sonarr_id}
+        try:
+            seasons = await read_seasons(self.upstream, record)
+            state = next((item for item in seasons if item["number"] == season_number), None)
+            if state is None or state["complete"] is None:
+                return None
+            if not state["finished"] or not state["complete"]:
                 return 0
-            files = _positive(stats.get("episodeFileCount"))
-            aired = _positive(stats.get("episodeCount"))
-            total = _positive(stats.get("totalEpisodeCount"))
-            next_airing = stats.get("nextAiring")
+            total = int(state["total_episodes"])
+            # Arr has imported the files; Plex may still be scanning them.
+            metadata = await self.upstream.call(
+                "plex_get_metadata", {"ratingKey": str(event["rating_key"])}
+            )
+            items = self._metadata_objects(metadata) if isinstance(metadata, dict) else []
+            item = items[0] if items else {}
+            if item.get("type") == "episode" and item.get("parentRatingKey"):
+                metadata = await self.upstream.call(
+                    "plex_get_metadata", {"ratingKey": str(item["parentRatingKey"])}
+                )
+                items = self._metadata_objects(metadata) if isinstance(metadata, dict) else []
+                item = items[0] if items else {}
             if (
-                files is not None
-                and aired is not None
-                and total is not None
-                and files >= total
-                and aired >= total
-                and not next_airing
+                item.get("type") == "season"
+                and item.get("index") == season_number
+                and (_positive(item.get("leafCount")) or 0) >= total
             ):
                 return total
-            return 0
-        return 0
+            return None
+        except Exception:
+            LOGGER.warning("season completion verification is temporarily unavailable")
+            return None
 
     async def _deliver_batch(self, batch: list[dict[str, Any]]) -> None:
         first = batch[0]
@@ -620,16 +615,23 @@ class Notifications:
         }
         lone_episode = _is_single_episode(batch)
         completed_season_size = first.get("completed_season_size")
-        season_completed = (
-            lone_episode and isinstance(completed_season_size, int) and completed_season_size > 0
-        )
-        completion_unknown = lone_episode and completed_season_size is None
+        season_completed = isinstance(completed_season_size, int) and completed_season_size > 0
+        completion_unknown = first["media_type"] == "series" and completed_season_size is None
+        completion_key = f"season-complete:{first['external_id']}:{first['season_number']}"
+        requesters = set(recipients)
         # Administrators receive every movie and every show/season batch. A
         # lone weekly episode is requester-only unless it completes a season;
         # an administrator who asked for that season is already present through
         # requester_destinations.
         if not lone_episode or season_completed:
             recipients.update(policy.admins)
+        if lone_episode:
+            recipients = {
+                chat_id
+                for chat_id in recipients
+                if chat_id in requesters
+                or not self.store.delivery_finished([completion_key], chat_id)
+            }
         if not recipients:
             # A known lone episode nobody requested is intentionally ignored,
             # not retried every five seconds forever. An unresolved event or a
@@ -638,26 +640,53 @@ class Notifications:
             if first["external_id"] is not None and not completion_unknown:
                 self.store.mark_events_notified(keys)
             return
-        for chat_id in recipients:
+        for chat_id in sorted(recipients):
             pending = [
-                item
+                dict(item)
                 for item in batch
-                if not self.store.delivered([str(item["event_key"])], chat_id)
+                if not self.store.delivery_finished([str(item["event_key"])], chat_id)
             ]
-            if not pending:
+            announce_completion = season_completed and not self.store.delivery_finished(
+                [completion_key], chat_id
+            )
+            if not pending and not announce_completion:
                 continue
-            poster_url = pending[0].get("poster_url")
+            pending_keys = [str(item["event_key"]) for item in pending]
+            if announce_completion:
+                pending_keys.append(completion_key)
+            if not pending:
+                pending = [dict(item) for item in batch]
+            pending[0]["completed_season_size"] = (
+                completed_season_size if announce_completion else 0
+            )
+            poster = pending[0].get("poster_url")
             message = self._message(pending)
             plex_url = str(pending[0]["plex_url"])
-            if isinstance(poster_url, str):
-                await self._send(chat_id, message, plex_url, poster_url=poster_url)
-            else:
-                await self._send(chat_id, message, plex_url)
-            self.store.mark_delivered([str(item["event_key"]) for item in pending], chat_id)
+            try:
+                if isinstance(poster, str):
+                    await self._send(chat_id, message, plex_url, poster_url=poster)
+                else:
+                    await self._send(chat_id, message, plex_url)
+            except Exception as exc:
+                if isinstance(exc, TelegramDeliveryError) and exc.permanent:
+                    self.store.mark_delivered(pending_keys, chat_id, blocked=True)
+                else:
+                    LOGGER.warning("Telegram delivery failed; will retry this destination")
+                continue
+            self.store.mark_delivered(pending_keys, chat_id)
         # Keep an unresolved episode durable after notifying administrators.
         # Once Plex exposes its show TVDB ID, the requester can still be found
         # and notified without sending the administrator a duplicate.
-        if first["external_id"] is None or completion_unknown:
+        if (
+            first["external_id"] is None
+            or completion_unknown
+            or any(
+                not self.store.delivery_finished(
+                    keys + ([completion_key] if season_completed else []), chat_id
+                )
+                for chat_id in recipients
+            )
+        ):
             return
         if first["media_type"] == "movie" and isinstance(first["external_id"], int):
             self.store.mark_movie_available(int(first["external_id"]))
@@ -670,6 +699,13 @@ class Notifications:
             return f"🍿 <b>Available in Plex</b>\n{html.escape(str(first['title']))}"
         show = html.escape(str(first["show_title"] or first["title"]))
         season = first["season_number"]
+        completed_season_size = first.get("completed_season_size")
+        if isinstance(completed_season_size, int) and completed_season_size > 0:
+            label = _season_label(season) or "Season"
+            return (
+                f"📺 <b>Season complete in Plex</b>\n"
+                f"{show} · {label} ({completed_season_size} episodes)"
+            )
         episodes = [item for item in batch if item["episode_number"] is not None]
         if not episodes:
             label = _season_label(season) or "New series"
@@ -681,18 +717,6 @@ class Notifications:
             label = _season_label(season) or "New series"
             return f"📺 <b>Available in Plex</b>\n{show} · {label}"
         episode = first["episode_number"]
-        completed_season_size = first.get("completed_season_size")
-        if isinstance(completed_season_size, int) and completed_season_size > 0:
-            label = _season_label(season) or "Season"
-            marker = ""
-            if season is not None and episode is not None:
-                marker = f"S{int(season):02d}E{int(episode):02d} · "
-            title = html.escape(str(first["title"]))
-            return (
-                f"📺 <b>Season complete in Plex</b>\n"
-                f"{show} · {label} ({completed_season_size} episodes)\n"
-                f"Finale: {marker}{title}"
-            )
         marker = ""
         if season is not None and episode is not None:
             marker = f" · S{int(season):02d}E{int(episode):02d}"
@@ -741,7 +765,15 @@ class Notifications:
         if response.is_error:
             # Do not raise HTTPStatusError: its message includes the bot token
             # embedded in the request URL.
-            raise RuntimeError(f"Telegram notification failed ({response.status_code})")
+            try:
+                description = str(response.json().get("description", "")).casefold()
+            except (ValueError, AttributeError):
+                description = ""
+            permanent = response.status_code == 403 or (
+                response.status_code == 400
+                and any(text in description for text in ("chat not found", "user is deactivated"))
+            )
+            raise TelegramDeliveryError(response.status_code, permanent=permanent)
 
     def _telegram_token(self) -> str:
         values = read_dotenv(self.config.policy_file, {"TELEGRAM_BOT_TOKEN"})

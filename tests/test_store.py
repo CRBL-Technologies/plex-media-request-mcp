@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from media_gateway import migrations
-from media_gateway.migrations import _migration_1
+from media_gateway.migrations import _migration_1, _migration_2
 from media_gateway.store import Store
 from media_gateway.types import Actor
 
@@ -115,7 +115,7 @@ def test_v1_migration_preserves_request_and_moves_chat_to_destination(tmp_path: 
     assert request["destinations"] == [-10001]
     assert store.recent_activity() == []
     with sqlite3.connect(path) as database:
-        assert database.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert database.execute("PRAGMA user_version").fetchone()[0] == 3
 
 
 def test_same_user_request_from_two_chats_preserves_both_destinations(tmp_path: Path) -> None:
@@ -164,3 +164,34 @@ def test_failed_numbered_migration_rolls_back_its_changes(
             ).fetchone()[0]
             == 0
         )
+
+
+def test_v3_migration_preserves_sent_receipts_and_series_subscriptions(tmp_path: Path) -> None:
+    path = tmp_path / "state.sqlite3"
+    with sqlite3.connect(path) as database:
+        database.row_factory = sqlite3.Row
+        _migration_1(database)
+        _migration_2(database)
+        database.execute("INSERT INTO deliveries VALUES ('episode:1', 1001, 50)")
+    store = Store(path)
+    assert store.delivery_finished(["episode:1"], 1001)
+    with store._db() as database:
+        assert dict(database.execute("SELECT * FROM deliveries").fetchone()) == {
+            "event_key": "episode:1",
+            "chat_id": 1001,
+            "finished_at": 50,
+            "status": "sent",
+        }
+    request = store.record_request(
+        media_type="series",
+        external_id=123,
+        seasons=(1,),
+        title="Show",
+        year=2026,
+        actor=Actor(user_id=1001, chat_id=1001),
+    )
+    store.complete_request(request, "available")
+    store.prune(now=int(time.time()) + 61 * 24 * 60 * 60)
+    assert store.request_destinations(media_type="series", external_id=123, season_number=1) == {
+        (1001, 1001)
+    }

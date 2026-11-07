@@ -1,9 +1,14 @@
-# The CRBL platform hint is deliberately absent. It lives only in
-# hermes_media.plugin.PLATFORM_HINT and is installed onto Hermes' hint resolver
-# at plugin registration, so no copy of it belongs in a config file.
+# Deliberately obsolete host overrides: startup must prove that neither can
+# replace the native Telegram hint or survive alongside current CRBL guidance.
 # max_web_searches is a native Hermes setting with no counterpart in this repo,
 # so it stays here as the canonical value.
 _config_version: 36
+platform_hints:
+  telegram:
+    replace: "Obsolete CRBL formatting override."
+    append: "Call repair_blocked_imports and use the numbered-reply picker."
+  discord:
+    append: "Unrelated platform guidance must be left alone."
 tool_loop_guardrails:
   loop_caps:
     max_web_searches: 10

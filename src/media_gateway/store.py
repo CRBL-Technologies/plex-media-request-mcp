@@ -53,11 +53,14 @@ class Store:
                 db.executemany("DELETE FROM deliveries WHERE event_key=?", parameters)
                 db.executemany("DELETE FROM media_events WHERE event_key=?", parameters)
             db.execute(
-                "DELETE FROM requests WHERE state='available' AND fulfilled_at < ?", (cutoff,)
+                "DELETE FROM requests WHERE media_type='movie' AND state='available' "
+                "AND fulfilled_at < ?",
+                (cutoff,),
             )
             db.execute(
                 """DELETE FROM users WHERE last_seen < ? AND user_id NOT IN
-                (SELECT user_id FROM requests WHERE state IN ('pending','requested','unknown'))""",
+                (SELECT user_id FROM requests WHERE media_type='series'
+                    OR state IN ('pending','requested','unknown'))""",
                 (cutoff,),
             )
 
@@ -303,13 +306,16 @@ class Store:
             ).fetchall()
         return [self._request_row(row, destinations=[]) for row in rows]
 
-    def requests_for(self, user_id: int, *, all_users: bool = False) -> list[dict[str, Any]]:
+    def requests_for(
+        self, user_id: int, *, all_users: bool = False, limit: int = 100, offset: int = 0
+    ) -> list[dict[str, Any]]:
         query = "SELECT * FROM requests"
         parameters: tuple[object, ...] = ()
         if not all_users:
             query += " WHERE user_id=?"
             parameters = (user_id,)
-        query += " ORDER BY id DESC LIMIT 100"
+        query += " ORDER BY id DESC LIMIT ? OFFSET ?"
+        parameters += (min(max(limit, 1), 100), max(offset, 0))
         with self._db() as db:
             rows = db.execute(query, parameters).fetchall()
             destinations = self._destinations(db, [int(row["id"]) for row in rows])
@@ -459,7 +465,8 @@ class Store:
                 FROM requests JOIN request_destinations
                     ON request_destinations.request_id=requests.id
                 WHERE requests.media_type=? AND requests.external_id=?
-                    AND requests.state IN ('pending','requested','unknown')""",
+                    AND (requests.media_type='series'
+                        OR requests.state IN ('pending','requested','unknown'))""",
                 (media_type, external_id),
             ).fetchall()
         destinations: set[tuple[int, int]] = set()
@@ -475,8 +482,7 @@ class Store:
         with self._db() as db:
             rows = db.execute(
                 """SELECT seasons FROM requests
-                WHERE media_type='series' AND external_id=?
-                    AND state IN ('pending','requested','unknown')""",
+                WHERE media_type='series' AND external_id=?""",
                 (external_id,),
             ).fetchall()
         result: set[int] = set()
@@ -501,7 +507,7 @@ class Store:
                 (now, now, external_id),
             )
 
-    def delivered(self, event_keys: Iterable[str], chat_id: int) -> bool:
+    def delivery_finished(self, event_keys: Iterable[str], chat_id: int) -> bool:
         keys = tuple(event_keys)
         if not keys:
             return True
@@ -515,15 +521,23 @@ class Store:
                 for key in keys
             )
 
-    def mark_delivered(self, event_keys: Iterable[str], chat_id: int) -> None:
+    def mark_delivered(
+        self, event_keys: Iterable[str], chat_id: int, *, blocked: bool = False
+    ) -> None:
         now = int(time.time())
         keys = tuple(event_keys)
         with self._db() as db:
             db.executemany(
-                """INSERT OR IGNORE INTO deliveries(event_key, chat_id, delivered_at)
-                VALUES (?, ?, ?)""",
-                ((key, chat_id, now) for key in keys),
+                """INSERT OR IGNORE INTO deliveries(event_key, chat_id, finished_at, status)
+                VALUES (?, ?, ?, ?)""",
+                ((key, chat_id, now, "blocked" if blocked else "sent") for key in keys),
             )
+            if blocked:
+                db.execute(
+                    """INSERT INTO activity(occurred_at, kind, user_id, label)
+                    VALUES (?, 'delivery_failed', NULL, ?)""",
+                    (now, f"Telegram destination {chat_id} is unavailable; delivery abandoned"),
+                )
 
     def mark_events_notified(self, event_keys: Iterable[str]) -> None:
         keys = tuple(event_keys)

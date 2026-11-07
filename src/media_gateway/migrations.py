@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 TABLE_COLUMNS = {
     "users": {
@@ -48,7 +48,7 @@ TABLE_COLUMNS = {
         "observed_at",
         "notified_at",
     },
-    "deliveries": {"event_key", "chat_id", "delivered_at"},
+    "deliveries": {"event_key", "chat_id", "finished_at", "status"},
 }
 
 
@@ -72,6 +72,9 @@ def migrate(database: sqlite3.Connection) -> None:
     if version == 1:
         _migration_2(database)
         version = 2
+    if version == 2:
+        _migration_3(database)
+        version = 3
     database.execute(f"PRAGMA user_version={version}")
     _validate(database)
 
@@ -187,6 +190,21 @@ def _migration_2(database: sqlite3.Connection) -> None:
         SELECT id, chat_id, created_at FROM requests_v1;
         DROP TABLE requests_v1;
         PRAGMA user_version=2;
+        COMMIT;
+        """
+    )
+
+
+def _migration_3(database: sqlite3.Connection) -> None:
+    """Preserve sent receipts and distinguish permanently blocked destinations."""
+
+    database.executescript(
+        """
+        BEGIN IMMEDIATE;
+        ALTER TABLE deliveries RENAME COLUMN delivered_at TO finished_at;
+        ALTER TABLE deliveries ADD COLUMN status TEXT NOT NULL DEFAULT 'sent'
+            CHECK(status IN ('sent', 'blocked'));
+        PRAGMA user_version=3;
         COMMIT;
         """
     )

@@ -72,7 +72,7 @@ def install_tool_visibility(
 
 
 def install_platform_hint(*, platform: str, platform_hint: str) -> None:
-    """Append the CRBL guidance to the resolved prompt for one platform.
+    """Own one platform's hint while retaining Hermes' native formatting.
 
     Hermes resolves a platform's default hint from its own built-in
     ``PLATFORM_HINTS`` table and only consults a plugin's registered
@@ -82,9 +82,10 @@ def install_platform_hint(*, platform: str, platform_hint: str) -> None:
     ungoverned file on the host a second source of truth for text that has to
     change in lockstep with the tools it describes.
 
-    Wrapping the resolver keeps that single source in code. The guidance is
-    appended to whatever Hermes resolved, so a config override still applies
-    and is not silently discarded.
+    Telegram overrides (append, replace, or shorthand) are deliberately
+    ignored at assembly: old CRBL instructions must not survive beside the
+    current tools. No config is rewritten, and other platforms still resolve
+    their overrides normally.
     """
 
     try:
@@ -97,15 +98,9 @@ def install_platform_hint(*, platform: str, platform_hint: str) -> None:
     target = platform.lower().strip()
 
     def resolved(agent: Any, platform_key: str, default_hint: str, *args: Any, **kw: Any) -> str:
-        effective = original(agent, platform_key, default_hint, *args, **kw)
         if str(platform_key).lower().strip() != target:
-            return str(effective)
-        text = str(effective)
-        # Idempotent by content as well as by patch flag: a config override
-        # that still carries the guidance must not produce it twice.
-        if platform_hint in text:
-            return text
-        return f"{text}\n\n{platform_hint}".strip() if text else platform_hint
+            return str(original(agent, platform_key, default_hint, *args, **kw))
+        return f"{default_hint}\n\n{platform_hint}".strip()
 
     resolved.__crbl_media__ = True  # type: ignore[attr-defined]
     system_prompt._resolve_platform_hint = resolved
@@ -166,7 +161,12 @@ async def send_single_result_card(
 
 
 def verify_pinned_runtime(
-    *, manager: object, expected_tools: set[str], platform_hint: str, soul: str
+    *,
+    manager: object,
+    expected_tools: set[str],
+    platform_hint: str,
+    soul: str,
+    config: Mapping[str, Any],
 ) -> None:
     """Fail closed when any private pinned-Hermes integration contract moves."""
 
@@ -214,20 +214,16 @@ def verify_pinned_runtime(
         raise RuntimeError("CRBL platform-hint installer is not active")
     if "telegram" not in PLATFORM_HINTS:
         raise RuntimeError("Hermes no longer resolves a built-in Telegram hint")
-    # Resolve with no config override at all: the guidance must reach the
-    # assembled prompt from the code constant alone, or the single source of
-    # truth is not actually installed.
+    # Use the same configured overrides as the agent, not an empty stand-in:
+    # stale append/replace instructions must not survive prompt assembly.
     effective = resolve_hint(
-        SimpleNamespace(_platform_hint_overrides={}),
+        SimpleNamespace(_platform_hint_overrides=config.get("platform_hints", {})),
         "telegram",
         PLATFORM_HINTS["telegram"],
     )
-    if platform_hint not in effective:
-        raise RuntimeError("CRBL media guidance is absent from the effective Telegram prompt")
-    # The built-in hint must survive alongside it; replacing Hermes' own
-    # Telegram formatting guidance would break MarkdownV2 output.
-    if PLATFORM_HINTS["telegram"] not in effective:
-        raise RuntimeError("CRBL guidance replaced rather than extended the Telegram hint")
+    expected_hint = f"{PLATFORM_HINTS['telegram']}\n\n{platform_hint}".strip()
+    if effective != expected_hint:
+        raise RuntimeError("effective Telegram prompt differs from the code-owned hint")
     # The identity slot is an ordinary file read from HERMES_HOME, so a skipped
     # install, a host copy edited by hand and a context limit that truncates the
     # file all present identically: the agent serves without the identity it was

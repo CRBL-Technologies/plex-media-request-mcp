@@ -29,7 +29,6 @@ from .trusted import (
     claim_card_slot,
     current_role,
     require_actor,
-    session_key_from_event,
 )
 
 PLATFORM = "telegram"
@@ -48,6 +47,12 @@ PLATFORM_HINT = (
     "research with web_search. "
     "Adding to the library is the only thing you can change here, so do it when asked and never "
     "report something as requested unless a tool said so. "
+    "When the user clarifies a previous match by number, year, or media type, resolve that "
+    "choice with recommend_media using the full title, year when known, and media type. "
+    "This refreshes availability and sends the selected poster; a clarification alone is "
+    "not permission to request it. If the resolved title is missing and the user has not "
+    "already asked to add it, offer naturally: 'Should I get it?' For a series, ask which "
+    "seasons if they have not specified them. Unknown availability is not missing. "
     "A single resolved media result is also posted to the chat as a poster, carrying a link "
     "that opens "
     "Plex when the title is held; at most one poster is posted per message, so do not describe "
@@ -104,22 +109,10 @@ class MediaTelegramAdapter(_NativeAdapter):  # type: ignore[misc, valid-type]
     async def handle_message(self, event: object) -> object:
         self._media_delivery_loop = asyncio.get_running_loop()
         actor = actor_from_event(event)
-        extra = getattr(self.config, "extra", None)
-        extra = extra if isinstance(extra, Mapping) else {}
-        session_key = session_key_from_event(
-            event,
-            actor,
-            group_sessions_per_user=bool(extra.get("group_sessions_per_user", True)),
-            thread_sessions_per_user=bool(extra.get("thread_sessions_per_user", False)),
-        )
         role = await _gateway().observe(actor)
         if role is Role.BLOCKED:
             raise PermissionError("Telegram user is not allowed")
-        with actor_scope(
-            actor,
-            role,
-            session_key,
-        ):
+        with actor_scope(actor, role):
             result = super().handle_message(event)
             return await result if inspect.isawaitable(result) else result
 
@@ -271,9 +264,10 @@ async def _decorate_search_result(
             "poster_cards_delivered": False,
             "selection_status": "conversational",
             "instruction": (
-                "Several titles match. List them in your reply with year, media type and "
-                "whether each is on Plex, and ask which one the user means. Never claim a "
-                "selection was made, and request nothing until they answer."
+                "Several titles match. Present a numbered list (1., 2., 3., etc.) in the "
+                "returned order, with each title, year, media type and Plex availability. "
+                "Ask which one the user means and invite them to reply with its number or "
+                "title. Never claim a selection was made, and request nothing until they answer."
             ),
         }
         return decorated
@@ -334,7 +328,9 @@ async def _decorate_search_result(
             "it fits the user's question. If the current user message "
             "explicitly asks to add or request it, call the matching request tool now; a "
             "series still needs its seasons named. Otherwise this is a read-only lookup: "
-            "never imply it was requested."
+            "never imply it was requested. If the title is missing, offer to get it "
+            "('Should I get it?'); for a series, ask which seasons if unspecified. "
+            "Do not treat unknown availability as missing."
         ),
     }
     return decorated

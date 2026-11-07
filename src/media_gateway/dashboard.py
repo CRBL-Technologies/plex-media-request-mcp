@@ -140,7 +140,7 @@ def dashboard_page(
 placeholder="Telegram user ID" required><button class="btn">Allow user</button></form></div><div class="table-wrap"><table>
 <thead><tr><th>User</th><th>Telegram ID</th><th>Role</th><th>Last seen</th><th>Last blocked</th><th></th></tr></thead>
 <tbody>{user_rows}</tbody></table></div></section><section class="panel" id="requests"><div class="panel-head"><h2>Requests</h2></div>
-<div class="table-wrap"><table><thead><tr><th>Title</th><th>Type</th><th>Seasons</th><th>Requester</th><th>Status</th><th>Destinations</th><th>Created</th></tr></thead>
+<div class="table-wrap"><table><thead><tr><th>Title</th><th>Type</th><th>Seasons</th><th>Requester</th><th>Last request outcome</th><th>Destinations</th><th>Created</th></tr></thead>
 <tbody>{request_rows}</tbody></table></div>{_pager(requests, section="requests", other=activity)}</section><section class="panel" id="activity"><div class="panel-head"><h2>Activity</h2></div>
 <div class="table-wrap"><table><thead><tr><th>Time</th><th>Event</th><th>User ID</th><th>Detail</th></tr></thead>
 <tbody>{activity_rows}</tbody></table></div>{_pager(activity, section="activity", other=requests)}</section></main>"""
@@ -148,23 +148,18 @@ placeholder="Telegram user ID" required><button class="btn">Allow user</button><
 
 
 def _request_status(item: dict[str, Any]) -> str:
-    """One status per request.
-
-    ``state`` is derived from ``provider_status`` ("available" or otherwise),
-    so showing both said the same thing twice while hiding the distinction the
-    operator actually needs: whether an active acquisition is still hunting a
-    release or already waiting on a Plex scan.
-    """
+    """Show the recorded command outcome, not a claim about live acquisition."""
 
     state = str(item["state"])
     if state in {"pending", "unknown"}:
         return {"pending": "Intent pending", "unknown": "Needs reconciliation"}[state]
     provider_status = str(item.get("provider_status") or "")
     return {
-        "available": "Available",
-        "awaiting_plex": "Waiting for Plex",
-        "search_started": "Searching for a release",
-        "requested": "Queued in Radarr/Sonarr",
+        "available": "Available when checked",
+        "awaiting_plex": "Import accepted",
+        "search_started": "Search command accepted",
+        "monitoring_updated": "Season monitoring enabled",
+        "requested": "Request accepted",
     }.get(provider_status, provider_status.replace("_", " ").title() or state.title())
 
 

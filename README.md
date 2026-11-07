@@ -326,7 +326,7 @@ The owner mounts an owner-only regular file at `/run/secrets/onepassword.json`,
 read-only and owned by UID 1000. Its JSON object has exactly two string fields:
 `environment_id` and `service_account_token`. Neither value belongs in Git,
 image layers, Compose environment values or Portainer variables. The approved
-CLI is 2.41.1 at the pinned Dockerfile digest. Do not use an assistant credential.
+CLI is 2.42.0 at the pinned Dockerfile digest. Do not use an assistant credential.
 
 The gateway Environment must contain all twelve existing app-option names in
 `media_gateway.managed_start.APP_KEYS`, including both tag lists even when empty.

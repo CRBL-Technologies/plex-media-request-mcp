@@ -27,7 +27,7 @@ from starlette.types import ASGIApp
 from media_gateway import plex_watch
 from media_gateway.app import COOKIE, create_app
 from media_gateway.config import Config
-from media_gateway.constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
+from media_gateway.constants import SHARED_TOOLS
 from media_gateway.dashboard import _request_status
 from media_gateway.notifications import _group_pending_events
 from media_gateway.types import Actor, Role
@@ -1040,27 +1040,6 @@ def test_upstream_errors_do_not_leak_provider_details(config: Config) -> None:
         assert response.status_code == 502
         assert response.json()["error"] == "media service is temporarily unavailable"
         assert "secret" not in response.text
-
-
-def test_schema_endpoint_requires_every_pinned_admin_tool(config: Config) -> None:
-    app = create_app(config)
-    fake = FakeUpstream()
-    fake.tool_schemas = [
-        {"name": name, "description": name, "inputSchema": {"type": "object"}}
-        for name in sorted(ADMIN_UPSTREAM_TOOLS)
-    ] + [{"name": "future_tool", "description": "ignored", "inputSchema": {}}]
-    with TestClient(app) as client:
-        app.state.runtime.tools.upstream = fake
-        unauthorized = client.get("/api/schema")
-        assert unauthorized.status_code == 401
-        response = client.get("/api/schema", headers=_headers())
-        assert response.status_code == 200
-        tools = response.json()["tools"]
-        expected = {name: "shared" for name in SHARED_TOOLS}
-        expected.update({name: "admin" for name in ADMIN_UPSTREAM_TOOLS})
-        assert {item["name"]: item["scope"] for item in tools} == expected
-        assert len(tools) == len(expected)
-        assert "future_tool" not in {item["name"] for item in tools}
 
 
 def test_admin_proxy_preserves_nested_upstream_results(config: Config) -> None:

@@ -9,7 +9,6 @@ permissions:
 
 env:
   PYTHON_BASE_IMAGE: python:3.12-slim@sha256:dd29372629eeba2dd003fd9e9d35a5b8236c44727875a0364254b5127af88e65
-  HERMES_BASE_IMAGE: nousresearch/hermes-agent@sha256:9c5561579f3ffdf333401797094ac3a743738d6c25d40f4331c7bf77b694238d
 
 jobs:
   verify:
@@ -30,11 +29,10 @@ jobs:
           mypy src
           pytest -q
           pip-audit -r requirements.txt --require-hashes
-          pip-audit -r deployment/hermes-requirements.txt --require-hashes
       - name: Validate Compose
         env:
           MEDIA_GATEWAY_IMAGE: ghcr.io/crbl-technologies/media-request-companion@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-          HERMES_MEDIA_IMAGE: ghcr.io/crbl-technologies/hermes-media@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          MEDIA_BOT_MODEL: openai/ci
           HERMES_DATA_DIR: /tmp/hermes
           GATEWAY_STATE_DIR: /tmp/state
           UPSTREAM_ENV_FILE: ${{ github.workspace }}/deployment/upstream.env.example
@@ -44,7 +42,7 @@ jobs:
           DASHBOARD_SESSION_KEY_FILE: /tmp/session.key
           PLEX_WEBHOOK_TOKEN_FILE: /tmp/plex.key
           GATEWAY_ONEPASSWORD_FILE: /tmp/onepassword.json
-          HERMES_ONEPASSWORD_FILE: /tmp/hermes-onepassword.json
+          BOT_ONEPASSWORD_FILE: /tmp/bot-onepassword.json
           UPSTREAM_ONEPASSWORD_FILE: /tmp/upstream-onepassword.json
           MEDIA_UPSTREAM_IMAGE: ghcr.io/crbl-technologies/media-server-mcp-managed@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
         run: |
@@ -103,75 +101,12 @@ jobs:
             --build-arg SOURCE_COMMIT="$GITHUB_SHA" \
             -f deployment/Dockerfile.gateway -t crbl-media-gateway-managed:ci .
           test "$(docker run --rm --network none --entrypoint /usr/local/bin/op crbl-media-gateway-managed:ci --version)" = '2.41.1'
-      - name: Build Hermes adapter
-        run: >-
-          docker build --build-arg HERMES_BASE_IMAGE="$HERMES_BASE_IMAGE"
-          --build-arg SOURCE_COMMIT="$GITHUB_SHA"
-          -f deployment/Dockerfile.hermes -t crbl-hermes-media:ci .
-      - name: Verify native Hermes compatibility
-        run: |
-          python -m pip install --target "$RUNNER_TEMP/hermes-test-deps" 'pytest>=8.4,<9' 'pytest-asyncio>=1.1,<2'
-          docker run --rm --network none --entrypoint /opt/hermes/.venv/bin/python \
-            --tmpfs /opt/data --tmpfs /tmp \
-            -e HERMES_HOME=/opt/data -e PYTHONPATH=/testdeps:/opt/hermes \
-            -v "$RUNNER_TEMP/hermes-test-deps:/testdeps:ro" \
-            -v "$GITHUB_WORKSPACE:/tests:ro" \
-            crbl-hermes-media:ci -m pytest -q -c /tests/pyproject.toml \
-            /tests/tests/test_hermes.py /tests/tests/test_managed_hermes.py -k pinned_runtime -p no:cacheprovider
       - name: Build and verify managed media images
         run: |
-          docker build --target managed --build-arg HERMES_BASE_IMAGE="$HERMES_BASE_IMAGE" \
-            --build-arg SOURCE_COMMIT="$GITHUB_SHA" \
-            -f deployment/Dockerfile.hermes -t crbl-hermes-media-managed:ci .
           docker build --build-arg SOURCE_COMMIT="$GITHUB_SHA" \
             -f deployment/Dockerfile.upstream-managed -t crbl-media-upstream-managed:ci .
           docker run --rm --network none --entrypoint deno \
             -v "$GITHUB_WORKSPACE/tests/upstream_runtime_test.ts:/app/tests/upstream_runtime_test.ts:ro" \
             crbl-media-upstream-managed:ci test --allow-read --allow-write --allow-env --allow-run --allow-sys /app/tests/upstream_runtime_test.ts
-          docker run --rm --network none --entrypoint /opt/hermes/.venv/bin/python \
-            -v "$GITHUB_WORKSPACE/tests/hermes_managed_smoke.py:/tests/hermes_managed_smoke.py:ro" \
-            crbl-hermes-media-managed:ci /tests/hermes_managed_smoke.py
           python tests/managed_container_smoke.py \
-            crbl-media-gateway-managed:ci crbl-hermes-media-managed:ci crbl-media-upstream-managed:ci
-          python tests/container_hardening_smoke.py crbl-hermes-media-managed:ci
-      - name: Verify Hermes adapter under s6-overlay
-        shell: bash
-        run: |
-          set -euo pipefail
-          network="crbl-hermes-ci-$GITHUB_RUN_ID"
-          stub="crbl-gateway-stub-$GITHUB_RUN_ID"
-          cleanup() {
-            docker rm -f "$stub" >/dev/null 2>&1 || true
-            docker network rm "$network" >/dev/null 2>&1 || true
-          }
-          trap cleanup EXIT
-          smoke="$RUNNER_TEMP/hermes-adapter-smoke"
-          mkdir -p "$smoke/data"
-          chmod 0777 "$smoke/data"
-          cp "$GITHUB_WORKSPACE/tests/hermes_config_smoke.yaml" "$smoke/data/config.yaml"
-          chmod 0666 "$smoke/data/config.yaml"
-          printf '%064d\n' 0 > "$smoke/gateway.key"
-          docker network create "$network" >/dev/null
-          docker run --detach --rm --name "$stub" --network "$network" --network-alias gateway \
-            -e PYTHONPATH=/app/src \
-            -v "$GITHUB_WORKSPACE/src:/app/src:ro" \
-            -v "$GITHUB_WORKSPACE/tests/hermes_gateway_stub.py:/app/stub.py:ro" \
-            python:3.12-slim@sha256:dd29372629eeba2dd003fd9e9d35a5b8236c44727875a0364254b5127af88e65 \
-            python /app/stub.py >/dev/null
-          docker run --rm --network "$network" \
-            -v "$smoke/data:/opt/data" \
-            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=128m \
-            --tmpfs /run:rw,exec,nosuid,nodev,size=64m \
-            -e HERMES_UID=1000 \
-            -e HERMES_GID=1000 \
-            -e HERMES_HOME=/opt/data \
-            -e CRBL_MEDIA_GATEWAY_URL=http://gateway:18082 \
-            -e CRBL_MEDIA_GATEWAY_TOKEN_FILE=/run/media-secrets/gateway.key \
-            -v "$smoke/gateway.key:/run/media-secrets/gateway.key:ro" \
-            crbl-hermes-media:ci true
-          # The identity file must be installed into HERMES_HOME by the init
-          # script, byte for byte from the image. Compare from inside a
-          # container: the base image leaves HERMES_HOME mode 0700 owned by
-          # the agent's uid, so the runner cannot traverse into it.
-          docker run --rm -v "$smoke/data:/data:ro" -v "$GITHUB_WORKSPACE/src:/src:ro" \
-            "$PYTHON_BASE_IMAGE" python -c 'import pathlib, sys; sys.exit(0 if pathlib.Path("/src/hermes_media/SOUL.md").read_bytes() == pathlib.Path("/data/SOUL.md").read_bytes() else "SOUL.md in HERMES_HOME is not the shipped identity")'
+            crbl-media-gateway-managed:ci crbl-media-upstream-managed:ci

@@ -17,11 +17,18 @@ The media subsystem has three services:
 1. `media-server-mcp`: the untouched, pinned upstream MCP on an internal network;
 2. `media-gateway`: CRBL policy, safe tools, Plex notifications, SQLite state,
    and the LAN/Tailscale dashboard;
-3. `hermes-media`: the pinned Hermes image plus a thin Telegram identity adapter.
+3. `media-bot`: the CRBL Telegram bot. It runs from the gateway image with a
+   different entrypoint, so there is no separate bot image.
 
 The Portainer definition owns only those three media services. General Hermes
 and accountant agents use a separate stack and release lifecycle while sharing
 the external `media` network where required.
+
+The bot long-polls Telegram and runs one model tool loop per message through
+OpenRouter's chat-completions API. `MEDIA_BOT_MODEL` selects the model. The bot
+holds the Telegram token, the OpenRouter key and the gateway bearer, and nothing
+else. It asks the gateway for each actor's role and for the tools that role may
+use, then lets the model call only those tools.
 
 The gateway exposes exactly eight media tools to an allowed Telegram user:
 
@@ -34,16 +41,12 @@ The gateway exposes exactly eight media tools to an allowed Telegram user:
 - `browse_library`
 - `media_status`
 
-The Hermes adapter additionally exposes its native `web_search` tool through
-the search-only toolset. It uses the bundled DuckDuckGo provider for current
-movie recommendations, release dates, and viewing-order research. The image
-bakes a hash-locked provider dependency; it does not expose `web_extract`,
-browser automation, files, a shell, or arbitrary URL fetching. Hermes treats
-search results as untrusted web content. The adapter clamps the native runaway
-guardrail to ten web searches per response through Hermes' canonical
-`tool_loop_guardrails.loop_caps.max_web_searches` setting. The image startup
-gate refuses to run if the persisted value is absent or different, so the
-agent and release verifier always read the same setting.
+The bot additionally exposes one `web_search` tool. It uses the hash-locked
+`ddgs` DuckDuckGo client for current movie recommendations, release dates, and
+viewing-order research, and returns only titles, links and short snippets. There
+is no page fetching, browser, file access or shell. The tool description marks
+results as untrusted web content. Each user message may run at most ten web
+searches (`media_bot.bot.WEB_SEARCH_CAP`).
 
 Configured administrators also receive the reviewed Plex/Radarr/Sonarr tools
 discovered from the pinned upstream MCP. Future upstream tools are not admitted
@@ -64,8 +67,8 @@ to exactly one result is posted as that poster, carrying an `Open in Plex` link
 when the title is held and no button at all otherwise. That link is the only
 control a card has ever offered: there is no picker and no button that acts.
 At most one poster is posted per user message, however many searches a turn
-makes. Remote poster URLs are never sent through Hermes' local-file `MEDIA:`
-convention.
+makes. Telegram fetches the poster itself; the bot passes on only a plain
+HTTPS URL.
 
 The tools describe what they do and the model decides which to use. The
 platform hint carries only what cannot be inferred: that Telegram identity is
@@ -78,14 +81,13 @@ library cannot know -- is the model's call.
 Conversation history is never a valid substitute for a current provider result,
 which is why the hint names the tools as the only source of truth rather than
 prescribing when to call them. That guidance has exactly one copy,
-`hermes_media.plugin.PLATFORM_HINT`. Hermes prefers its own built-in Telegram
-hint over a plugin's registered one, so the plugin installs its text on Hermes'
-hint resolver at registration instead of mirroring it into
-`platform_hints.telegram.append`; a config file that is not in this repository
-must never be a second source of truth for text that changes with the tools it
-describes. The image startup gate resolves the prompt with no config override at
-all and refuses to start unless the guidance arrived and Hermes' own Telegram
-hint survived beside it.
+`media_bot.prompt.TELEGRAM_GUIDANCE`.
+
+The bot keeps a short conversation per user and chat in memory: the last ten
+exchanges, reset after two idle hours, by `/new` or `/reset`, and on restart.
+It keeps only the user's words and its final replies, not tool results. Messages
+from one user in one chat are answered in order. In groups the bot answers only
+when it is mentioned or when a message replies to it. It reads text only.
 
 Upstream 2.3.0 lists `radarr_get_queue` in its full profile but does not register
 the tool. The gateway therefore contains one narrow read-only Radarr queue call;
@@ -142,20 +144,17 @@ older images intentionally refuse newer schemas.
 
 ## Authorization
 
-The Telegram actor is extracted from Hermes' native Telegram update before the
-model runs. Model arguments never supply identity. The gateway rechecks the
-current `TELEGRAM_ALLOWED_USERS` / `TELEGRAM_ADMIN_USERS` policy on every tool
-call. The dashboard changes only `TELEGRAM_ALLOWED_USERS`, using a locked atomic
-rewrite of Hermes' canonical `.env`; it never promotes or removes an admin.
+The Telegram actor is taken from the `from` and `chat` fields of the Telegram
+update before the model runs. Messages from bots are ignored. Model arguments
+never supply identity. Blocked users are recorded by the gateway and get no
+reply; the model never sees their messages. If the gateway cannot answer, the
+bot says so in private chats and stays silent in groups, and runs no model turn. The gateway rechecks the current
+`TELEGRAM_ALLOWED_USERS` / `TELEGRAM_ADMIN_USERS` policy on every tool call.
+The dashboard changes only `TELEGRAM_ALLOWED_USERS`, using a locked atomic
+rewrite of the policy `.env`; it never promotes or removes an admin.
 
-Group and topic sessions are isolated per user in both Hermes' queue and history.
-The executing handler rechecks identity and role for queued turns. Native shared
-unmentioned-group observation is disabled; private-chat session keys are unchanged.
-Poster cards preserve the originating topic and private-topic reply anchor.
-
-If the CRBL plugin does not load completely, the container startup gate fails.
-If it fails before replacement, Hermes' native Telegram allowlist remains the
-fallback admission boundary.
+Conversations are kept per user and chat, so group members never share history.
+In groups, replies and poster cards answer the triggering message.
 
 The dashboard is password protected with a scrypt hash, server-side signed
 sessions, strict same-site cookies, and CSRF tokens. It shows real observed and
@@ -185,34 +184,22 @@ are served locally under the existing same-origin content security policy.
 Copy the examples in `deployment/` and provide only host paths and immutable
 image references as Portainer stack variables. Runtime settings live once in
 `gateway.env`; upstream provider credentials live once in `upstream.env`; key
-material is stored in individual read-only files.
+material is stored in individual read-only files. In the public recipe the bot
+reads `TELEGRAM_BOT_TOKEN` and `OPENROUTER_API_KEY` from the policy `.env`, and
+the `MEDIA_BOT_MODEL` stack variable selects its OpenRouter model.
 
 The dashboard binds NAS port `18082` for LAN/Tailscale access. Port `18081` is
-loopback-only for the host-network Plex webhook. The Hermes dashboard and Docker
-socket are absent. The upstream MCP has no published port.
+loopback-only for the host-network Plex webhook. The Docker socket is absent.
+The upstream MCP and the bot have no published port.
 
-The media agent's canonical `/opt/data/config.yaml` must contain:
-
-```yaml
-tool_loop_guardrails:
-  loop_caps:
-    max_web_searches: 10
-```
-
-This is a native Hermes setting, not a second CRBL configuration source.
-
-The agent's prompt comes from three tiers, each versioned in this repository. A
+The bot's prompt comes from three tiers, each versioned in this repository. A
 tool says what it does in its own `description` and `inputSchema`, so choosing
-between tools needs no instruction elsewhere. `PLATFORM_HINT` carries what is
-true of the Telegram channel whichever tools exist. `src/hermes_media/SOUL.md`
+between tools needs no instruction elsewhere. `TELEGRAM_GUIDANCE` carries what
+is true of the Telegram channel whichever tools exist. `src/media_bot/SOUL.md`
 carries what is true whichever platform and tools exist: identity, tone, and the
 rules about never claiming availability, an ETA, or a request the tools did not
-confirm. It names no tool, and a test enforces that.
-
-The init script installs `SOUL.md` into `HERMES_HOME` on every start, so the
-host copy is a build artifact and an edit made there does not outlive a deploy.
-The startup gate then reads it back through Hermes' own loader and refuses to
-serve if the identity it was built with is not the one the agent will use.
+confirm. It names no tool, and a test enforces that. All three ship in the
+image; nothing on the host can change them.
 
 A Plex arrival is announced once the title has been quiet for
 `MEDIA_GATEWAY_NOTIFICATION_DELAY_SECONDS` (5 seconds), so a season import is
@@ -240,49 +227,16 @@ retired after its production recovery was completed and verified.
 
 ### Container restrictions and remaining exceptions
 
-Both Compose recipes keep the gateway and upstream at UID/GID `1000:1000`,
-with read-only root filesystems, no Linux capabilities, and
-`no-new-privileges`. The gateway database directory remains writable.
+All three services in both Compose recipes run at UID/GID `1000:1000`, with
+read-only root filesystems, no Linux capabilities, and `no-new-privileges`. The
+gateway database directory remains writable. The bot writes only to tmpfs.
 
-Hermes now has a read-only root filesystem. Its image prepares the established
-UID/GID `1000:1000` at build time, so startup does not need to edit `/etc/passwd`
-or `/etc/group`. The two recipes require this identity. Do not change those
-runtime IDs with a read-only root filesystem. `/tmp` and `/run` remain tmpfs;
-the existing native Hermes data directory remains writable. No host ownership
-migration is part of this change.
-
-Hermes is **not a fully non-root container**. Its pinned vendor s6 supervisor
-still starts as root and drops the application to UID/GID `1000:1000`. The
-application has no effective capabilities. The supervisor drops all default
-capabilities, then retains only these startup and shutdown requirements:
-
-| Capability | Required operation |
-| --- | --- |
-| `CHOWN` | Set ownership of s6 control paths and managed tmpfs directories. |
-| `DAC_OVERRIDE` | Access s6 control paths after their ownership moves to the application user. |
-| `FOWNER` | Set permissions on managed directories after their ownership changes. |
-| `SETUID`, `SETGID` | Start native services and managed retrieval as the application user. |
-| `KILL` | Stop supervised processes owned by the application user. |
-
-The gateway's broad writable Hermes-data mount is a remaining exception.
-The gateway needs the canonical `.env` policy, but it does not need Hermes'
-model configuration, logs, sessions, or OAuth state. Its policy editor creates
-a lock file and a temporary file beside `.env`, then atomically replaces `.env`.
-A read-only parent prevents dashboard allowlist edits. A single-file bind mount
-cannot support replacement of that mount point. Removing this exposure needs
-a separately approved native policy-layout change; it is not solved by these
-container restrictions. Preserve policy edits and the native state layout until
-that change has its own migration and rollback proof.
-
-Run `python tests/container_hardening_smoke.py MANAGED_HERMES_IMAGE` to check the
-packaged native startup, exact plugin contract, managed dummy retrieval, real
-launcher, process privileges, read-only root filesystem, and graceful stop.
-The test uses synthetic files, an anonymous data volume, and a loopback stub.
-It has no external network or host mounts. It does not verify real credential
-retrieval, Telegram delivery, model calls, or the destination host's permissions.
-Those checks remain gates for a separately approved rollout. Pair the new
-Compose restrictions with an image built from this Dockerfile; older images
-still try to change the account database during startup.
+The gateway's writable mount of the policy directory remains an exception. Its
+policy editor creates a lock file and a temporary file beside `.env`, then
+atomically replaces `.env`, so a read-only parent or a single-file bind mount
+would prevent dashboard allowlist edits. The public recipe's bot mounts that
+`.env` read-only as a single file, because it reads its secrets from it once at
+startup.
 
 ## Development
 
@@ -299,7 +253,7 @@ python -m venv .venv
 ```
 
 Runtime dependencies are hash-locked in `requirements.txt`. CI repeats the
-checks, validates Compose, and builds both CRBL images from digest-pinned bases.
+checks, validates Compose, and builds the CRBL images from digest-pinned bases.
 Publishing records immutable image digests, SBOMs, and provenance.
 
 ### Image channels and runtime migration boundary
@@ -312,10 +266,10 @@ Record the digest from the workflow summary before an approved update. Use that
 digest to recover the exact image; a channel tag can move. Keep the existing
 database-backup procedure when a release changes its schema.
 
-The default gateway and Hermes images keep their public startup and file-secret
-contracts. Their separate `managed` build targets publish as
-`ghcr.io/crbl-technologies/media-request-companion-managed` and
-`ghcr.io/crbl-technologies/hermes-media-managed`. The managed upstream recipe
+The default gateway image keeps its public startup and file-secret contract. Its
+separate `managed` build target publishes as
+`ghcr.io/crbl-technologies/media-request-companion-managed`; the bot runs from
+the same managed image. The managed upstream recipe
 publishes as `ghcr.io/crbl-technologies/media-server-mcp-managed`. It adds a Deno
 startup wrapper to the pinned vendor image; it does not patch vendor source.
 Upstream updates still start with the vendor release and its compatibility
@@ -342,7 +296,7 @@ existing host files, which Compose mounts read-only:
 
 | Stack variable (host file) | Gateway mount |
 | --- | --- |
-| `GATEWAY_TOKEN_FILE` | `/run/media-keys/gateway.key`, also mounted for Hermes |
+| `GATEWAY_TOKEN_FILE` | `/run/media-keys/gateway.key`, also mounted for the bot |
 | `DASHBOARD_PASSWORD_HASH_FILE` | `/run/media-keys/dashboard-password.hash` |
 | `DASHBOARD_SESSION_KEY_FILE` | `/run/media-keys/dashboard-session.key` |
 | `PLEX_WEBHOOK_TOKEN_FILE` | `/run/media-keys/plex-webhook.key` |
@@ -368,21 +322,18 @@ Deno's native `--env-file` option. Native parsing is tested for literal dollar
 signs, quotes and comment characters. Multiline values and `${...}` interpolation
 forms are rejected instead of being silently changed.
 
-The Hermes Environment contains only `TELEGRAM_BOT_TOKEN` and
-`CRBL_MEDIA_GATEWAY_URL`. The gateway key comes from the read-only host-file
-mount at `/run/media-keys/gateway.key`. A private `/run/hermes-managed/.env`
-supplies the token, URL and key-file path through Hermes' native managed-scope loader.
-That layer overrides stale startup values without rewriting the user `.env`.
-The wrapper rejects upstream service keys and gateway-only private secrets in
-this Environment. Native `/init` remains PID 1; retrieval runs after the UID
-remap and before profile reconciliation or the CRBL startup checks.
+The bot Environment contains only `TELEGRAM_BOT_TOKEN`, `OPENROUTER_API_KEY`
+and `CRBL_MEDIA_GATEWAY_URL`. The gateway key comes from the read-only host-file
+mount at `/run/media-keys/gateway.key`. The wrapper writes the token and key to
+a private `/run/media-secrets/bot.env` and starts the bot without them in its
+environment. It rejects upstream service keys and gateway-only private secrets
+in this Environment. `MEDIA_BOT_MODEL` is a Compose setting, not a secret.
 
 All projected files are owner-only and live on tmpfs. Existing files and symlinks
 are not overwritten. Inherited copies are stripped before retrieval. Gateway
 file-secret values and all `OP_*` fields are removed before app execution.
-Hermes' retrieval hook exits without passing its environment to s6. Gateway and
-upstream logs pass through CLI masking. Hermes retains its native application
-logging after the hook exits. Raw CLI diagnostics are suppressed. Host, port,
+Gateway, bot and upstream logs pass through CLI masking. Raw CLI diagnostics
+are suppressed. Host, port,
 mount paths, native process settings and network/security controls stay in Compose.
 
 Retrieval and validation have a 60-second deadline and one attempt per container
@@ -393,10 +344,10 @@ real retrieval separately; tests use dummy data and a fake CLI transport.
 
 For a later approved cutover, use `deployment/compose.managed.yaml` by itself.
 Do not merge it with the default recipe: old read-only file mounts would cover
-the projection paths. Select managed digests using `MEDIA_GATEWAY_IMAGE`,
-`HERMES_MEDIA_IMAGE` and `MEDIA_UPSTREAM_IMAGE`. `GATEWAY_ONEPASSWORD_FILE`,
-`HERMES_ONEPASSWORD_FILE` and `UPSTREAM_ONEPASSWORD_FILE` identify only protected
-host mount paths, not tokens or Environment IDs.
+the projection paths. Select managed digests using `MEDIA_GATEWAY_IMAGE` (gateway
+and bot) and `MEDIA_UPSTREAM_IMAGE`, and the model with `MEDIA_BOT_MODEL`.
+`GATEWAY_ONEPASSWORD_FILE`, `BOT_ONEPASSWORD_FILE` and `UPSTREAM_ONEPASSWORD_FILE`
+identify only protected host mount paths, not tokens or Environment IDs.
 
 Keep old saved Portainer fields and host secret files initially for rollback.
 The managed recipe reads only the four generated-key files listed above. Verify fetched values, failure with
@@ -409,16 +360,8 @@ cleanup is performed by this preparation.
 
 The writable policy file remains the authority for `TELEGRAM_ALLOWED_USERS` and
 `TELEGRAM_ADMIN_USERS`. The dashboard can still edit it while the app runs.
-Hermes model/provider selection, session data and OAuth refresh state also stay
-under native application control. The deployed provider and its active immutable
-credential names cannot be determined from this repository alone. A names-only
-provider review is still required before moving any provider credentials from
-`.env` or `auth.json`. Copying refreshed OAuth state into a startup Environment,
-or pinning empty credentials for every supported provider, would change the
-native UI and refresh contract. This is the remaining provider-state boundary,
-not a fallback for the managed Telegram, gateway or upstream fields.
 
 Keep the three store identities separate. Shared bot/gateway token values are
-needed only by their documented consumers; Hermes must not acquire Radarr,
+needed only by their documented consumers; the bot must not acquire Radarr,
 Sonarr, Plex, TMDB or gateway dashboard/session keys. No real 1Password identifier,
 bootstrap token, or private deployment inventory belongs in this public repository.

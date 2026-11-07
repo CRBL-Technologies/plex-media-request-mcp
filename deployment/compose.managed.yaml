@@ -85,39 +85,36 @@ services:
         max-size: 10m
         max-file: "3"
 
-  hermes-media:
-    image: ${HERMES_MEDIA_IMAGE:?required managed Hermes digest}
+  media-bot:
+    # Same image as the gateway; only the entrypoint differs. The bot holds the
+    # Telegram and OpenRouter credentials and the gateway bearer, nothing else.
+    image: ${MEDIA_GATEWAY_IMAGE:?required managed gateway digest}
     restart: unless-stopped
+    user: "1000:1000"
+    init: true
     read_only: true
     cap_drop: [ALL]
-    # Native s6 bootstrap, data ownership checks, UID drop, and service shutdown.
-    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, KILL]
     security_opt: [no-new-privileges:true]
+    entrypoint: [python, -m, media_bot.managed_start]
     tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=128m
-      - /run:rw,exec,nosuid,nodev,size=64m
-    command: [gateway, run]
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+      - /run/media-secrets:rw,noexec,nosuid,nodev,size=1m,uid=1000,gid=1000,mode=0700
     environment:
-      HERMES_UID: "1000"
-      HERMES_GID: "1000"
-      HERMES_HOME: /opt/data
-      HERMES_DASHBOARD: "false"
-      HERMES_MANAGED_DIR: /run/hermes-managed
+      MEDIA_BOT_MODEL: ${MEDIA_BOT_MODEL:?required OpenRouter model ID}
       CRBL_MEDIA_GATEWAY_TOKEN_FILE: /run/media-keys/gateway.key
     volumes:
-      - ${HERMES_DATA_DIR:?required}:/opt/data:rw
-      - ${HERMES_ONEPASSWORD_FILE:?required owner-provisioned bootstrap file}:/run/secrets/onepassword.json:ro
+      - ${BOT_ONEPASSWORD_FILE:?required owner-provisioned bootstrap file}:/run/secrets/onepassword.json:ro
       - ${GATEWAY_TOKEN_FILE:?required}:/run/media-keys/gateway.key:ro
     networks: [media-bot]
     depends_on:
       media-gateway:
         condition: service_healthy
     healthcheck:
-      test: [CMD, /opt/hermes/.venv/bin/python, -m, hermes_media.health]
+      test: [CMD, python, -m, media_bot.health]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 60s
+      start_period: 90s
     logging:
       driver: json-file
       options:

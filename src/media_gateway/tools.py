@@ -448,24 +448,6 @@ class ToolService:
         }
         return tools + [by_name[name] for name in sorted(by_name)]
 
-    async def all_schemas(self) -> list[dict[str, Any]]:
-        """Return the closed registration inventory to the trusted Hermes adapter."""
-
-        discovered = await self.upstream.list_tools()
-        by_name = {
-            item["name"]: item
-            for item in discovered
-            if isinstance(item.get("name"), str) and item["name"] in ADMIN_UPSTREAM_TOOLS
-        }
-        missing = ADMIN_UPSTREAM_TOOLS - set(by_name)
-        if missing:
-            raise UpstreamError(f"pinned upstream is missing tool {sorted(missing)[0]}")
-        shared = [
-            {"name": name, **SHARED_SCHEMAS[name], "scope": "shared"} for name in SHARED_TOOLS
-        ]
-        admin = [{**by_name[name], "scope": "admin"} for name in sorted(by_name)]
-        return shared + admin
-
     async def call(self, name: str, arguments: object, actor: Actor, role: Role) -> dict[str, Any]:
         if role is Role.BLOCKED:
             raise ToolError("user is not allowed")

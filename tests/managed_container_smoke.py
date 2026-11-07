@@ -1,4 +1,4 @@
-"""Credential-free startup proof for three managed images; never deploys a stack."""
+"""Credential-free startup proof for the managed images; never deploys a stack."""
 
 from __future__ import annotations
 
@@ -13,11 +13,10 @@ from pathlib import Path
 
 from media_gateway.managed_files import SECRET_PATHS
 
-gateway_image, hermes_image, upstream_image = sys.argv[1:]
+gateway_image, upstream_image = sys.argv[1:]
 tests = Path(__file__).resolve().parent
 suffix = uuid.uuid4().hex[:12]
 containers: list[str] = []
-network = f"media-managed-smoke-{suffix}"
 
 
 def docker(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -62,7 +61,7 @@ def fixture(root: Path, name: str, values: dict[str, str]) -> list[str]:
     ]
 
 
-def daemon(image: str, args: list[str], probe: list[str]) -> None:
+def daemon(image: str, args: list[str], probe: list[str], command: list[str] | None = None) -> None:
     name = f"media-managed-{len(containers)}-{suffix}"
     containers.append(name)
     docker(
@@ -79,6 +78,7 @@ def daemon(image: str, args: list[str], probe: list[str]) -> None:
         "/run/media-secrets:rw,noexec,nosuid,nodev,size=1m,uid=1000,gid=1000,mode=0700",
         *args,
         image,
+        *(command or []),
     )
     deadline = time.monotonic() + 45
     while time.monotonic() < deadline:
@@ -184,126 +184,38 @@ with tempfile.TemporaryDirectory(prefix="media-managed-smoke-") as temporary:
         )
         print("Managed native upstream startup and shutdown passed.")
 
-        docker("network", "create", "--internal", network)
-        stub = f"media-managed-stub-{suffix}"
-        containers.append(stub)
-        docker(
-            "run",
-            "-d",
-            "--rm",
-            "--name",
-            stub,
-            "--network",
-            network,
-            "--network-alias",
-            "gateway",
-            "--entrypoint",
-            "python",
-            "-v",
-            f"{tests / 'hermes_gateway_stub.py'}:/stub.py:ro",
-            gateway_image,
-            "/stub.py",
-        )
-        hermes_args = fixture(
+        bot_args = fixture(
             root,
-            "hermes",
+            "bot",
             {
                 "TELEGRAM_BOT_TOKEN": "fetched-telegram-token",
-                "CRBL_MEDIA_GATEWAY_URL": "http://gateway:18082",
+                "OPENROUTER_API_KEY": "fetched-openrouter-key",
+                "CRBL_MEDIA_GATEWAY_URL": "http://media-gateway:18082",
             },
         )
-        hermes_args += ["-v", f"{keys / 'gateway.key'}:/run/media-keys/gateway.key:ro"]
-        data = root / "data"
-        data.mkdir(mode=0o777)
-        data.chmod(0o777)
-        (data / "config.yaml").write_bytes((tests / "hermes_config_smoke.yaml").read_bytes())
-        (data / ".env").write_text(
-            "TELEGRAM_BOT_TOKEN=old-token\nTELEGRAM_ALLOWED_USERS=10\n"
-            "OPENROUTER_API_KEY=dummy-owner-provider-key\n"
-        )
-        hermes_name = f"media-managed-hermes-{suffix}"
-        containers.append(hermes_name)
-        launcher_hook = root / "launcher_probe.pth"
-        launcher_hook.write_text(
-            "import atexit, runpy, sys; atexit.register(lambda run=runpy.run_path, runtime=sys: "
-            "run('/probe.py', run_name='launcher_check')['check_native_launcher']() "
-            "if runtime.argv[0] == 'hermes' else None)\n"
-        )
-        result = docker(
-            "run",
-            "--rm",
-            "--name",
-            hermes_name,
-            "--network",
-            network,
-            "--read-only",
-            "--cap-drop",
-            "ALL",
-            "--cap-add",
-            "CHOWN",
-            "--cap-add",
-            "DAC_OVERRIDE",
-            "--cap-add",
-            "FOWNER",
-            "--cap-add",
-            "SETUID",
-            "--cap-add",
-            "SETGID",
-            "--cap-add",
-            "KILL",
-            "--security-opt",
-            "no-new-privileges:true",
-            "--tmpfs",
-            "/tmp:rw,noexec,nosuid,nodev,size=128m",
-            "--tmpfs",
-            "/run:rw,exec,nosuid,nodev,size=64m",
+        bot_args += [
+            "-v",
+            f"{keys / 'gateway.key'}:/run/media-keys/gateway.key:ro",
+            "-v",
+            f"{tests / 'bot_isolation_probe.py'}:/probe.py:ro",
             "-e",
-            "HERMES_UID=1000",
+            "CRBL_MEDIA_GATEWAY_TOKEN_FILE=/run/media-keys/gateway.key",
             "-e",
-            "HERMES_GID=1000",
-            "-e",
-            "HERMES_HOME=/opt/data",
-            "-e",
-            "HERMES_DASHBOARD=false",
-            "-e",
-            "OP_SERVICE_ACCOUNT_TOKEN=stale-dummy-token",
+            "MEDIA_BOT_MODEL=openai/smoke",
             "-e",
             "OP_SESSION_OLD=stale-dummy-session",
-            "-v",
-            f"{data}:/opt/data",
-            "-v",
-            f"{tests / 'hermes_startup_probe.py'}:/probe.py:ro",
-            "-v",
-            f"{launcher_hook}:/opt/hermes/.venv/lib/python3.14/site-packages/crbl_launcher_probe.pth:ro",
-            *hermes_args,
-            hermes_image,
-            "/opt/hermes/.venv/bin/python",
-            "/probe.py",
+            "--entrypoint",
+            "python",
+        ]
+        # Without a network the bot keeps retrying Telegram, which is exactly the
+        # long-lived child whose environment the probe must find clean.
+        daemon(
+            gateway_image,
+            bot_args,
+            ["python", "/probe.py"],
+            command=["-m", "media_bot.managed_start"],
         )
-        assert "Native s6 managed startup" in result.stdout
-        for line in result.stdout.splitlines():
-            if line.startswith(("Native gateway process:", "Real Hermes CLI launcher")):
-                print(line)
-        print("Managed native Hermes s6 startup and isolated credentials passed.")
+        print("Managed bot startup, private secrets file and clean child environment passed.")
     finally:
         for container in containers:
             docker("rm", "-f", container, check=False)
-        docker("network", "rm", network, check=False)
-        # Native Hermes creates owner-only subdirectories as UID 1000. Remove
-        # only this test's generated data before the host temp-dir cleanup.
-        docker(
-            "run",
-            "--rm",
-            "--network",
-            "none",
-            "--user",
-            "0",
-            "--entrypoint",
-            "python",
-            "-v",
-            f"{root}:/fixtures",
-            gateway_image,
-            "-c",
-            "import shutil; shutil.rmtree('/fixtures/data', ignore_errors=True)",
-            check=False,
-        )

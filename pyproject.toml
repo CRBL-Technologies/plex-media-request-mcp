@@ -5,9 +5,10 @@ build-backend = "hatchling.build"
 [project]
 name = "crbl-media-gateway"
 version = "0.1.0"
-description = "Small policy, notification, and dashboard layer for media-server-mcp"
+description = "Small policy, notification, dashboard and Telegram bot layer for media-server-mcp"
 requires-python = ">=3.12"
 dependencies = [
+  "ddgs>=9.16,<10",
   "httpx>=0.28,<1",
   "mcp>=1.30,<2",
   "python-multipart>=0.0.20,<1",
@@ -27,9 +28,10 @@ dev = [
 [project.scripts]
 media-gateway = "media_gateway.app:main"
 media-password = "media_gateway.password:main"
+media-bot = "media_bot.bot:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/media_gateway", "src/hermes_media"]
+packages = ["src/media_gateway", "src/media_bot"]
 
 [tool.ruff]
 line-length = 100
@@ -45,7 +47,7 @@ allowed-confusables = ["＋"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
-packages = ["media_gateway", "hermes_media"]
+packages = ["media_gateway", "media_bot"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

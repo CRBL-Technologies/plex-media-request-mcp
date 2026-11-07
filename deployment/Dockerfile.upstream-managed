@@ -3,6 +3,8 @@ FROM 1password/op:2.42.0@sha256:b0d7eebcb09bdc9d5862af91533e1851c968d4f969270c90
 FROM ghcr.io/wyattjoh/media-server-mcp@sha256:f83620da1d008ef18df3324b15e44854572ea41b528eff585033e4054b438377
 ARG SOURCE_COMMIT
 USER root
+# The base image can lag Alpine's security updates.
+RUN apk upgrade --no-cache
 RUN mkdir -p /run/media-secrets && chown 1000:1000 /run/media-secrets
 COPY --from=onepassword /usr/local/bin/op /usr/local/bin/op
 COPY deployment/upstream /app/managed

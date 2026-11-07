@@ -101,10 +101,12 @@ services:
       - /run/media-secrets:rw,noexec,nosuid,nodev,size=1m,uid=1000,gid=1000,mode=0700
     environment:
       MEDIA_BOT_MODEL: ${MEDIA_BOT_MODEL:?required OpenRouter model ID}
+      MEDIA_BOT_STATE_FILE: /opt/data/state/conversations.sqlite3
       CRBL_MEDIA_GATEWAY_TOKEN_FILE: /run/media-keys/gateway.key
     volumes:
       - ${BOT_ONEPASSWORD_FILE:?required owner-provisioned bootstrap file}:/run/secrets/onepassword.json:ro
       - ${GATEWAY_TOKEN_FILE:?required}:/run/media-keys/gateway.key:ro
+      - ${BOT_STATE_DIR:?required}:/opt/data/state:rw
     networks: [media-bot]
     depends_on:
       media-gateway:

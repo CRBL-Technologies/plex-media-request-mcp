@@ -35,6 +35,7 @@ jobs:
           MEDIA_BOT_MODEL: openai/ci
           HERMES_DATA_DIR: /tmp/hermes
           GATEWAY_STATE_DIR: /tmp/state
+          BOT_STATE_DIR: /tmp/bot-state
           UPSTREAM_ENV_FILE: ${{ github.workspace }}/deployment/upstream.env.example
           GATEWAY_CONFIG_FILE: /tmp/gateway.env
           GATEWAY_TOKEN_FILE: /tmp/gateway.key

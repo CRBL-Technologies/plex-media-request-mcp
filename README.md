@@ -83,11 +83,20 @@ which is why the hint names the tools as the only source of truth rather than
 prescribing when to call them. That guidance has exactly one copy,
 `media_bot.prompt.TELEGRAM_GUIDANCE`.
 
-The bot keeps a short conversation per user and chat in memory: the last ten
-exchanges, reset after two idle hours, by `/new` or `/reset`, and on restart.
+The bot keeps a short conversation per user and chat in a local SQLite file
+(`BOT_STATE_DIR`, mode `0600`), so a restart does not interrupt it. It holds the
+last ten exchanges and is reset after two idle hours or by `/new` or `/reset`.
 It keeps only the user's words and its final replies, not tool results. Messages
 from one user in one chat are answered in order. In groups the bot answers only
-when it is mentioned or when a message replies to it. It reads text only.
+when it is mentioned or when a message replies to it.
+
+The bot reads text and photos. It downloads one photo per message into memory
+(limit 5 MiB), sends it to the model for that turn, and never writes it to disk.
+Later turns remember only what was said about it. An album counts as one message.
+Text inside a photo could try to steer the model, so a photo turn gets only the
+shared tools, even for an admin: an admin must use a text message for admin tools.
+The bot rejects any other tool call in that turn. Set `MEDIA_BOT_MODEL` to a model
+that accepts images.
 
 Upstream 2.3.0 lists `radarr_get_queue` in its full profile but does not register
 the tool. The gateway therefore contains one narrow read-only Radarr queue call;

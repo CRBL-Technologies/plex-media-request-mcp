@@ -8,6 +8,7 @@ import httpx
 
 POLL_SECONDS = 50
 MESSAGE_LIMIT = 4096
+PHOTO_MAX_BYTES = 5 * 1024 * 1024
 
 
 class TelegramError(RuntimeError):
@@ -20,6 +21,7 @@ class Telegram:
     def __init__(self, token: str):
         # The token is part of every URL, so neither it nor a URL is ever logged.
         self._base = f"https://api.telegram.org/bot{token}"
+        self._files = f"https://api.telegram.org/file/bot{token}"
         self._http = httpx.AsyncClient(timeout=POLL_SECONDS + 15)
 
     async def close(self) -> None:
@@ -56,6 +58,29 @@ class Telegram:
         if not isinstance(result, list):
             raise TelegramError("Telegram getUpdates returned no list")
         return [item for item in result if isinstance(item, dict)]
+
+    async def download_photo(self, file_id: str) -> bytes:
+        """Return one photo's bytes in memory. It is never written to disk."""
+
+        result = await self._call("getFile", {"file_id": file_id})
+        path = result.get("file_path") if isinstance(result, dict) else None
+        if not isinstance(path, str) or not path:
+            raise TelegramError("Telegram getFile returned no path")
+        content = bytearray()
+        try:
+            async with self._http.stream("GET", f"{self._files}/{path}") as response:
+                if response.status_code >= 400:
+                    raise TelegramError(
+                        f"Telegram photo download failed: {response.status_code}",
+                        status=response.status_code,
+                    )
+                async for chunk in response.aiter_bytes():
+                    content += chunk
+                    if len(content) > PHOTO_MAX_BYTES:
+                        raise TelegramError("Telegram photo is too large")
+        except httpx.HTTPError as exc:
+            raise TelegramError(f"Telegram photo download failed: {type(exc).__name__}") from None
+        return bytes(content)
 
     async def send_message(
         self, chat_id: int, text: str, *, html: bool = False, reply_to: int | None = None

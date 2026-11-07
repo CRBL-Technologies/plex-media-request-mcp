@@ -106,12 +106,14 @@ services:
       - /tmp:rw,noexec,nosuid,nodev,size=16m
     environment:
       MEDIA_BOT_MODEL: ${MEDIA_BOT_MODEL:?required OpenRouter model ID}
+      MEDIA_BOT_STATE_FILE: /opt/data/state/conversations.sqlite3
       MEDIA_BOT_SECRETS_FILE: /opt/hermes-data/.env
       CRBL_MEDIA_GATEWAY_URL: http://media-gateway:18082
       CRBL_MEDIA_GATEWAY_TOKEN_FILE: /run/media-secrets/gateway.key
     volumes:
       - ${HERMES_DATA_DIR:?required}/.env:/opt/hermes-data/.env:ro
       - ${GATEWAY_TOKEN_FILE:?required}:/run/media-secrets/gateway.key:ro
+      - ${BOT_STATE_DIR:?required}:/opt/data/state:rw
     networks: [media-bot]
     depends_on:
       media-gateway:

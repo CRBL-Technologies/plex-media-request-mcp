@@ -1,8 +1,10 @@
 name: Publish images
 
+# A push to dev starts nothing. Verify on the VM before you push. For a dev image,
+# start this workflow by hand: gh workflow run publish.yml --ref dev
 on:
   push:
-    branches: [main, dev]
+    branches: [main]
     tags: ["v*.*.*"]
   workflow_dispatch:
 

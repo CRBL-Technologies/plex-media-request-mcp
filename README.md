@@ -42,8 +42,9 @@ The gateway exposes exactly eight media tools to an allowed Telegram user:
 - `media_status`
 
 The bot additionally exposes one `web_search` tool. It uses the hash-locked
-`ddgs` DuckDuckGo client for current movie recommendations, release dates, and
-viewing-order research, and returns only titles, links and short snippets. There
+`ddgs` client with four named engines (Wikipedia, DuckDuckGo, Yahoo and Brave) for
+current movie recommendations, release dates, and viewing-order research, and
+returns only titles, links and short snippets. There
 is no page fetching, browser, file access or shell. The tool description marks
 results as untrusted web content. Each user message may run at most ten web
 searches (`media_bot.bot.WEB_SEARCH_CAP`).
@@ -200,6 +201,22 @@ the `MEDIA_BOT_MODEL` stack variable selects its OpenRouter model.
 The dashboard binds NAS port `18082` for LAN/Tailscale access. Port `18081` is
 loopback-only for the host-network Plex webhook. The Docker socket is absent.
 The upstream MCP and the bot have no published port.
+
+The bot is sealed at the network level too. Its network, `media-bot`, is internal
+and has no address on the host, so the bot cannot open a connection to the NAS, to
+the home network or to the internet. It reaches two things: the gateway, and
+`media-egress`. `media-egress` is an HTTPS CONNECT proxy from the same image
+(`media_bot.egress`). It opens a tunnel only to the hosts in `ALLOWED_HOSTS`, on
+port 443, at a public address: Telegram, OpenRouter, 1Password for the startup
+retrieval, and the four search engines. `HTTPS_PROXY` and `DDGS_PROXY` point the
+bot's clients at it. The bot cannot resolve outside names, so a client that
+ignores the proxy fails instead of leaking. To let the bot reach a new host, add
+it to `ALLOWED_HOSTS`; a new search engine goes in `SEARCH_ENGINES`.
+`tests/bot_containment_smoke.py` starts the proxy from the managed Compose file
+and proves these limits from a container on the bot's network.
+
+Deploying this over an older stack replaces the `media-bot` network, because an
+existing network cannot become internal in place.
 
 The bot's prompt comes from three tiers, each versioned in this repository. A
 tool says what it does in its own `description` and `inputSchema`, so choosing

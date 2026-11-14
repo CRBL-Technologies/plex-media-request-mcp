@@ -111,3 +111,4 @@ jobs:
             crbl-media-upstream-managed:ci test --allow-read --allow-write --allow-env --allow-run --allow-sys /app/tests/upstream_runtime_test.ts
           python tests/managed_container_smoke.py \
             crbl-media-gateway-managed:ci crbl-media-upstream-managed:ci
+          python tests/bot_containment_smoke.py crbl-media-gateway-managed:ci

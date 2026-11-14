@@ -13,6 +13,7 @@ import httpx
 import pytest
 
 from media_bot import bot as bot_module
+from media_bot import egress, search
 from media_bot.bot import (
     FRESH_START,
     GREETING,
@@ -694,3 +695,44 @@ async def test_photo_download_failures_do_not_expose_the_token() -> None:
         await telegram.download_photo("id")
     assert "SECRET" not in str(caught.value)
     await telegram.close()
+
+
+def test_egress_opens_only_named_hosts_on_port_443() -> None:
+    assert egress.target(b"CONNECT api.telegram.org:443 HTTP/1.1\r\n\r\n") == "api.telegram.org"
+    assert egress.target(b"CONNECT OpenRouter.ai:443 HTTP/1.1\r\n\r\n") == "openrouter.ai"
+    for refused in (
+        b"CONNECT example.com:443 HTTP/1.1\r\n\r\n",
+        b"CONNECT api.telegram.org:80 HTTP/1.1\r\n\r\n",
+        b"CONNECT api.telegram.org.example.com:443 HTTP/1.1\r\n\r\n",
+        b"CONNECT 192.168.1.1:443 HTTP/1.1\r\n\r\n",
+        b"CONNECT media-gateway:443 HTTP/1.1\r\n\r\n",
+        b"GET http://api.telegram.org:443/ HTTP/1.1\r\n\r\n",
+        b"CONNECT api.telegram.org:443\r\n\r\n",
+        b"\xff\xfe\r\n\r\n",
+    ):
+        assert egress.target(refused) is None
+
+
+def test_egress_never_connects_to_an_inside_address() -> None:
+    inside = ["192.168.1.10", "10.0.0.5", "172.30.40.2", "127.0.0.1", "169.254.1.1", "::1"]
+    assert egress.public_addresses([*inside, "fd00::1", "149.154.167.220"]) == ["149.154.167.220"]
+
+
+def test_web_search_names_only_engines_the_egress_proxy_opens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asked: dict[str, Any] = {}
+
+    class Engines:
+        def __init__(self, **_options: Any) -> None:
+            pass
+
+        def text(self, _query: str, **options: Any) -> list[dict[str, str]]:
+            asked.update(options)
+            return []
+
+    monkeypatch.setattr(search, "DDGS", Engines)
+    search._search("dune")
+    assert {egress.SEARCH_ENGINES[name] for name in asked["backend"].split(",")} <= (
+        egress.ALLOWED_HOSTS
+    )

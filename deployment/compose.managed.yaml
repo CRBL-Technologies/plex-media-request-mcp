@@ -103,6 +103,8 @@ services:
       MEDIA_BOT_MODEL: ${MEDIA_BOT_MODEL:?required OpenRouter model ID}
       MEDIA_BOT_STATE_FILE: /opt/data/state/conversations.sqlite3
       CRBL_MEDIA_GATEWAY_TOKEN_FILE: /run/media-keys/gateway.key
+      HTTPS_PROXY: http://media-egress:3128
+      DDGS_PROXY: http://media-egress:3128
     volumes:
       - ${BOT_ONEPASSWORD_FILE:?required owner-provisioned bootstrap file}:/run/secrets/onepassword.json:ro
       - ${GATEWAY_TOKEN_FILE:?required}:/run/media-keys/gateway.key:ro
@@ -110,6 +112,8 @@ services:
     networks: [media-bot]
     depends_on:
       media-gateway:
+        condition: service_healthy
+      media-egress:
         condition: service_healthy
     healthcheck:
       test: [CMD, python, -m, media_bot.health]
@@ -123,14 +127,46 @@ services:
         max-size: 10m
         max-file: "3"
 
+  media-egress:
+    # The bot's only way out. It opens HTTPS tunnels to the hosts named in
+    # media_bot.egress.ALLOWED_HOSTS and refuses everything else.
+    image: ${MEDIA_GATEWAY_IMAGE:?required managed gateway digest}
+    restart: unless-stopped
+    user: "1000:1000"
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    entrypoint: [python, -m, media_bot.egress]
+    networks: [media-bot, media-egress]
+    healthcheck:
+      test: [CMD, python, -c, "import socket; socket.create_connection(('127.0.0.1', 3128), 3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
 networks:
+  # The bot's network has no route out and no address on the host, so the bot
+  # reaches the gateway and the egress proxy and nothing else: not the internet,
+  # not the NAS, not the home network.
   media-bot:
     name: media-bot
+    internal: true
     driver: bridge
+    driver_opts:
+      com.docker.network.bridge.inhibit_ipv4: "true"
     ipam:
       config:
         - subnet: 172.30.40.0/24
-          gateway: 172.30.40.1
+  media-egress:
+    name: media-egress
+    driver: bridge
   media-mcp:
     name: media-mcp
     internal: true

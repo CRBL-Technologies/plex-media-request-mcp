@@ -1,4 +1,4 @@
-"""DuckDuckGo text search: the model's only window onto the public web."""
+"""Text search through a fixed set of engines: the model's only window onto the public web."""
 
 from __future__ import annotations
 
@@ -6,6 +6,8 @@ import asyncio
 from typing import Any
 
 from ddgs import DDGS
+
+from .egress import SEARCH_ENGINES
 
 RESULTS = 5
 SEARCH_TIMEOUT_SECONDS = 15
@@ -31,7 +33,11 @@ SCHEMA: dict[str, Any] = {
 
 
 def _search(query: str) -> list[dict[str, str]]:
-    rows = DDGS(timeout=SEARCH_TIMEOUT_SECONDS).text(query, max_results=RESULTS)
+    # Name the engines: the default set changes with the library, and the egress
+    # proxy opens only the hosts of these.
+    rows = DDGS(timeout=SEARCH_TIMEOUT_SECONDS).text(
+        query, max_results=RESULTS, backend=",".join(SEARCH_ENGINES)
+    )
     return [
         {
             "title": str(row.get("title") or "")[:200],

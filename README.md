@@ -114,6 +114,8 @@ or season is notified at the chat where they made the request. Plex's related
 show, season and episode events are coalesced before delivery; a season batch
 waits until the latest event has been quiet for the configured delay, so a bulk
 import sends one message while weekly episodes remain individual messages.
+An arrival that could not be announced within 14 days is left alone: it is no
+longer checked or announced, and its row stays until the 60-day cleanup.
 Each message contains an `Open in Plex` button.
 When Plex supplies its catalog slug, that button uses a `watch.plex.tv` universal
 link so supported mobile clients open the Plex app; the browser remains the

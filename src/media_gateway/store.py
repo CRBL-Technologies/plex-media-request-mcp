@@ -514,13 +514,15 @@ class Store:
                 (plex_url, event_key),
             )
 
-    def pending_media_events(self, before: int, limit: int = 200) -> list[dict[str, Any]]:
+    def pending_media_events(
+        self, before: int, limit: int = 200, *, since: int = 0
+    ) -> list[dict[str, Any]]:
         with self._db() as db:
             rows = db.execute(
                 """SELECT * FROM media_events
-                WHERE notified_at IS NULL AND observed_at <= ?
+                WHERE notified_at IS NULL AND observed_at <= ? AND observed_at >= ?
                 ORDER BY observed_at, event_key LIMIT ?""",
-                (before, min(max(limit, 1), 500)),
+                (before, since, min(max(limit, 1), 500)),
             ).fetchall()
         return [dict(row) for row in rows]
 

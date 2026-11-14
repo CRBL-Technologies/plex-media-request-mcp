@@ -204,24 +204,33 @@ class Upstream:
         token = values.get("PLEX_API_KEY", "")
         if not base or not token:
             raise UpstreamError("Plex configuration is unavailable")
-        items: list[dict[str, Any]] = []
         try:
             async with httpx.AsyncClient(timeout=20) as client:
-                while True:
-                    response = await client.get(
-                        f"{base}/library/metadata/{rating_key}/allLeaves",
-                        headers={"X-Plex-Token": token, "Accept": "application/json"},
-                        params={"X-Plex-Container-Start": len(items), "X-Plex-Container-Size": 500},
-                    )
-                    response.raise_for_status()
-                    container = response.json()["MediaContainer"]
-                    rows = container.get("Metadata", [])
-                    if not isinstance(rows, list) or any(not isinstance(x, dict) for x in rows):
-                        raise ValueError("invalid episode list")
-                    items.extend(rows)
-                    if len(items) >= int(container.get("totalSize", len(items))):
+                # A show lists its episodes as leaves. A season lists none there
+                # (observed on Plex 1.43), so its episodes are read as children.
+                for listing in ("allLeaves", "children"):
+                    items: list[dict[str, Any]] = []
+                    while True:
+                        response = await client.get(
+                            f"{base}/library/metadata/{rating_key}/{listing}",
+                            headers={"X-Plex-Token": token, "Accept": "application/json"},
+                            params={
+                                "X-Plex-Container-Start": len(items),
+                                "X-Plex-Container-Size": 500,
+                            },
+                        )
+                        response.raise_for_status()
+                        container = response.json()["MediaContainer"]
+                        rows = container.get("Metadata", [])
+                        if not isinstance(rows, list) or any(not isinstance(x, dict) for x in rows):
+                            raise ValueError("invalid episode list")
+                        items.extend(rows)
+                        if len(items) >= int(container.get("totalSize", len(items))):
+                            break
+                        if not rows:
+                            raise ValueError("incomplete episode list")
+                    if items:
                         return items
-                    if not rows:
-                        raise ValueError("incomplete episode list")
+                return []
         except Exception:
             raise UpstreamError("Plex episodes are unavailable") from None

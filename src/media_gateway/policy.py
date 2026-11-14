@@ -1,4 +1,4 @@
-"""Bounded editor for Hermes' Telegram user policy."""
+"""Bounded editor for the bot's Telegram user policy file."""
 
 from __future__ import annotations
 

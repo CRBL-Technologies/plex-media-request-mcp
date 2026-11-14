@@ -1,3 +1,0 @@
-# Match the DuckDuckGo extra declared by the pinned Hermes v0.22.5 base.
-# This version no longer installs the old HTTPX/Brotli dependency path.
-ddgs==9.16.0

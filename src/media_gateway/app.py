@@ -251,29 +251,16 @@ async def actors(request: Request) -> Response:
     return JSONResponse({"ok": True, "role": role.value})
 
 
-async def tool_schema(request: Request) -> Response:
-    if not _trusted(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    try:
-        return JSONResponse({"tools": await _runtime(request).tools.all_schemas()})
-    except UpstreamError:
-        LOGGER.warning("upstream schema discovery failed")
-        return JSONResponse({"error": "media service is temporarily unavailable"}, status_code=502)
-
-
 async def list_tools(request: Request) -> Response:
     if not _trusted(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
         actor = Actor.from_json(await request.json())
         role = _runtime(request).policy.snapshot().role(actor.user_id)
-        tools = await _runtime(request).tools.tools_for(role)
+        tools = _runtime(request).tools.tools_for(role)
         return JSONResponse({"role": role.value, "tools": tools})
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
-    except UpstreamError:
-        LOGGER.warning("upstream tool discovery failed")
-        return JSONResponse({"error": "media service is temporarily unavailable"}, status_code=502)
 
 
 async def call_tool(request: Request) -> Response:
@@ -440,7 +427,6 @@ def create_app(config: Config | None = None) -> Starlette:
             Route("/users/add", change_user, methods=["POST"]),
             Route("/users/remove", change_user, methods=["POST"]),
             Route("/api/actors", actors, methods=["POST"]),
-            Route("/api/schema", tool_schema, methods=["GET"]),
             Route("/api/tools", list_tools, methods=["POST"]),
             Route("/api/tools/call", call_tool, methods=["POST"]),
             Route("/plex", plex_webhook, methods=["POST"]),

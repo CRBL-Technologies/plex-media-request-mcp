@@ -7,6 +7,7 @@ import signal
 import subprocess
 import sys
 import threading
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 from types import FrameType
@@ -28,7 +29,26 @@ def application_environment(source: dict[str, str]) -> dict[str, str]:
     }
 
 
-def main() -> int:
+def prepare_gateway(source: dict[str, str]) -> dict[str, str]:
+    environment = application_environment(source)
+    directory = Path("/run/media-secrets")
+    if any(environment.get(key) != str(directory / name) for key, name in SECRET_PATHS.items()):
+        raise ValueError("managed secret paths must select the private tmpfs")
+    os.environ.clear()
+    os.environ.update(environment)
+    Config.from_env()
+    project_gateway_files(source, directory)
+    return environment
+
+
+def supervise(
+    prepare: Callable[[dict[str, str]], dict[str, str]],
+    module: str,
+    label: str,
+    secret_keys: frozenset[str],
+) -> int:
+    """Project fetched values once, signal the loader, then keep ``module`` running."""
+
     # op hides its own stderr. Preserve application errors on the masked output
     # stream instead of losing normal service logs with the CLI diagnostics.
     os.dup2(sys.stdout.fileno(), sys.stderr.fileno())
@@ -50,21 +70,14 @@ def main() -> int:
     signal.signal(signal.SIGINT, forward)
     source = dict(os.environ)
     try:
-        environment = application_environment(source)
-        directory = Path("/run/media-secrets")
-        if any(environment.get(key) != str(directory / name) for key, name in SECRET_PATHS.items()):
-            raise ValueError("managed secret paths must select the private tmpfs")
-        os.environ.clear()
-        os.environ.update(environment)
-        Config.from_env()
-        project_gateway_files(source, directory)
+        environment = prepare(source)
     except (KeyError, ValueError, OSError):
-        print("Managed gateway runtime options are incomplete or invalid.", flush=True)
+        print(f"Managed {label} runtime options are incomplete or invalid.", flush=True)
         return 1
     finally:
         source.clear()
         for key in tuple(os.environ):
-            if key.startswith("OP_") or key in SECRET_KEYS:
+            if key.startswith("OP_") or key in secret_keys:
                 del os.environ[key]
     if stopped.is_set():
         return 0
@@ -73,7 +86,7 @@ def main() -> int:
     while not stopped.is_set():
         try:
             child = subprocess.Popen(
-                [sys.executable, "-m", "media_gateway.app"],
+                [sys.executable, "-m", module],
                 env=environment,
                 stdin=subprocess.DEVNULL,
                 start_new_session=True,
@@ -85,7 +98,7 @@ def main() -> int:
             while child.poll() is None and not stopped.is_set():
                 stopped.wait(0.1)
         except OSError:
-            print("Gateway process could not start.", flush=True)
+            print(f"{label.capitalize()} process could not start.", flush=True)
         finally:
             if child is not None:
                 if not stopped.is_set():
@@ -101,10 +114,14 @@ def main() -> int:
                 child = None
         if stopped.is_set():
             break
-        print(f"Gateway process stopped; retrying in {delay} seconds.", flush=True)
+        print(f"{label.capitalize()} process stopped; retrying in {delay} seconds.", flush=True)
         stopped.wait(delay)
         delay = min(delay * 2, 30)
     return 0
+
+
+def main() -> int:
+    return supervise(prepare_gateway, "media_gateway.app", "gateway", SECRET_KEYS)
 
 
 if __name__ == "__main__":

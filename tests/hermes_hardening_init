@@ -1,9 +1,0 @@
-#!/command/with-contenv sh
-# Synthetic files only. This hook is copied into the disposable test image.
-set -eu
-mkdir -p /run/secrets /run/media-keys
-printf '%s\n' '{"environment_id":"aaaaaaaaaaaaaaaaaaaaaaaaaa","service_account_token":"dummy-token"}' > /run/secrets/onepassword.json
-printf '%s\n' 'gggggggggggggggggggggggggggggggggggggggg' > /run/media-keys/gateway.key
-chown 1000:1000 /run/secrets/onepassword.json /run/media-keys/gateway.key
-chmod 0600 /run/secrets/onepassword.json /run/media-keys/gateway.key
-s6-setuidgid hermes /opt/hermes/.venv/bin/python /fixture/gateway_stub.py &

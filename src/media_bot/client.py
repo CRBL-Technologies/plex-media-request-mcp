@@ -41,18 +41,6 @@ class GatewayClient:
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {read_secret(self.token_file)}"}
 
-    def schemas(self) -> list[dict[str, Any]]:
-        with httpx.Client(timeout=30) as client:
-            response = client.get(f"{self.url}/api/schema", headers=self._headers())
-        response.raise_for_status()
-        try:
-            value = response.json().get("tools")
-        except (json.JSONDecodeError, AttributeError) as exc:
-            raise GatewayError("gateway returned an invalid tool schema") from exc
-        if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
-            raise GatewayError("gateway returned an invalid tool schema")
-        return value
-
     async def observe(self, actor: Actor, *, blocked: bool = False) -> Role:
         async with httpx.AsyncClient(timeout=10) as client:
             response = await client.post(
@@ -66,18 +54,37 @@ class GatewayClient:
         except (KeyError, ValueError, TypeError) as exc:
             raise GatewayError("gateway returned an invalid actor role") from exc
 
+    async def tools(self, actor: Actor) -> list[dict[str, Any]]:
+        """Return the tool schemas the gateway grants this actor's current role."""
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
+                f"{self.url}/api/tools", headers=self._headers(), json=self._actor(actor)
+            )
+        response.raise_for_status()
+        try:
+            value = response.json().get("tools")
+        except (json.JSONDecodeError, AttributeError) as exc:
+            raise GatewayError("gateway returned an invalid tool list") from exc
+        if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+            raise GatewayError("gateway returned an invalid tool list")
+        return value
+
     async def call(self, actor: Actor, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         timeout = BULK_CALL_TIMEOUT_SECONDS if name in SLOW_TOOLS else CALL_TIMEOUT_SECONDS
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                f"{self.url}/api/tools/call",
-                headers=self._headers(),
-                json={"actor": self._actor(actor), "name": name, "arguments": arguments},
-            )
         try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(
+                    f"{self.url}/api/tools/call",
+                    headers=self._headers(),
+                    json={"actor": self._actor(actor), "name": name, "arguments": arguments},
+                )
             value = response.json()
-        except json.JSONDecodeError as exc:
-            raise GatewayError("media gateway is unavailable") from exc
+        except (httpx.HTTPError, json.JSONDecodeError) as exc:
+            # The outcome is unknown: a timed-out request may still be running.
+            raise GatewayError("media gateway did not confirm the result") from exc
+        if not isinstance(value, dict):
+            raise GatewayError("gateway returned an invalid response")
         if response.status_code >= 400 or not value.get("ok"):
             raise GatewayError(str(value.get("error") or "media operation failed"))
         result = value.get("result")

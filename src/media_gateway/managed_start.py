@@ -6,6 +6,7 @@ import json
 import os
 import re
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -14,6 +15,7 @@ import time
 from contextlib import suppress
 from pathlib import Path
 from types import FrameType
+from urllib.parse import urlsplit
 
 from .managed_files import FILE_KEYS, SECRET_KEYS
 
@@ -34,6 +36,7 @@ APP_KEYS = frozenset(
     }
 )
 STARTUP_TIMEOUT = 60
+PROXY_WAIT_SECONDS = 120
 RUNTIME_KEYS = APP_KEYS | SECRET_KEYS
 
 
@@ -84,6 +87,26 @@ def retrieval_environment(
     return environment
 
 
+def wait_for_proxy(url: str | None, stopped: threading.Event) -> None:
+    """Wait until the outbound proxy accepts connections.
+
+    After a host restart the containers start in any order. The one retrieval
+    attempt below fails for good if it runs before the proxy is up.
+    """
+
+    if not url:
+        return
+    target = urlsplit(url)
+    deadline = time.monotonic() + PROXY_WAIT_SECONDS
+    while not stopped.is_set() and time.monotonic() < deadline:
+        try:
+            socket.create_connection((target.hostname, target.port or 80), timeout=2).close()
+        except OSError:
+            stopped.wait(1)
+        else:
+            return
+
+
 def run_managed(module: str, keys: frozenset[str]) -> None:
     stopped = threading.Event()
     ready = threading.Event()
@@ -106,6 +129,7 @@ def run_managed(module: str, keys: frozenset[str]) -> None:
     try:
         environment_id, token = read_bootstrap(BOOTSTRAP_FILE)
         environment = retrieval_environment(dict(os.environ), token, keys)
+        wait_for_proxy(os.environ.get("HTTPS_PROXY"), stopped)
         try:
             child = subprocess.Popen(
                 [

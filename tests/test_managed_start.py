@@ -4,8 +4,10 @@ import json
 import os
 import select
 import signal
+import socket
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -22,7 +24,12 @@ from media_gateway.managed_files import (
     UPSTREAM_KEYS,
     project_gateway_files,
 )
-from media_gateway.managed_start import RUNTIME_KEYS, read_bootstrap, retrieval_environment
+from media_gateway.managed_start import (
+    RUNTIME_KEYS,
+    read_bootstrap,
+    retrieval_environment,
+    wait_for_proxy,
+)
 from media_gateway.secrets import read_dotenv
 
 
@@ -370,3 +377,38 @@ def test_gateway_projection_rejects_injection_and_existing_files(tmp_path: Path)
     with pytest.raises(OSError):
         project_gateway_files(secret_values(), tmp_path)
     assert protected.read_text() == "unchanged"
+
+
+def test_start_waits_for_a_proxy_that_comes_up_late() -> None:
+    """After a host restart the bot can start before its proxy does."""
+
+    with socket.socket() as reserved:
+        reserved.bind(("127.0.0.1", 0))
+        port = reserved.getsockname()[1]
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    opened: list[float] = []
+
+    def open_late() -> None:
+        time.sleep(1.5)
+        listener.bind(("127.0.0.1", port))
+        listener.listen()
+        opened.append(time.monotonic())
+
+    thread = threading.Thread(target=open_late)
+    thread.start()
+    try:
+        wait_for_proxy(f"http://127.0.0.1:{port}", threading.Event())
+        returned = time.monotonic()
+    finally:
+        thread.join()
+        listener.close()
+    assert opened and returned >= opened[0]
+
+    # No proxy configured, or a stop request: do not wait.
+    started = time.monotonic()
+    wait_for_proxy(None, threading.Event())
+    stopping = threading.Event()
+    stopping.set()
+    wait_for_proxy("http://127.0.0.1:9", stopping)
+    assert time.monotonic() - started < 1

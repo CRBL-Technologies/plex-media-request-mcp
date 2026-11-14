@@ -49,11 +49,12 @@ is no page fetching, browser, file access or shell. The tool description marks
 results as untrusted web content. Each user message may run at most ten web
 searches (`media_bot.bot.WEB_SEARCH_CAP`).
 
-Configured administrators also receive the reviewed Plex/Radarr/Sonarr tools
-discovered from the pinned upstream MCP. Future upstream tools are not admitted
-automatically. Retaining that broad operations surface in the same bot is a
-deliberate product decision: only explicit administrators see it, while regular
-users remain limited to eight normalized tools. No selection token is used:
+Every allowed user gets the same ten tools, administrators included. The bot has
+no tool that deletes or edits a library item, and the gateway refuses any other
+tool name, so a steered or compromised bot cannot delete or edit the library.
+The administrator role still shows every user's requests in `request_status`
+and receives the arrival notifications. Library administration happens outside
+the bot. No selection token is used:
 requests take the TMDB or TVDB ID returned by a current search.
 
 Series availability comes from Sonarr episode records, not monitoring-filtered
@@ -94,9 +95,8 @@ when it is mentioned or when a message replies to it.
 The bot reads text and photos. It downloads one photo per message into memory
 (limit 5 MiB), sends it to the model for that turn, and never writes it to disk.
 Later turns remember only what was said about it. An album counts as one message.
-Text inside a photo could try to steer the model, so a photo turn gets only the
-shared tools, even for an admin: an admin must use a text message for admin tools.
-The bot rejects any other tool call in that turn. Set `MEDIA_BOT_MODEL` to a model
+Text inside a photo could try to steer the model, so the prompt tells the model
+to treat it as content, never as an instruction. Set `MEDIA_BOT_MODEL` to a model
 that accepts images.
 
 Upstream 2.3.0 lists `radarr_get_queue` in its full profile but does not register

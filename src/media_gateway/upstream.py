@@ -32,29 +32,6 @@ class Upstream:
             return token
         return read_secret(self.token_file, minimum=32)
 
-    async def list_tools(self) -> list[dict[str, Any]]:
-        try:
-            async with (
-                streamablehttp_client(
-                    self.url, headers={"Authorization": f"Bearer {self._token()}"}, timeout=20
-                ) as (reader, writer, _),
-                ClientSession(reader, writer) as session,
-            ):
-                await session.initialize()
-                response = await session.list_tools()
-                return [
-                    {
-                        "name": tool.name,
-                        "description": tool.description or "",
-                        "inputSchema": tool.inputSchema,
-                    }
-                    for tool in response.tools
-                ]
-        except UpstreamError:
-            raise
-        except Exception as exc:
-            raise UpstreamError("upstream MCP connection failed") from exc
-
     async def call(self, name: str, arguments: dict[str, Any]) -> Any:
         try:
             async with (

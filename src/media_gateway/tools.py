@@ -1,4 +1,4 @@
-"""Stable shared tools plus a closed administrator proxy."""
+"""The shared media tools. Every allowed user gets the same set."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from typing import Any
 
 from . import plex_watch
 from .config import Config
-from .constants import ADMIN_UPSTREAM_TOOLS, SHARED_TOOLS
+from .constants import SHARED_TOOLS
 from .episode_facts import season_episode_facts, season_is_finished
 from .provider_metadata import public_poster_url
 from .store import Store
@@ -434,19 +434,10 @@ class ToolService:
 
         return self._request_locks.setdefault((media_type, external_id), asyncio.Lock())
 
-    async def tools_for(self, role: Role) -> list[dict[str, Any]]:
+    def tools_for(self, role: Role) -> list[dict[str, Any]]:
         if role is Role.BLOCKED:
             return []
-        tools = [{"name": name, **SHARED_SCHEMAS[name]} for name in SHARED_TOOLS]
-        if role is not Role.ADMIN:
-            return tools
-        discovered = await self.upstream.list_tools()
-        by_name = {
-            item["name"]: item
-            for item in discovered
-            if isinstance(item.get("name"), str) and item["name"] in ADMIN_UPSTREAM_TOOLS
-        }
-        return tools + [by_name[name] for name in sorted(by_name)]
+        return [{"name": name, **SHARED_SCHEMAS[name]} for name in SHARED_TOOLS]
 
     async def call(self, name: str, arguments: object, actor: Actor, role: Role) -> dict[str, Any]:
         if role is Role.BLOCKED:
@@ -458,9 +449,7 @@ class ToolService:
             if not isinstance(result, dict):
                 raise RuntimeError("shared tool returned an invalid result")
             return result
-        if role is Role.ADMIN and name in ADMIN_UPSTREAM_TOOLS:
-            return {"result": await self.upstream.call(name, _object(arguments))}
-        raise ToolError("tool is not available for this user")
+        raise ToolError("tool is not available")
 
     async def _search_candidates(
         self, query: str, media_type: str, limit: int

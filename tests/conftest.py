@@ -23,11 +23,7 @@ class FakeUpstream:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.responses: dict[str, Any] = {}
-        self.tool_schemas: list[dict[str, Any]] = []
         self.tags: dict[str, int] = {}
-
-    async def list_tools(self) -> list[dict[str, Any]]:
-        return self.tool_schemas
 
     async def call(self, name: str, arguments: dict[str, Any]) -> Any:
         self.calls.append((name, arguments))

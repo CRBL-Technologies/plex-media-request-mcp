@@ -257,13 +257,10 @@ async def list_tools(request: Request) -> Response:
     try:
         actor = Actor.from_json(await request.json())
         role = _runtime(request).policy.snapshot().role(actor.user_id)
-        tools = await _runtime(request).tools.tools_for(role)
+        tools = _runtime(request).tools.tools_for(role)
         return JSONResponse({"role": role.value, "tools": tools})
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
-    except UpstreamError:
-        LOGGER.warning("upstream tool discovery failed")
-        return JSONResponse({"error": "media service is temporarily unavailable"}, status_code=502)
 
 
 async def call_tool(request: Request) -> Response:

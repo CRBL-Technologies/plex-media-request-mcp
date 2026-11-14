@@ -284,24 +284,19 @@ def test_roles_and_no_selection_token(config: Config) -> None:
         ]
     }
     fake.responses["sonarr_search_series"] = {"data": []}
-    fake.tool_schemas = [
-        {
-            "name": "radarr_get_movies",
-            "description": "Get movies",
-            "inputSchema": {"type": "object"},
-        },
-        {"name": "unexpected_tool", "description": "No", "inputSchema": {}},
-    ]
     with TestClient(app) as client:
         app.state.runtime.upstream = fake
         app.state.runtime.tools.upstream = fake
         user_tools = client.post("/api/tools", headers=_headers(), json=_actor(1001)).json()
         assert user_tools["role"] == "user"
         assert len(user_tools["tools"]) == len(SHARED_TOOLS)
-        assert "radarr_get_movies" not in {tool["name"] for tool in user_tools["tools"]}
+        # An administrator gets the same tools. The upstream tools are closed to everyone.
         admin_tools = client.post("/api/tools", headers=_headers(), json=_actor(9001)).json()
-        assert "radarr_get_movies" in {tool["name"] for tool in admin_tools["tools"]}
-        assert "unexpected_tool" not in {tool["name"] for tool in admin_tools["tools"]}
+        assert admin_tools["role"] == "admin"
+        assert admin_tools["tools"] == user_tools["tools"]
+        refused = call_tool(client, "radarr_delete_movie", {"id": 1}, user_id=9001)
+        assert refused.status_code == 400
+        assert fake.calls == []
 
         response = call_tool(client, "search_media", {"query": "A Movie", "media_type": "movie"})
         assert response.status_code == 200
@@ -961,7 +956,7 @@ async def _local_http_server(app: ASGIApp) -> AsyncIterator[str]:
 
 
 @pytest.mark.parametrize("json_response", [False, True])
-async def test_upstream_real_mcp_initializes_lists_and_calls_with_bearer(
+async def test_upstream_real_mcp_initializes_and_calls_with_bearer(
     config: Config, json_response: bool
 ) -> None:
     sdk = FastMCP("local-test", stateless_http=True, json_response=json_response)
@@ -988,17 +983,12 @@ async def test_upstream_real_mcp_initializes_lists_and_calls_with_bearer(
     app.add_middleware(BaseHTTPMiddleware, dispatch=record)
     async with _local_http_server(app) as url:
         upstream = Upstream(url, config.upstream_token_file)
-        tools = {tool["name"]: tool for tool in await upstream.list_tools()}
-        assert set(tools) == {"echo", "message"}
-        assert tools["echo"]["description"] == "Return the supplied value."
-        assert tools["echo"]["inputSchema"]["required"] == ["value"]
         assert await upstream.call("echo", {"value": "harmless input"}) == {
             "value": "harmless input"
         }
         assert await upstream.call("message", {}) == {"message": "local MCP reply"}
-    assert methods.count("initialize") == 3
-    assert methods.count("notifications/initialized") == 3
-    assert methods.count("tools/list") >= 1
+    assert methods.count("initialize") == 2
+    assert methods.count("notifications/initialized") == 2
     assert methods.count("tools/call") == 2
 
 
@@ -1022,7 +1012,7 @@ async def test_upstream_does_not_forward_mcp_requests_to_another_origin(
         async with _local_http_server(source) as source_url:
             upstream = Upstream(source_url, config.upstream_token_file)
             with pytest.raises(UpstreamError, match="upstream MCP connection failed"):
-                await upstream.list_tools()
+                await upstream.call("echo", {})
     assert forwarded == []
 
 
@@ -1040,22 +1030,6 @@ def test_upstream_errors_do_not_leak_provider_details(config: Config) -> None:
         assert response.status_code == 502
         assert response.json()["error"] == "media service is temporarily unavailable"
         assert "secret" not in response.text
-
-
-def test_admin_proxy_preserves_nested_upstream_results(config: Config) -> None:
-    app = create_app(config)
-    fake = FakeUpstream()
-    fake.responses["radarr_get_movies"] = {
-        "data": [{"title": "Nested", "quality": {"profile": {"name": "HD"}}}],
-        "total": 1,
-    }
-    with TestClient(app) as client:
-        app.state.runtime.tools.upstream = fake
-        response = call_tool(client, "radarr_get_movies", {"limit": 1}, user_id=9001)
-        assert response.status_code == 200
-        assert response.json()["result"]["result"]["data"][0]["quality"] == {
-            "profile": {"name": "HD"}
-        }
 
 
 def test_series_request_uses_trusted_actor_and_exact_seasons(config: Config) -> None:

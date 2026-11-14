@@ -21,7 +21,6 @@ BOOTSTRAP_FILE = Path("/run/secrets/onepassword.json")
 APP_KEYS = frozenset(
     {
         "MEDIA_GATEWAY_UPSTREAM_URL",
-        "MEDIA_GATEWAY_SECURE_COOKIES",
         "MEDIA_GATEWAY_RADARR_PROFILE_ID",
         "MEDIA_GATEWAY_RADARR_ROOT",
         "MEDIA_GATEWAY_RADARR_TAG_IDS",

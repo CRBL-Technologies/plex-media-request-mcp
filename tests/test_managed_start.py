@@ -168,11 +168,8 @@ sys.exit(result)
     environment.update(
         {
             "MEDIA_GATEWAY_TOKEN_FILE": "/run/media-keys/gateway.key",
-            "MEDIA_GATEWAY_DASHBOARD_PASSWORD_HASH_FILE": "/run/media-keys/dashboard-password.hash",
-            "MEDIA_GATEWAY_DASHBOARD_SESSION_KEY_FILE": "/run/media-keys/dashboard-session.key",
             "MEDIA_GATEWAY_PLEX_WEBHOOK_TOKEN_FILE": "/run/media-keys/plex-webhook.key",
             "MEDIA_GATEWAY_UPSTREAM_URL": "http://upstream:3000",
-            "MEDIA_GATEWAY_SECURE_COOKIES": "false",
             "MEDIA_GATEWAY_RADARR_PROFILE_ID": "25",
             "MEDIA_GATEWAY_RADARR_ROOT": "/data/movies",
             "MEDIA_GATEWAY_RADARR_TAG_IDS": "",

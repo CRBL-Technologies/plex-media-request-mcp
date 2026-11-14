@@ -1,4 +1,4 @@
-"""ASGI application for the gateway, dashboard, and Plex webhook."""
+"""ASGI applications: the gateway API with the Plex webhook, and the private dashboard."""
 
 from __future__ import annotations
 
@@ -7,14 +7,16 @@ import hmac
 import json
 import logging
 import time
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, suppress
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager, suppress
 from pathlib import Path
+from secrets import token_urlsafe
 from typing import Any
 from urllib.parse import quote
 
 import uvicorn
 from starlette.applications import Starlette
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.requests import Request
 from starlette.responses import (
     HTMLResponse,
@@ -26,11 +28,9 @@ from starlette.responses import (
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from .auth import Sessions
 from .config import Config, load_config_file
-from .dashboard import CSS, FAVICON, dashboard_page, login_page
+from .dashboard import CSS, FAVICON, dashboard_page
 from .notifications import Notifications
-from .password import verify_password
 from .policy import Policy
 from .secrets import read_secret
 from .store import Store
@@ -38,7 +38,6 @@ from .tools import ToolError, ToolService
 from .types import Actor, Role
 from .upstream import Upstream, UpstreamError
 
-COOKIE = "crbl_media_session"
 LOGGER = logging.getLogger(__name__)
 MAX_BODY_BYTES = 4 * 1024 * 1024
 
@@ -51,10 +50,9 @@ class Runtime:
         self.upstream = Upstream(config.upstream_url, config.upstream_token_file)
         self.tools = ToolService(config, self.store, self.upstream)
         self.notifications = Notifications(config, self.store, self.policy, self.upstream)
-        self.sessions = Sessions(
-            read_secret(config.dashboard_session_key_file, minimum=32).encode()
-        )
-        self.password_hash = read_secret(config.dashboard_password_hash_file)
+        # The dashboard has no login: only the Tailscale Service reaches its listener.
+        # This token stops another site from submitting the dashboard's forms.
+        self.form_token = token_urlsafe(32)
         self.gateway_token = read_secret(config.gateway_token_file, minimum=32)
         self.plex_token = read_secret(config.plex_webhook_token_file, minimum=32)
 
@@ -99,22 +97,10 @@ def _runtime(request: Request) -> Runtime:
     return runtime
 
 
-def _session(request: Request) -> str | None:
-    token = request.cookies.get(COOKIE)
-    return token if _runtime(request).sessions.valid(token) else None
-
-
-def _dashboard_auth(request: Request) -> str | Response:
-    token = _session(request)
-    if token:
-        return token
-    return RedirectResponse("/login", status_code=303)
-
-
-async def _form_with_csrf(request: Request, token: str) -> dict[str, str]:
+async def _form(request: Request) -> dict[str, str]:
     form = await request.form()
     values = {key: str(value) for key, value in form.multi_items() if isinstance(key, str)}
-    if not _runtime(request).sessions.valid_csrf(token, values.get("csrf")):
+    if not hmac.compare_digest(values.get("csrf", ""), _runtime(request).form_token):
         raise ToolError("invalid form token")
     return values
 
@@ -155,45 +141,7 @@ async def favicon(_request: Request) -> Response:
     return PlainTextResponse(FAVICON, media_type="image/svg+xml")
 
 
-async def login(request: Request) -> Response:
-    if request.method == "GET":
-        if _session(request):
-            return RedirectResponse("/", status_code=303)
-        return HTMLResponse(login_page())
-    form = await request.form()
-    password = form.get("password")
-    if not isinstance(password, str) or not verify_password(
-        password, _runtime(request).password_hash
-    ):
-        return HTMLResponse(login_page(error="Incorrect password."), status_code=401)
-    token = _runtime(request).sessions.issue()
-    response = RedirectResponse("/", status_code=303)
-    response.set_cookie(
-        COOKIE,
-        token,
-        max_age=_runtime(request).sessions.ttl_seconds,
-        httponly=True,
-        secure=_runtime(request).config.secure_cookies,
-        samesite="strict",
-        path="/",
-    )
-    return response
-
-
-async def logout(request: Request) -> Response:
-    token = _session(request)
-    if not token:
-        return RedirectResponse("/login", status_code=303)
-    await _form_with_csrf(request, token)
-    response = RedirectResponse("/login", status_code=303)
-    response.delete_cookie(COOKIE, path="/")
-    return response
-
-
 async def dashboard(request: Request) -> Response:
-    auth = _dashboard_auth(request)
-    if isinstance(auth, Response):
-        return auth
     runtime = _runtime(request)
     snapshot = runtime.policy.snapshot()
     roles = {user_id: Role.USER for user_id in snapshot.allowed}
@@ -205,18 +153,15 @@ async def dashboard(request: Request) -> Response:
             users=runtime.store.users(roles),
             activity=activity_page,
             requests=request_page,
-            csrf=runtime.sessions.csrf(auth),
+            csrf=runtime.form_token,
             notice=request.query_params.get("notice"),
         )
     )
 
 
 async def change_user(request: Request) -> Response:
-    token = _session(request)
-    if not token:
-        return RedirectResponse("/login", status_code=303)
     try:
-        form = await _form_with_csrf(request, token)
+        form = await _form(request)
         raw = form.get("user_id", "")
         if not raw.isdigit() or int(raw) <= 0:
             raise ValueError("Telegram user ID must be a positive integer")
@@ -386,8 +331,36 @@ class _BodyTooLarge(Exception):
     pass
 
 
+def _dashboard_app(config: Config) -> Starlette:
+    """The dashboard, served on its own listener. It shares the API app's runtime."""
+
+    app = Starlette(
+        routes=[
+            Route("/assets/app.css", css),
+            Route("/assets/favicon.svg", favicon),
+            Mount(
+                "/assets/brand",
+                app=StaticFiles(directory=Path(__file__).parent / "static" / "brand"),
+                name="brand",
+            ),
+            Route("/", dashboard),
+            Route("/users/add", change_user, methods=["POST"]),
+            Route("/users/remove", change_user, methods=["POST"]),
+        ]
+    )
+    app.add_middleware(SecurityHeaders)
+    app.add_middleware(BodySizeGuard)
+    # Refuse a request that names another host, so a foreign site cannot point
+    # its own name at this listener and read the form token.
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(config.dashboard_hosts))
+    return app
+
+
 def create_app(config: Config | None = None) -> Starlette:
+    """Return the API app. Its ``state.dashboard`` is the dashboard app."""
+
     configured = config or Config.from_env()
+    dashboard_app = _dashboard_app(configured)
 
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
@@ -395,6 +368,7 @@ def create_app(config: Config | None = None) -> Starlette:
         runtime.store.prune()
         startup_intents = runtime.store.pending_request_intents()
         app.state.runtime = runtime
+        dashboard_app.state.runtime = runtime
         worker = asyncio.create_task(runtime.notifications.run())
         reconcile_stop = asyncio.Event()
         reconcile_worker = asyncio.create_task(
@@ -414,18 +388,6 @@ def create_app(config: Config | None = None) -> Starlette:
         routes=[
             Route("/healthz", health),
             Route("/readyz", ready),
-            Route("/assets/app.css", css),
-            Route("/assets/favicon.svg", favicon),
-            Mount(
-                "/assets/brand",
-                app=StaticFiles(directory=Path(__file__).parent / "static" / "brand"),
-                name="brand",
-            ),
-            Route("/login", login, methods=["GET", "POST"]),
-            Route("/logout", logout, methods=["POST"]),
-            Route("/", dashboard),
-            Route("/users/add", change_user, methods=["POST"]),
-            Route("/users/remove", change_user, methods=["POST"]),
             Route("/api/actors", actors, methods=["POST"]),
             Route("/api/tools", list_tools, methods=["POST"]),
             Route("/api/tools/call", call_tool, methods=["POST"]),
@@ -438,21 +400,56 @@ def create_app(config: Config | None = None) -> Starlette:
     )
     app.add_middleware(SecurityHeaders)
     app.add_middleware(BodySizeGuard)
+    app.state.dashboard = dashboard_app
     return app
+
+
+class _SecondListener(uvicorn.Server):
+    """A second server in the same loop. The first server owns the process signals."""
+
+    @contextmanager
+    def capture_signals(self) -> Iterator[None]:
+        yield
+
+
+async def serve(config: Config) -> None:
+    app = create_app(config)
+    # Plex cannot attach a custom Authorization header, so the webhook uses a
+    # URL credential. Disable access logs so it is never copied into logs.
+    api = uvicorn.Server(
+        uvicorn.Config(
+            app, host=config.host, port=config.port, proxy_headers=False, access_log=False
+        )
+    )
+    dashboard_server = _SecondListener(
+        uvicorn.Config(
+            app.state.dashboard,
+            host=config.dashboard_host,
+            port=config.dashboard_port,
+            proxy_headers=False,
+            access_log=False,
+            lifespan="off",
+        )
+    )
+
+    async def serve_dashboard() -> None:
+        try:
+            await dashboard_server.serve()
+        finally:
+            # Without its dashboard listener the gateway must not keep running.
+            api.should_exit = True
+
+    task = asyncio.create_task(serve_dashboard())
+    try:
+        await api.serve()
+    finally:
+        dashboard_server.should_exit = True
+        await task
 
 
 def main() -> None:
     load_config_file()
-    config = Config.from_env()
-    # Plex cannot attach a custom Authorization header, so the webhook uses a
-    # URL credential. Disable access logs so it is never copied into logs.
-    uvicorn.run(
-        create_app(config),
-        host=config.host,
-        port=config.port,
-        proxy_headers=False,
-        access_log=False,
-    )
+    asyncio.run(serve(Config.from_env()))
 
 
 if __name__ == "__main__":

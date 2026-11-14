@@ -35,6 +35,8 @@ if opens("172.30.40.1", host_port):
     failures.append("the host is reachable at the bridge address")
 if opens("1.1.1.1", 443):
     failures.append("the internet is reachable without the proxy")
+if opens("media-gateway", 18083):
+    failures.append("the dashboard, which has no login, is reachable from the bot's network")
 try:
     socket.getaddrinfo("example.com", 443)
     failures.append("an outside name resolves without the proxy")

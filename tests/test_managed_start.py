@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from media_gateway import managed_start
 from media_gateway.app import Runtime
 from media_gateway.config import Config
 from media_gateway.managed_app import application_environment
@@ -28,7 +29,7 @@ from media_gateway.managed_start import (
     RUNTIME_KEYS,
     read_bootstrap,
     retrieval_environment,
-    wait_for_proxy,
+    wait_for_store,
 )
 from media_gateway.secrets import read_dotenv
 
@@ -285,6 +286,7 @@ managed_start.subprocess.Popen = fake_op
 managed_start.main()
 """
     environment = dict(os.environ)
+    environment["MEDIA_KEY_STORE_WAIT_SECONDS"] = "0"
     environment["MEDIA_GATEWAY_RADARR_PROFILE_ID"] = "old-value"
     environment["MEDIA_GATEWAY_CONFIG_FILE"] = "/old/gateway.env"
     process = subprocess.Popen(
@@ -379,8 +381,8 @@ def test_gateway_projection_rejects_injection_and_existing_files(tmp_path: Path)
     assert protected.read_text() == "unchanged"
 
 
-def test_start_waits_for_a_proxy_that_comes_up_late() -> None:
-    """After a host restart the bot can start before its proxy does."""
+def test_start_waits_until_the_key_store_answers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """After a host restart the network, or the proxy, can come up after the container."""
 
     with socket.socket() as reserved:
         reserved.bind(("127.0.0.1", 0))
@@ -388,27 +390,43 @@ def test_start_waits_for_a_proxy_that_comes_up_late() -> None:
     listener = socket.socket()
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     opened: list[float] = []
+    # The first connection is the direct probe; the next two are proxy requests.
+    replies = [
+        None,
+        b"HTTP/1.1 502 Bad Gateway\r\n\r\n",
+        b"HTTP/1.1 200 Connection established\r\n\r\n",
+    ]
 
-    def open_late() -> None:
+    def serve_late() -> None:
         time.sleep(1.5)
         listener.bind(("127.0.0.1", port))
         listener.listen()
         opened.append(time.monotonic())
+        for reply in replies:
+            link, _ = listener.accept()
+            with link:
+                if reply:
+                    link.recv(1024)
+                    link.sendall(reply)
 
-    thread = threading.Thread(target=open_late)
+    # Direct: the store itself comes up late.
+    monkeypatch.setattr(managed_start, "KEY_STORE", ("127.0.0.1", port))
+    thread = threading.Thread(target=serve_late)
     thread.start()
     try:
-        wait_for_proxy(f"http://127.0.0.1:{port}", threading.Event())
-        returned = time.monotonic()
+        wait_for_store(None, threading.Event(), 30)
+        assert opened and time.monotonic() >= opened[0]
+        # Through the proxy: it first cannot reach the store, then it can.
+        assert not managed_start.store_reachable(f"http://127.0.0.1:{port}")
+        assert managed_start.store_reachable(f"http://127.0.0.1:{port}")
     finally:
         thread.join()
         listener.close()
-    assert opened and returned >= opened[0]
 
-    # No proxy configured, or a stop request: do not wait.
+    # A stop request, or a spent wait, returns at once.
     started = time.monotonic()
-    wait_for_proxy(None, threading.Event())
     stopping = threading.Event()
     stopping.set()
-    wait_for_proxy("http://127.0.0.1:9", stopping)
+    wait_for_store(None, stopping, 30)
+    wait_for_store(None, threading.Event(), 0)
     assert time.monotonic() - started < 1

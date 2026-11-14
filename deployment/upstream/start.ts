@@ -1,6 +1,11 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import process from "node:process";
-import { readBootstrap, retrievalEnvironment } from "./runtime.ts";
+import {
+  KEY_STORE,
+  readBootstrap,
+  retrievalEnvironment,
+  waitForKeyStore,
+} from "./runtime.ts";
 
 let child: ChildProcess | undefined;
 let stopped = false;
@@ -27,6 +32,14 @@ process.on("SIGUSR1", () => ready = true);
 
 try {
   const data = readBootstrap("/run/secrets/onepassword.json");
+  // A test without a network sets the wait to 0.
+  await waitForKeyStore(
+    () =>
+      spawnSync("nc", ["-z", "-w", "5", KEY_STORE.host, KEY_STORE.port])
+        .status === 0,
+    () => stopped,
+    Number(Deno.env.get("MEDIA_KEY_STORE_WAIT_SECONDS") ?? "300"),
+  );
   const environment = retrievalEnvironment(
     Deno.env.toObject(),
     data.service_account_token,

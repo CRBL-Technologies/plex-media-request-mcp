@@ -2,12 +2,37 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import process from "node:process";
+import { createRequire } from "node:module";
 import {
   projectUpstream,
   readBootstrap,
   retrievalEnvironment,
   waitForKeyStore,
 } from "/app/managed/runtime.ts";
+
+Deno.test("patched runtime keeps the vendor version and rejects forged proxy trust", () => {
+  assert.equal(Deno.version.deno, "2.9.8");
+  const vendor = JSON.parse(
+    Deno.readTextFileSync("/app/packages/media-server-mcp/deno.json"),
+  );
+  assert.equal(vendor.version, "2.3.0");
+  const lock = JSON.parse(Deno.readTextFileSync("/app/deno.lock"));
+  assert.equal(lock.npm["proxy-addr@2.0.7"], undefined);
+  assert.ok(lock.npm["proxy-addr@2.0.8"]);
+  const cache = "/deno-dir/npm/registry.npmjs.org/proxy-addr";
+  assert.deepEqual(
+    Array.from(Deno.readDirSync(cache), (entry) => entry.name),
+    ["2.0.8"],
+  );
+  const require = createRequire(import.meta.url);
+  const proxyaddr = require(`${cache}/2.0.8/index.js`);
+  assert.equal(proxyaddr.compile("::ffff:10.0.0.0/8")("203.0.113.7"), false);
+  assert.equal(proxyaddr.compile("::/1")("203.0.113.7"), false);
+  assert.equal(proxyaddr.compile("10.0.0.0/8")("10.2.3.4"), true);
+  assert.equal(proxyaddr.compile("::ffff:10.0.0.0/104")("10.2.3.4"), true);
+  assert.equal(proxyaddr.compile("2001:db8::/32")("2001:db8::1"), true);
+  assert.equal(proxyaddr.compile("10.0.0.0/8")("203.0.113.7"), false);
+});
 
 function fetched(): Record<string, string> {
   return {
@@ -64,8 +89,14 @@ Deno.test("native env-file round-trip preserves fetched values and removes boots
     assert.equal(clean.TOOL_PROFILE, "full");
     assert.ok(!Deno.readTextFileSync(path).includes("TOOL_PROFILE"));
     assert.equal(Deno.statSync(path).mode! & 0o777, 0o600);
+    // The second value needs double quotes: it holds a single quote.
+    source.SONARR_API_KEY = "it's #plain = text";
+    Deno.removeSync(path);
+    projectUpstream(source, path);
     const check = `if (Deno.env.get("RADARR_API_KEY") !== ${
       JSON.stringify(source.RADARR_API_KEY)
+    } || Deno.env.get("SONARR_API_KEY") !== ${
+      JSON.stringify(source.SONARR_API_KEY)
     } || Deno.env.get("OP_SERVICE_ACCOUNT_TOKEN")) throw new Error("Native dotenv changed the dummy value");`;
     const output = await new Deno.Command(Deno.execPath(), {
       args: ["eval", `--env-file=${path}`, check],
@@ -100,6 +131,10 @@ Deno.test("inherited values never satisfy a missing fetch; bad scope and injecti
     assert.throws(() => projectUpstream(clean, path));
     assert.throws(() =>
       projectUpstream({ ...fetched(), RADARR_API_KEY: "x\nOTHER=y" }, path)
+    );
+    // No quoting reads back unchanged for a value with both kinds of quote.
+    assert.throws(() =>
+      projectUpstream({ ...fetched(), RADARR_API_KEY: `it's "both"` }, path)
     );
     assert.throws(() =>
       projectUpstream({ ...fetched(), TELEGRAM_BOT_TOKEN: "wrong-scope" }, path)

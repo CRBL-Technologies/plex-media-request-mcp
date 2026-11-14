@@ -114,6 +114,8 @@ or season is notified at the chat where they made the request. Plex's related
 show, season and episode events are coalesced before delivery; a season batch
 waits until the latest event has been quiet for the configured delay, so a bulk
 import sends one message while weekly episodes remain individual messages.
+An arrival that could not be announced within 14 days is left alone: it is no
+longer checked or announced, and its row stays until the 60-day cleanup.
 Each message contains an `Open in Plex` button.
 When Plex supplies its catalog slug, that button uses a `watch.plex.tv` universal
 link so supported mobile clients open the Plex app; the browser remains the
@@ -307,6 +309,11 @@ separate `managed` build target publishes as
 the same managed image. The managed upstream recipe
 publishes as `ghcr.io/crbl-technologies/media-server-mcp-managed`. It adds a Deno
 startup wrapper to the pinned vendor image; it does not patch vendor source.
+The vendor 2.3.0 image ships Deno 2.6.0 and `proxy-addr` 2.0.7, which have known
+critical advisories. The managed recipe therefore replaces only the Deno binary,
+with the pinned 2.9.8 release, and moves the one locked dependency to
+`proxy-addr` 2.0.8. The vendor sources and tool definitions are unchanged, and a
+test in the image checks the versions.
 Upstream updates still start with the vendor release and its compatibility
 checks. The default images and `deployment/compose.yaml` do not require 1Password.
 
@@ -351,9 +358,12 @@ setting, not an Environment field; the wrapper still refuses any other profile.
 The optional `TOOL_BRANCHES`, `TOOL_EXCLUDE` and `TOOL_INCLUDE` settings also
 belong in Compose. They must preserve the reviewed gateway tool manifest. The wrapper writes its private
 `/run/media-secrets/upstream.env`, then starts the unmodified vendor command with
-Deno's native `--env-file` option. Native parsing is tested for literal dollar
-signs, quotes and comment characters. Multiline values and `${...}` interpolation
-forms are rejected instead of being silently changed.
+Deno's native `--env-file` option. Values are written in single quotes, which
+Deno reads literally. A value that holds a single quote is written in double
+quotes; it is rejected if it also holds a double quote, a backslash or a dollar
+sign, because Deno versions read those differently. Native parsing is tested for
+literal dollar signs, quotes and comment characters. Multiline values and
+`${...}` interpolation forms are rejected instead of being silently changed.
 
 The bot Environment contains only `TELEGRAM_BOT_TOKEN`, `OPENROUTER_API_KEY`
 and `CRBL_MEDIA_GATEWAY_URL`. The gateway key comes from the read-only host-file

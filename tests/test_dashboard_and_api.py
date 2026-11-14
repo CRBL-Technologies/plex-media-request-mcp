@@ -29,7 +29,7 @@ from media_gateway.app import create_app
 from media_gateway.config import Config
 from media_gateway.constants import SHARED_TOOLS
 from media_gateway.dashboard import _request_status
-from media_gateway.notifications import _group_pending_events
+from media_gateway.notifications import PENDING_EVENT_SECONDS, _group_pending_events
 from media_gateway.types import Actor, Role
 from media_gateway.upstream import Upstream, UpstreamError
 
@@ -2294,6 +2294,34 @@ async def test_single_episode_notifies_all_matching_requesters_not_unrelated_adm
     assert 3003 not in sent
 
 
+async def test_plex_episode_listing_reads_a_season_through_its_children(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plex 1.43 lists no leaves for a season key, although its episodes have files."""
+
+    monkeypatch.setattr(
+        "media_gateway.upstream.read_dotenv",
+        lambda *_args: {"PLEX_URL": "http://plex:32400", "PLEX_API_KEY": "test-token"},
+    )
+    paths: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path.endswith("/allLeaves"):
+            return httpx.Response(200, json={"MediaContainer": {"size": 0, "totalSize": 0}})
+        rows = [{"ratingKey": "7", "type": "episode", "index": 1, "parentIndex": 1, "Media": [{}]}]
+        return httpx.Response(200, json={"MediaContainer": {"size": 1, "Metadata": rows}})
+
+    client = httpx.AsyncClient
+    monkeypatch.setattr(
+        "media_gateway.upstream.httpx.AsyncClient",
+        lambda **kwargs: client(transport=httpx.MockTransport(respond), **kwargs),
+    )
+    upstream = Upstream(config.upstream_url, config.upstream_token_file)
+    assert [row["ratingKey"] for row in await upstream.plex_episodes("55")] == ["7"]
+    assert paths == ["/library/metadata/55/allLeaves", "/library/metadata/55/children"]
+
+
 @pytest.mark.parametrize("incomplete", [False, True])
 async def test_plex_episode_listing_reads_all_pages(
     config: Config, monkeypatch: pytest.MonkeyPatch, incomplete: bool
@@ -3350,6 +3378,41 @@ async def test_automatic_plex_addition_notifies_admin_without_request(config: Co
         runtime.notifications._send = capture  # type: ignore[method-assign]
         await runtime.notifications.flush()
         assert sent == [9001]
+
+
+async def test_a_stale_pending_arrival_is_not_checked_or_announced(config: Config) -> None:
+    app = create_app(config)
+    sent: list[str] = []
+    with TestClient(app):
+        runtime = app.state.runtime
+        fake = FakeUpstream()
+        runtime.notifications.upstream = fake
+        for key, age in (("movie:1", PENDING_EVENT_SECONDS + 3600), ("movie:2", 10)):
+            runtime.store.add_media_event(
+                event_key=key,
+                media_type="movie",
+                external_id=int(key[-1]),
+                rating_key=key[-1],
+                title=f"Movie {key[-1]}",
+                show_title=None,
+                season_number=None,
+                episode_number=None,
+                plex_url="https://app.plex.tv/" + key[-1],
+                observed_at=int(time.time()) - age,
+            )
+
+        async def capture(_chat_id: int, text: str, _url: str) -> None:
+            sent.append(text)
+
+        runtime.notifications._send = capture  # type: ignore[method-assign]
+        await runtime.notifications.flush()
+
+        assert len(sent) == 1 and "Movie 2" in sent[0]
+        # The stale arrival caused no provider call and keeps its row for the dashboard.
+        assert all("tmdb:1" not in json.dumps(call) for call in fake.calls)
+        assert [e["event_key"] for e in runtime.store.pending_media_events(int(time.time()))] == [
+            "movie:1"
+        ]
 
 
 async def test_notifications_filter_revoked_requesters_but_preserve_allowed_chat(

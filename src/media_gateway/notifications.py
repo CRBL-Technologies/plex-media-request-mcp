@@ -30,6 +30,11 @@ LOGGER = logging.getLogger(__name__)
 # on how soon an arrival can be announced.
 FLUSH_INTERVAL_SECONDS = 5
 PRUNE_INTERVAL_SECONDS = 60 * 60
+# An arrival that could not be announced within this time is stale: the season
+# never completed, the title was never identified, or Plex no longer has the
+# entry. Checking it again on every pass costs provider calls and can never end.
+# The row stays for the dashboard until the store prunes it.
+PENDING_EVENT_SECONDS = 14 * 24 * 60 * 60
 MAX_RETRY_BACKOFF_SECONDS = 15 * 60
 
 
@@ -376,13 +381,14 @@ class Notifications:
         # Read young rows too: a season batch is delivered only after the
         # entire group has been quiet for the configured delay. Filtering in
         # SQL first would send early episodes while later ones were arriving.
-        events = self.store.pending_media_events(now, limit=500)
+        since = now - PENDING_EVENT_SECONDS
+        events = self.store.pending_media_events(now, limit=500, since=since)
         for event in events:
             if _event_kind(event) in {"show", "season"}:
                 await self._expand_container(event)
         events = [
             item
-            for item in self.store.pending_media_events(now, limit=500)
+            for item in self.store.pending_media_events(now, limit=500, since=since)
             if _event_kind(item) not in {"show", "season"}
         ]
         grouped = _group_pending_events(events)

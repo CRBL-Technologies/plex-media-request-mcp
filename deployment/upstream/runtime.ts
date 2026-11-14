@@ -114,3 +114,23 @@ export function projectUpstream(
     ),
   );
 }
+
+export const KEY_STORE = { host: "my.1password.com", port: "443" };
+
+/**
+ * Wait until the key store is reachable. After a host restart the containers
+ * can start before the network is ready. The one retrieval attempt does not
+ * retry, so a container that makes it too early stays down until a restart.
+ */
+export async function waitForKeyStore(
+  reachable: () => boolean,
+  stopped: () => boolean,
+  seconds: number,
+  pauseMilliseconds = 2000,
+): Promise<void> {
+  const deadline = Date.now() + seconds * 1000;
+  while (!stopped() && Date.now() < deadline) {
+    if (reachable()) return;
+    await new Promise((resolve) => setTimeout(resolve, pauseMilliseconds));
+  }
+}

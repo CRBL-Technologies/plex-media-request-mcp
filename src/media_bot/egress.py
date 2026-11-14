@@ -13,6 +13,8 @@ import logging
 import socket
 from contextlib import suppress
 
+from media_gateway.managed_start import KEY_STORE
+
 LOGGER = logging.getLogger("media_bot.egress")
 
 PORT = 3128
@@ -27,7 +29,7 @@ ALLOWED_HOSTS = frozenset(
     {
         "api.telegram.org",  # messages and photos
         "openrouter.ai",  # the model
-        "my.1password.com",  # the bot's secrets at startup
+        KEY_STORE[0],  # 1Password: the bot's secrets at startup
         *SEARCH_ENGINES.values(),
     }
 )

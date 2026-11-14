@@ -36,7 +36,7 @@ APP_KEYS = frozenset(
     }
 )
 STARTUP_TIMEOUT = 60
-PROXY_WAIT_SECONDS = 120
+KEY_STORE = ("my.1password.com", 443)
 RUNTIME_KEYS = APP_KEYS | SECRET_KEYS
 
 
@@ -87,24 +87,35 @@ def retrieval_environment(
     return environment
 
 
-def wait_for_proxy(url: str | None, stopped: threading.Event) -> None:
-    """Wait until the outbound proxy accepts connections.
+def store_reachable(proxy: str | None) -> bool:
+    """Whether the key store answers, directly or through the outbound proxy."""
 
-    After a host restart the containers start in any order. The one retrieval
-    attempt below fails for good if it runs before the proxy is up.
+    host, port = KEY_STORE
+    try:
+        if not proxy:
+            socket.create_connection((host, port), timeout=5).close()
+            return True
+        target = urlsplit(proxy)
+        with socket.create_connection((target.hostname, target.port or 80), timeout=5) as link:
+            link.sendall(f"CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n".encode())
+            return link.recv(64).split()[1:2] == [b"200"]
+    except OSError:
+        return False
+
+
+def wait_for_store(proxy: str | None, stopped: threading.Event, seconds: float) -> None:
+    """Wait until the key store is reachable.
+
+    After a host restart the containers can start before the network, or before
+    the proxy, is ready. The one retrieval attempt below does not retry, so a
+    container that makes it too early stays down until someone restarts it.
     """
 
-    if not url:
-        return
-    target = urlsplit(url)
-    deadline = time.monotonic() + PROXY_WAIT_SECONDS
+    deadline = time.monotonic() + seconds
     while not stopped.is_set() and time.monotonic() < deadline:
-        try:
-            socket.create_connection((target.hostname, target.port or 80), timeout=2).close()
-        except OSError:
-            stopped.wait(1)
-        else:
+        if store_reachable(proxy):
             return
+        stopped.wait(2)
 
 
 def run_managed(module: str, keys: frozenset[str]) -> None:
@@ -129,7 +140,9 @@ def run_managed(module: str, keys: frozenset[str]) -> None:
     try:
         environment_id, token = read_bootstrap(BOOTSTRAP_FILE)
         environment = retrieval_environment(dict(os.environ), token, keys)
-        wait_for_proxy(os.environ.get("HTTPS_PROXY"), stopped)
+        # A test without a network sets this to 0.
+        wait = float(os.environ.get("MEDIA_KEY_STORE_WAIT_SECONDS", "300"))
+        wait_for_store(os.environ.get("HTTPS_PROXY"), stopped, wait)
         try:
             child = subprocess.Popen(
                 [

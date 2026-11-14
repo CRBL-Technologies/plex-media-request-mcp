@@ -6,6 +6,7 @@ import {
   projectUpstream,
   readBootstrap,
   retrievalEnvironment,
+  waitForKeyStore,
 } from "/app/managed/runtime.ts";
 
 function fetched(): Record<string, string> {
@@ -217,6 +218,8 @@ exec "$@"
           ...Deno.env.toObject(),
           ...fetched(),
           OP_SERVICE_ACCOUNT_TOKEN: "dummy-bootstrap-token",
+          // No network here, so the wait for the key store would never end.
+          MEDIA_KEY_STORE_WAIT_SECONDS: "0",
         },
         stdout: "piped",
         stderr: "piped",
@@ -276,3 +279,13 @@ exec "$@"
     }
   });
 }
+
+Deno.test("start waits until the key store answers, and not after a stop", async () => {
+  let checks = 0;
+  await waitForKeyStore(() => ++checks >= 3, () => false, 30, 10);
+  assert.equal(checks, 3);
+  // A stop request, or a spent wait, returns without another check.
+  await waitForKeyStore(() => ++checks < 0, () => true, 30, 10);
+  await waitForKeyStore(() => ++checks < 0, () => false, 0, 10);
+  assert.equal(checks, 3);
+});

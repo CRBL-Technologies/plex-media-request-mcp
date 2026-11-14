@@ -71,6 +71,9 @@ def daemon(image: str, args: list[str], probe: list[str], command: list[str] | N
         name,
         "--network",
         "none",
+        # No network here, so the wait for the key store would never end.
+        "-e",
+        "MEDIA_KEY_STORE_WAIT_SECONDS=0",
         "--read-only",
         "--tmpfs",
         "/tmp:rw,noexec,nosuid,nodev,size=64m",

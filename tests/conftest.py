@@ -7,7 +7,6 @@ import pytest
 
 from media_gateway import plex_watch
 from media_gateway.config import Config
-from media_gateway.password import hash_password
 
 
 @pytest.fixture(autouse=True)
@@ -83,10 +82,6 @@ def config(tmp_path: Path) -> Config:
     gateway.write_text("gateway-secret-with-at-least-32-bytes\n", encoding="utf-8")
     upstream = tmp_path / "upstream.env"
     upstream.write_text("MCP_AUTH_TOKEN=upstream-secret-with-at-least-32-bytes\n", encoding="utf-8")
-    password = tmp_path / "password.hash"
-    password.write_text(hash_password("correct horse battery staple"), encoding="utf-8")
-    session = tmp_path / "session.key"
-    session.write_text("session-secret-with-enough-entropy\n", encoding="utf-8")
     webhook = tmp_path / "webhook.key"
     webhook.write_text("plex-hook-secret-with-at-least-32-bytes\n", encoding="utf-8")
     return Config(
@@ -97,10 +92,10 @@ def config(tmp_path: Path) -> Config:
         gateway_token_file=gateway,
         upstream_url="http://upstream:3000",
         upstream_token_file=upstream,
-        dashboard_password_hash_file=password,
-        dashboard_session_key_file=session,
+        dashboard_host="127.0.0.1",
+        dashboard_port=18083,
+        dashboard_hosts=("media-admin.test",),
         plex_webhook_token_file=webhook,
-        secure_cookies=False,
         radarr_profile_id=10,
         radarr_root="/data/movies",
         radarr_tags=(3,),

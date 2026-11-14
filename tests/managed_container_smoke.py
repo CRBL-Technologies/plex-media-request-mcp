@@ -110,6 +110,7 @@ with tempfile.TemporaryDirectory(prefix="media-managed-smoke-") as temporary:
             {
                 "TELEGRAM_BOT_TOKEN": "fetched-telegram-token",
                 "MEDIA_GATEWAY_UPSTREAM_URL": "http://127.0.0.1:9",
+                # A retired option that Environments still hold. It must not stop the start.
                 "MEDIA_GATEWAY_SECURE_COOKIES": "false",
                 "MEDIA_GATEWAY_RADARR_PROFILE_ID": "25",
                 "MEDIA_GATEWAY_RADARR_ROOT": "/movies",
@@ -129,8 +130,6 @@ with tempfile.TemporaryDirectory(prefix="media-managed-smoke-") as temporary:
         keys.mkdir(mode=0o755)
         for filename, value in {
             "gateway.key": "g" * 40,
-            "dashboard-password.hash": "dummy-hash",
-            "dashboard-session.key": "d" * 40,
             "plex-webhook.key": "w" * 40,
         }.items():
             (keys / filename).write_text(value + "\n")
@@ -139,10 +138,6 @@ with tempfile.TemporaryDirectory(prefix="media-managed-smoke-") as temporary:
         gateway_args += [
             "-e",
             "MEDIA_GATEWAY_TOKEN_FILE=/run/media-keys/gateway.key",
-            "-e",
-            "MEDIA_GATEWAY_DASHBOARD_PASSWORD_HASH_FILE=/run/media-keys/dashboard-password.hash",
-            "-e",
-            "MEDIA_GATEWAY_DASHBOARD_SESSION_KEY_FILE=/run/media-keys/dashboard-session.key",
             "-e",
             "MEDIA_GATEWAY_PLEX_WEBHOOK_TOKEN_FILE=/run/media-keys/plex-webhook.key",
         ]

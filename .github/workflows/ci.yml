@@ -39,8 +39,8 @@ jobs:
           UPSTREAM_ENV_FILE: ${{ github.workspace }}/deployment/upstream.env.example
           GATEWAY_CONFIG_FILE: /tmp/gateway.env
           GATEWAY_TOKEN_FILE: /tmp/gateway.key
-          DASHBOARD_PASSWORD_HASH_FILE: /tmp/password.hash
-          DASHBOARD_SESSION_KEY_FILE: /tmp/session.key
+          DASHBOARD_NETWORK: private-access
+          DASHBOARD_ALLOWED_HOSTS: media-admin.example
           PLEX_WEBHOOK_TOKEN_FILE: /tmp/plex.key
           GATEWAY_ONEPASSWORD_FILE: /tmp/onepassword.json
           BOT_ONEPASSWORD_FILE: /tmp/bot-onepassword.json
@@ -63,9 +63,7 @@ jobs:
           chmod 0777 "$smoke/state"
           printf '%s\n' 'TELEGRAM_ALLOWED_USERS=1' 'TELEGRAM_ADMIN_USERS=1' > "$smoke/policy.env"
           printf '%064d\n' 0 > "$smoke/gateway.key"
-          printf '%064d\n' 0 > "$smoke/session.key"
           printf '%064d\n' 0 > "$smoke/plex.key"
-          printf '%s\n' 'placeholder-password-hash' > "$smoke/password.hash"
           printf '%s\n' 'MCP_AUTH_TOKEN=00000000000000000000000000000000' > "$smoke/upstream.env"
           set +e
           timeout 5s docker run --rm --network none --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev \
@@ -76,8 +74,6 @@ jobs:
             -e MEDIA_GATEWAY_TOKEN_FILE=/run/media-secrets/gateway.key \
             -e MEDIA_GATEWAY_UPSTREAM_URL=http://127.0.0.1:3000 \
             -e MEDIA_GATEWAY_UPSTREAM_TOKEN_FILE=/run/media-secrets/upstream.env \
-            -e MEDIA_GATEWAY_DASHBOARD_PASSWORD_HASH_FILE=/run/media-secrets/password.hash \
-            -e MEDIA_GATEWAY_DASHBOARD_SESSION_KEY_FILE=/run/media-secrets/session.key \
             -e MEDIA_GATEWAY_PLEX_WEBHOOK_TOKEN_FILE=/run/media-secrets/plex.key \
             -e MEDIA_GATEWAY_RADARR_PROFILE_ID=25 \
             -e MEDIA_GATEWAY_RADARR_ROOT=/data/media/movies \
@@ -88,9 +84,7 @@ jobs:
             -v "$smoke/state:/opt/data/state" \
             -v "$smoke/policy.env:/opt/hermes-data/.env:ro" \
             -v "$smoke/gateway.key:/run/media-secrets/gateway.key:ro" \
-            -v "$smoke/session.key:/run/media-secrets/session.key:ro" \
             -v "$smoke/plex.key:/run/media-secrets/plex.key:ro" \
-            -v "$smoke/password.hash:/run/media-secrets/password.hash:ro" \
             -v "$smoke/upstream.env:/run/media-secrets/upstream.env:ro" \
             crbl-media-gateway:ci
           status=$?

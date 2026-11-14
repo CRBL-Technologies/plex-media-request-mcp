@@ -16,7 +16,7 @@ The media subsystem has three services:
 
 1. `media-server-mcp`: the untouched, pinned upstream MCP on an internal network;
 2. `media-gateway`: CRBL policy, safe tools, Plex notifications, SQLite state,
-   and the LAN/Tailscale dashboard;
+   and the private dashboard;
 3. `media-bot`: the CRBL Telegram bot. It runs from the gateway image with a
    different entrypoint, so there is no separate bot image.
 
@@ -166,8 +166,13 @@ rewrite of the policy `.env`; it never promotes or removes an admin.
 Conversations are kept per user and chat, so group members never share history.
 In groups, replies and poster cards answer the triggering message.
 
-The dashboard is password protected with a scrypt hash, server-side signed
-sessions, strict same-site cookies, and CSRF tokens. It shows real observed and
+The dashboard has no login. It runs on its own listener, apart from the API, and
+that listener is bound to one network: the one the private access connector is
+on (`DASHBOARD_NETWORK`). The bot, the MCP and the hotio containers cannot open
+it, and it has no port on the host. Whoever can use that connector is an
+administrator, so the connector's access policy is the only protection. Every form
+carries a token that another site cannot read, and the listener answers only to
+the host names in `MEDIA_GATEWAY_DASHBOARD_ALLOWED_HOSTS`. It shows real observed and
 blocked Telegram users, paginated requests, and paginated activity; it does not
 expose raw JSON or secrets. Allowed messages update the user's `last_seen`
 timestamp without creating repetitive activity rows. Plex activity identifies
@@ -198,9 +203,13 @@ material is stored in individual read-only files. In the public recipe the bot
 reads `TELEGRAM_BOT_TOKEN` and `OPENROUTER_API_KEY` from the policy `.env`, and
 the `MEDIA_BOT_MODEL` stack variable selects its OpenRouter model.
 
-The dashboard binds NAS port `18082` for LAN/Tailscale access. Port `18081` is
-loopback-only for the host-network Plex webhook. The Docker socket is absent.
-The upstream MCP and the bot have no published port.
+The gateway API listens on port `18082` inside its networks only. Host port
+`18081` is loopback-only for the host-network Plex webhook. The dashboard listens
+on port `18083` of the private access network; point the private access path at
+`media-admin:18083`. The Docker socket is absent. The upstream MCP and the bot
+have no published port.
+
+Every service has a memory and a process limit in both Compose recipes.
 
 The bot is sealed at the network level too. Its network, `media-bot`, is internal
 and has no address on the host, so the bot cannot open a connection to the NAS, to
@@ -308,7 +317,7 @@ read-only and owned by UID 1000. Its JSON object has exactly two string fields:
 image layers, Compose environment values or Portainer variables. The approved
 CLI is 2.42.0 at the pinned Dockerfile digest. Do not use an assistant credential.
 
-The gateway Environment must contain all twelve existing app-option names in
+The gateway Environment must contain all eleven app-option names in
 `media_gateway.managed_start.APP_KEYS`, including both tag lists even when empty.
 It must also contain these file-backed values:
 
@@ -323,14 +332,12 @@ existing host files, which Compose mounts read-only:
 | Stack variable (host file) | Gateway mount |
 | --- | --- |
 | `GATEWAY_TOKEN_FILE` | `/run/media-keys/gateway.key`, also mounted for the bot |
-| `DASHBOARD_PASSWORD_HASH_FILE` | `/run/media-keys/dashboard-password.hash` |
-| `DASHBOARD_SESSION_KEY_FILE` | `/run/media-keys/dashboard-session.key` |
 | `PLEX_WEBHOOK_TOKEN_FILE` | `/run/media-keys/plex-webhook.key` |
 
 The wrappers refuse to start if `MEDIA_GATEWAY_TOKEN`,
-`MEDIA_GATEWAY_DASHBOARD_PASSWORD_HASH`, `MEDIA_GATEWAY_DASHBOARD_SESSION_KEY`,
 `MEDIA_GATEWAY_PLEX_WEBHOOK_TOKEN` or `CRBL_MEDIA_GATEWAY_TOKEN` appears in an
-Environment, so each generated key keeps one source.
+Environment, so each generated key keeps one source. An Environment that still
+holds the retired `MEDIA_GATEWAY_SECURE_COOKIES` option starts normally.
 
 These files retain their existing raw-key or dotenv formats. The managed gateway
 sets `MEDIA_GATEWAY_TELEGRAM_TOKEN_FILE` to the separate Telegram file. The
@@ -389,5 +396,5 @@ The writable policy file remains the authority for `TELEGRAM_ALLOWED_USERS` and
 
 Keep the three store identities separate. Shared bot/gateway token values are
 needed only by their documented consumers; the bot must not acquire Radarr,
-Sonarr, Plex, TMDB or gateway dashboard/session keys. No real 1Password identifier,
+Sonarr, Plex or TMDB keys. No real 1Password identifier,
 bootstrap token, or private deployment inventory belongs in this public repository.

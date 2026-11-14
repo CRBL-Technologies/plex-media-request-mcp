@@ -50,18 +50,12 @@ td strong{font-weight:500}tr:last-child td{border-bottom:0}
 padding:var(--space-md);border-top:1px solid var(--color-border);font-size:var(--font-size-body-sm)}
 .pager a{font-weight:500;text-decoration:underline;text-underline-offset:4px}
 .pager .disabled{color:var(--color-text-muted)}
-.login{width:calc(100% - 32px);max-width:460px;margin:12vh auto;padding:var(--space-xl)}
-.login .brand{margin-bottom:var(--space-xl)}.login h1{font-size:var(--font-size-h3)}
-.login label{display:block;font-size:var(--font-size-body-sm);margin-bottom:var(--space-sm)}
-.login .input{margin-bottom:var(--space-md)}.login .btn{width:100%;justify-content:center}
-.error{color:var(--color-error);margin-bottom:var(--space-md)}
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 button:focus-visible,input:focus-visible,a:focus-visible{outline:2px solid var(--color-accent-darker);outline-offset:3px}
 @media(max-width:760px){.shell{padding:var(--space-lg) var(--space-md)}.grid{grid-template-columns:1fr;gap:var(--space-sm)}
 .kpi{display:flex;align-items:center;gap:var(--space-md);padding:var(--space-md)}.kpi strong{margin:0;min-width:48px;font-size:32px}
 .top,.panel-head{align-items:flex-start;flex-direction:column}.panel-head{padding:var(--space-md)}
-.inline{width:100%;flex-wrap:wrap}.inline .input{flex:1;min-width:140px;width:auto}th,td{padding:12px}
-.login{margin-top:var(--space-2xl);padding:var(--space-lg)}}
+.inline{width:100%;flex-wrap:wrap}.inline .input{flex:1;min-width:140px;width:auto}th,td{padding:12px}}
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*,*::before,*::after{animation:none!important;transition:none!important}.btn:active{transform:none}}
 """
 
@@ -93,18 +87,6 @@ def _page(content: str, *, title: str = "Media admin") -> str:
 <meta name="apple-mobile-web-app-title" content="Media admin">
 <link rel="stylesheet" href="/assets/brand/colors_and_type.css">
 <link rel="stylesheet" href="/assets/app.css"></head><body>{content}</body></html>"""
-
-
-def login_page(*, error: str | None = None) -> str:
-    error_html = f'<p class="error" role="alert">{html.escape(error)}</p>' if error else ""
-    return _page(
-        f"""<main class="card panel login"><div class="brand"><div class="mark">{MARK_ICON}</div><div><h1>Media admin</h1>
-<div class="subtitle">CRBL private dashboard</div></div></div>{error_html}
-<form method="post" action="/login"><label for="password" class="muted">Dashboard password</label>
-<input class="input" id="password" name="password" type="password" autocomplete="current-password" required autofocus>
-<button class="btn btn-primary" type="submit">Sign in</button></form></main>""",
-        title="Sign in",
-    )
 
 
 def dashboard_page(
@@ -149,8 +131,7 @@ def dashboard_page(
     notice_html = f'<div class="notice">{html.escape(notice)}</div>' if notice else ""
     return _page(
         f"""<main class="shell"><header class="top"><div class="brand"><div class="mark">{MARK_ICON}</div><div><h1>Media admin</h1>
-<div class="subtitle">Users, requests, and Plex activity</div></div></div><form method="post" action="/logout">
-<input type="hidden" name="csrf" value="{html.escape(csrf)}"><button class="btn btn-secondary">Sign out</button></form></header>
+<div class="subtitle">Users, requests, and Plex activity</div></div></div></header>
 {notice_html}<section class="grid"><div class="card kpi"><strong>{allowed}</strong><span>Allowed users</span></div>
 <div class="card kpi"><strong>{admins}</strong><span>Administrators</span></div><div class="card kpi"><strong>{blocked}</strong><span>Blocked contacts observed</span></div></section>
 <section class="card panel"><div class="panel-head"><h2>Users</h2><form class="inline" method="post" action="/users/add">

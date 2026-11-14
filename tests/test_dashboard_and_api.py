@@ -25,7 +25,7 @@ from starlette.testclient import TestClient
 from starlette.types import ASGIApp
 
 from media_gateway import plex_watch
-from media_gateway.app import COOKIE, create_app
+from media_gateway.app import create_app
 from media_gateway.config import Config
 from media_gateway.constants import SHARED_TOOLS
 from media_gateway.dashboard import _request_status
@@ -164,24 +164,15 @@ def call_tool(
     )
 
 
-def _login(client: TestClient) -> str:
-    response = client.post(
-        "/login",
-        data={"password": "correct horse battery staple"},
-        headers={"Origin": "http://nas.lan:18082", "User-Agent": "Firefox"},
-        follow_redirects=False,
-    )
-    assert response.status_code == 303
-    assert client.cookies.get(COOKIE)
-    return str(client.cookies[COOKIE])
+def _dashboard(app: Starlette) -> TestClient:
+    """The dashboard listener, reached under the one host name the configuration allows."""
+
+    return TestClient(app.state.dashboard, base_url="http://media-admin.test")
 
 
-def test_login_redirect_and_real_user_table(config: Config) -> None:
+def test_dashboard_needs_no_login_and_shows_the_real_user_table(config: Config) -> None:
     app = create_app(config)
     with TestClient(app) as client:
-        assert client.get("/", follow_redirects=False).headers["location"] == "/login"
-        assert client.post("/login", data={"password": "wrong"}).status_code == 401
-
         response = client.post(
             "/api/actors",
             headers=_headers(),
@@ -191,8 +182,7 @@ def test_login_redirect_and_real_user_table(config: Config) -> None:
             },
         )
         assert response.status_code == 200
-        _login(client)
-        page = client.get("/")
+        page = _dashboard(app).get("/")
         assert page.status_code == 200
         assert "Philippe Test" in page.text
         assert "@philippe" in page.text
@@ -202,9 +192,23 @@ def test_login_redirect_and_real_user_table(config: Config) -> None:
         assert "Media admin" in page.text
 
 
+def test_dashboard_and_api_are_separate_listeners(config: Config) -> None:
+    app = create_app(config)
+    with TestClient(app) as api:
+        # The API listener, which the bot and other containers reach, has no dashboard.
+        assert api.get("/").status_code == 404
+        assert api.post("/users/add", data={"user_id": "2002"}).status_code == 404
+        # The dashboard listener has no API, and answers only to its own host name.
+        dashboard = _dashboard(app)
+        assert dashboard.post("/api/tools/call", json={}).status_code == 404
+        foreign = TestClient(app.state.dashboard, base_url="http://attacker.example")
+        assert foreign.get("/").status_code == 400
+        assert app.state.runtime.policy.snapshot().role(2002).value == "blocked"
+
+
 def test_dashboard_paginates_requests_and_activity_independently(config: Config) -> None:
     app = create_app(config)
-    with TestClient(app) as client:
+    with TestClient(app):
         runtime = app.state.runtime
         actor = Actor(user_id=1001, chat_id=1001)
         for number in range(30):
@@ -217,21 +221,21 @@ def test_dashboard_paginates_requests_and_activity_independently(config: Config)
                 actor=actor,
             )
             runtime.store.record_activity("policy", f"Policy {number}")
-        _login(client)
+        dashboard = _dashboard(app)
 
-        page = client.get("/?request_page=2&activity_page=3")
+        page = dashboard.get("/?request_page=2&activity_page=3")
 
         assert page.status_code == 200
         assert "Page 2 of 2 · 30 total" in page.text
         assert "Page 3 of 3 · 60 total" in page.text
         assert "request_page=1&amp;activity_page=3#requests" in page.text
         assert "request_page=2&amp;activity_page=2#activity" in page.text
-        assert client.get("/?request_page=" + "9" * 10_000).status_code == 200
+        assert dashboard.get("/?request_page=" + "9" * 10_000).status_code == 200
 
 
 def test_dashboard_plex_activity_includes_episode_hierarchy(config: Config) -> None:
     app = create_app(config)
-    with TestClient(app) as client:
+    with TestClient(app):
         app.state.runtime.store.add_media_event(
             event_key="episode:42",
             media_type="series",
@@ -243,24 +247,29 @@ def test_dashboard_plex_activity_includes_episode_hierarchy(config: Config) -> N
             episode_number=2,
             plex_url="https://app.plex.tv/42",
         )
-        _login(client)
 
-        page = client.get("/")
+        page = _dashboard(app).get("/")
 
         assert "Plex added 3 Body Problem · S01E02 · Countdown" in page.text
 
 
 def test_dashboard_adds_and_removes_allowlisted_user(config: Config) -> None:
     app = create_app(config)
-    with TestClient(app) as client:
-        token = _login(client)
-        csrf = app.state.runtime.sessions.csrf(token)
-        response = client.post(
+    with TestClient(app):
+        dashboard = _dashboard(app)
+        token = re.search(r'name="csrf" value="([^"]+)"', dashboard.get("/").text)
+        assert token is not None
+        csrf = token.group(1)
+        # Without the token from the page, a form from another site changes nothing.
+        forged = dashboard.post("/users/add", data={"user_id": "2002"}, follow_redirects=False)
+        assert "invalid" in forged.headers["location"]
+        assert app.state.runtime.policy.snapshot().role(2002).value == "blocked"
+        response = dashboard.post(
             "/users/add", data={"csrf": csrf, "user_id": "2002"}, follow_redirects=False
         )
         assert response.status_code == 303
         assert app.state.runtime.policy.snapshot().role(2002).value == "user"
-        response = client.post(
+        response = dashboard.post(
             "/users/remove",
             data={"csrf": csrf, "user_id": "2002"},
             follow_redirects=False,
@@ -1073,7 +1082,7 @@ def test_specials_notify_only_the_specials_requester(config: Config) -> None:
     """
 
     app = create_app(config)
-    with TestClient(app) as client:
+    with TestClient(app):
         runtime = app.state.runtime
         runtime.store.record_request(
             media_type="series",
@@ -1103,7 +1112,6 @@ def test_specials_notify_only_the_specials_requester(config: Config) -> None:
 
         assert specials == {(1001, 1001)}
         assert season_one == {(2002, 2002)}
-        assert client.get("/login").status_code == 200
 
 
 def test_specials_webhook_keeps_its_season_number(config: Config) -> None:
@@ -4167,8 +4175,10 @@ def test_request_status_shows_the_specific_provider_outcome() -> None:
 
 
 def test_dashboard_serves_the_brand_favicon(config: Config) -> None:
-    with TestClient(create_app(config)) as client:
-        login = client.get("/login")
+    app = create_app(config)
+    with TestClient(app):
+        client = _dashboard(app)
+        login = client.get("/")
         favicon = re.search(r'<link rel="icon" href="([^"]+)"', login.text)
         assert favicon is not None
         response = client.get(favicon.group(1))
@@ -4190,8 +4200,6 @@ def test_dashboard_serves_the_brand_favicon(config: Config) -> None:
         assert int.from_bytes(icon.content[16:20], "big") == 180
         assert int.from_bytes(icon.content[20:24], "big") == 180
         assert '<meta name="apple-mobile-web-app-title" content="Media admin">' in login.text
-        _login(client)
-        assert touch_icon.group(0) in client.get("/").text
 
         # Same-origin only, so the strict default-src CSP still allows it.
         assert "default-src 'self'" in login.headers["content-security-policy"]
@@ -4227,7 +4235,7 @@ def test_request_table_keeps_status_on_one_line(config: Config) -> None:
             actor=Actor(user_id=1001, chat_id=1001),
         )
         runtime.store.complete_request(request_id, "search_started", generation=1)
-        _login(client)
+        client = _dashboard(app)
 
         page = client.get("/")
 

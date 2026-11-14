@@ -17,10 +17,10 @@ CONFIG_KEYS = {
     "MEDIA_GATEWAY_TOKEN_FILE",
     "MEDIA_GATEWAY_UPSTREAM_URL",
     "MEDIA_GATEWAY_UPSTREAM_TOKEN_FILE",
-    "MEDIA_GATEWAY_DASHBOARD_PASSWORD_HASH_FILE",
-    "MEDIA_GATEWAY_DASHBOARD_SESSION_KEY_FILE",
+    "MEDIA_GATEWAY_DASHBOARD_HOST",
+    "MEDIA_GATEWAY_DASHBOARD_PORT",
+    "MEDIA_GATEWAY_DASHBOARD_ALLOWED_HOSTS",
     "MEDIA_GATEWAY_PLEX_WEBHOOK_TOKEN_FILE",
-    "MEDIA_GATEWAY_SECURE_COOKIES",
     "MEDIA_GATEWAY_RADARR_PROFILE_ID",
     "MEDIA_GATEWAY_RADARR_ROOT",
     "MEDIA_GATEWAY_RADARR_TAG_IDS",
@@ -75,10 +75,10 @@ class Config:
     gateway_token_file: Path
     upstream_url: str
     upstream_token_file: Path
-    dashboard_password_hash_file: Path
-    dashboard_session_key_file: Path
+    dashboard_host: str
+    dashboard_port: int
+    dashboard_hosts: tuple[str, ...]
     plex_webhook_token_file: Path
-    secure_cookies: bool
     radarr_profile_id: int
     radarr_root: str
     radarr_tags: tuple[int, ...]
@@ -117,17 +117,16 @@ class Config:
             upstream_token_file=Path(
                 os.getenv("MEDIA_GATEWAY_UPSTREAM_TOKEN_FILE", "/run/media-secrets/upstream.env")
             ),
-            dashboard_password_hash_file=Path(
-                os.getenv(
-                    "MEDIA_GATEWAY_DASHBOARD_PASSWORD_HASH_FILE",
-                    "/run/media-secrets/dashboard-password.hash",
-                )
-            ),
-            dashboard_session_key_file=Path(
-                os.getenv(
-                    "MEDIA_GATEWAY_DASHBOARD_SESSION_KEY_FILE",
-                    "/run/media-secrets/dashboard-session.key",
-                )
+            # The dashboard has no login. Bind it only where the private access
+            # path can reach it, and name the hosts that path uses.
+            dashboard_host=os.getenv("MEDIA_GATEWAY_DASHBOARD_HOST", "127.0.0.1"),
+            dashboard_port=_int("MEDIA_GATEWAY_DASHBOARD_PORT", 18083),
+            dashboard_hosts=tuple(
+                name.strip().lower()
+                for name in os.getenv(
+                    "MEDIA_GATEWAY_DASHBOARD_ALLOWED_HOSTS", "localhost,127.0.0.1"
+                ).split(",")
+                if name.strip()
             ),
             plex_webhook_token_file=Path(
                 os.getenv(
@@ -135,7 +134,6 @@ class Config:
                     "/run/media-secrets/plex-webhook.key",
                 )
             ),
-            secure_cookies=_bool("MEDIA_GATEWAY_SECURE_COOKIES", False),
             radarr_profile_id=_int("MEDIA_GATEWAY_RADARR_PROFILE_ID"),
             radarr_root=os.environ["MEDIA_GATEWAY_RADARR_ROOT"],
             radarr_tags=_tags("MEDIA_GATEWAY_RADARR_TAG_IDS"),

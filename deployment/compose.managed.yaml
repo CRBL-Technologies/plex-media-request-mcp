@@ -24,6 +24,8 @@ services:
       - ${UPSTREAM_ONEPASSWORD_FILE:?required owner-provisioned bootstrap file}:/run/secrets/onepassword.json:ro
     expose: ["3000"]
     networks: [media-mcp, media]
+    mem_limit: 1g
+    pids_limit: 256
     healthcheck:
       test: [CMD-SHELL, "wget -q -O /dev/null http://127.0.0.1:3000/health"]
       interval: 30s
@@ -54,8 +56,9 @@ services:
       MEDIA_GATEWAY_POLICY_FILE: /opt/hermes-data/.env
       MEDIA_GATEWAY_TOKEN_FILE: /run/media-keys/gateway.key
       MEDIA_GATEWAY_UPSTREAM_TOKEN_FILE: /run/media-secrets/upstream.env
-      MEDIA_GATEWAY_DASHBOARD_PASSWORD_HASH_FILE: /run/media-keys/dashboard-password.hash
-      MEDIA_GATEWAY_DASHBOARD_SESSION_KEY_FILE: /run/media-keys/dashboard-session.key
+      MEDIA_GATEWAY_DASHBOARD_HOST: media-admin
+      MEDIA_GATEWAY_DASHBOARD_PORT: "18083"
+      MEDIA_GATEWAY_DASHBOARD_ALLOWED_HOSTS: ${DASHBOARD_ALLOWED_HOSTS:?required host names of the private dashboard}
       MEDIA_GATEWAY_PLEX_WEBHOOK_TOKEN_FILE: /run/media-keys/plex-webhook.key
       MEDIA_GATEWAY_TELEGRAM_TOKEN_FILE: /run/media-secrets/telegram.env
     volumes:
@@ -63,13 +66,19 @@ services:
       - ${GATEWAY_STATE_DIR:?required}:/opt/data/state:rw
       - ${GATEWAY_ONEPASSWORD_FILE:?required owner-provisioned bootstrap file}:/run/secrets/onepassword.json:ro
       - ${GATEWAY_TOKEN_FILE:?required}:/run/media-keys/gateway.key:ro
-      - ${DASHBOARD_PASSWORD_HASH_FILE:?required}:/run/media-keys/dashboard-password.hash:ro
-      - ${DASHBOARD_SESSION_KEY_FILE:?required}:/run/media-keys/dashboard-session.key:ro
       - ${PLEX_WEBHOOK_TOKEN_FILE:?required}:/run/media-keys/plex-webhook.key:ro
     ports:
-      - "18082:18082"
+      # Loopback only, for the Plex webhook. The API has no port on the home network.
       - "127.0.0.1:18081:18082"
-    networks: [media-bot, media-mcp, media]
+    networks:
+      media-bot:
+      media-mcp:
+      media:
+      # The dashboard listens only on this network, under this name.
+      media-admin:
+        aliases: [media-admin]
+    mem_limit: 384m
+    pids_limit: 128
     depends_on:
       media-server-mcp:
         condition: service_healthy
@@ -110,6 +119,8 @@ services:
       - ${GATEWAY_TOKEN_FILE:?required}:/run/media-keys/gateway.key:ro
       - ${BOT_STATE_DIR:?required}:/opt/data/state:rw
     networks: [media-bot]
+    mem_limit: 512m
+    pids_limit: 128
     depends_on:
       media-gateway:
         condition: service_healthy
@@ -139,6 +150,8 @@ services:
     security_opt: [no-new-privileges:true]
     entrypoint: [python, -m, media_bot.egress]
     networks: [media-bot, media-egress]
+    mem_limit: 64m
+    pids_limit: 64
     healthcheck:
       test: [CMD, python, -c, "import socket; socket.create_connection(('127.0.0.1', 3128), 3)"]
       interval: 30s
@@ -171,6 +184,11 @@ networks:
     name: media-mcp
     internal: true
     driver: bridge
+  # The only path to the dashboard, which has no login: the existing network of
+  # the private access connector (on the NAS, the Tailscale Service connector).
+  media-admin:
+    name: ${DASHBOARD_NETWORK:?required network of the private access connector}
+    external: true
   media:
     name: media
     external: true

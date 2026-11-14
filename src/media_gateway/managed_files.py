@@ -10,8 +10,6 @@ from pathlib import Path
 FILE_KEYS = frozenset(
     {
         "MEDIA_GATEWAY_TOKEN",
-        "MEDIA_GATEWAY_DASHBOARD_PASSWORD_HASH",
-        "MEDIA_GATEWAY_DASHBOARD_SESSION_KEY",
         "MEDIA_GATEWAY_PLEX_WEBHOOK_TOKEN",
         "CRBL_MEDIA_GATEWAY_TOKEN",
     }

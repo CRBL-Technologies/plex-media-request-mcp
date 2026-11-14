@@ -86,6 +86,18 @@ export function retrievalEnvironment(
   return environment;
 }
 
+/**
+ * Quote one value for Deno's env-file reader so that it reads back unchanged.
+ * Single quotes are literal. Double quotes are literal too, apart from `"`, `\`
+ * and `$`, whose handling differs between Deno versions. A value that needs both
+ * forms is refused instead of being read back wrong.
+ */
+function quoted(value: string): string {
+  if (!value.includes("'")) return `'${value}'`;
+  if (/["\\$]/.test(value)) throw new Error("Invalid upstream runtime value");
+  return `"${value}"`;
+}
+
 export function projectUpstream(
   source: Record<string, string>,
   path: string,
@@ -104,9 +116,8 @@ export function projectUpstream(
   ) {
     throw new Error("Invalid upstream runtime value");
   }
-  const text = entries.map(([key, value]) =>
-    `${key}=${JSON.stringify(value).replaceAll("$", "\\$")}\n`
-  ).join("");
+  const text = entries.map(([key, value]) => `${key}=${quoted(value)}\n`)
+    .join("");
   Deno.writeTextFileSync(path, text, { mode: 0o600, createNew: true });
   return Object.fromEntries(
     Object.entries(source).filter(([key]) =>

@@ -1,10 +1,25 @@
 # syntax=docker/dockerfile:1.7
 FROM 1password/op:2.42.0@sha256:b0d7eebcb09bdc9d5862af91533e1851c968d4f969270c906f5da8c574f87e93 AS onepassword
+# The vendor 2.3.0 image ships Deno 2.6.0, which has known advisories. Take only
+# the runtime binary from the pinned Deno image; the vendor sources stay as they are.
+FROM denoland/deno:alpine-2.9.8@sha256:75749604f68aea01d39bead15fd1c86343639e44eb8c58ab051da8a924799d01 AS deno
 FROM ghcr.io/wyattjoh/media-server-mcp@sha256:f83620da1d008ef18df3324b15e44854572ea41b528eff585033e4054b438377
 ARG SOURCE_COMMIT
 USER root
+COPY --from=deno /bin/deno /bin/deno
+ENV DENO_VERSION=2.9.8
 # The base image can lag Alpine's security updates.
 RUN apk upgrade --no-cache
+# Keep the vendor 2.3.0 sources and schemas; change only this locked dependency.
+RUN deno eval --no-config 'const path = "/app/deno.lock"; \
+    const lock = JSON.parse(Deno.readTextFileSync(path)); \
+    const old = lock.npm["proxy-addr@2.0.7"]; \
+    if (!old || lock.npm["proxy-addr@2.0.8"] || JSON.stringify(old.dependencies) !== JSON.stringify(["forwarded", "ipaddr.js"])) throw new Error("Unexpected vendor proxy-addr lock"); \
+    delete lock.npm["proxy-addr@2.0.7"]; \
+    lock.npm["proxy-addr@2.0.8"] = { ...old, integrity: "sha512-5nnx0yGyVUcY6t9RnWcARWtwT9F1D8O9rt08htPvnd49W1IgZtmLkhu9WfMzQj1cFxjHIO6connUNVW5k7AVyQ==" }; \
+    Deno.writeTextFileSync(path, JSON.stringify(lock, null, 2) + "\n");' \
+    && deno cache --frozen packages/media-server-mcp/src/index.ts \
+    && rm -rf /deno-dir/npm/registry.npmjs.org/proxy-addr/2.0.7
 RUN mkdir -p /run/media-secrets && chown 1000:1000 /run/media-secrets
 COPY --from=onepassword /usr/local/bin/op /usr/local/bin/op
 COPY deployment/upstream /app/managed

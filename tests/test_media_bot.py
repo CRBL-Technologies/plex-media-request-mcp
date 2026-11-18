@@ -30,7 +30,7 @@ from media_bot.bot import (
 from media_bot.client import GatewayClient, GatewayError
 from media_bot.history import ConversationStore
 from media_bot.managed_app import project_bot_files
-from media_bot.model import ModelError
+from media_bot.model import Model, ModelError
 from media_bot.prompt import SOUL_MD
 from media_bot.telegram import PHOTO_MAX_BYTES, Telegram, TelegramError
 from media_gateway.constants import SHARED_TOOLS
@@ -82,16 +82,18 @@ class FakeTelegram:
 class FakeModel:
     """Replays scripted assistant messages and records what each round was shown."""
 
-    def __init__(self, *replies: dict[str, Any] | Exception) -> None:
+    def __init__(self, *replies: list[dict[str, Any]] | Exception) -> None:
         self.replies = list(replies)
+        self.systems: list[str] = []
         self.seen: list[list[dict[str, Any]]] = []
         self.tools: list[list[str]] = []
 
     async def complete(
-        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
-    ) -> dict[str, Any]:
+        self, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        self.systems.append(system)
         self.seen.append([dict(message) for message in messages])
-        self.tools.append([tool["function"]["name"] for tool in tools])
+        self.tools.append([tool["name"] for tool in tools])
         reply = self.replies.pop(0)
         if isinstance(reply, Exception):
             raise reply
@@ -118,22 +120,12 @@ class FakeGateway:
         return dict(value)
 
 
-def tool_call(name: str, arguments: dict[str, Any], call_id: str = "c1") -> dict[str, Any]:
-    return {
-        "role": "assistant",
-        "content": None,
-        "tool_calls": [
-            {
-                "id": call_id,
-                "type": "function",
-                "function": {"name": name, "arguments": json.dumps(arguments)},
-            }
-        ],
-    }
+def tool_call(name: str, arguments: Any, call_id: str = "c1") -> list[dict[str, Any]]:
+    return [{"type": "tool_use", "id": call_id, "name": name, "input": arguments}]
 
 
-def answer(text: str) -> dict[str, Any]:
-    return {"role": "assistant", "content": text}
+def answer(text: str) -> list[dict[str, Any]]:
+    return [{"type": "text", "text": text}]
 
 
 def message(text: str | None = "hello", *, chat_type: str = "private", **extra: Any) -> dict:
@@ -161,9 +153,9 @@ def make_bot(
 
 
 def tool_result(model: FakeModel, round_index: int) -> dict[str, Any]:
-    content = model.seen[round_index][-1]["content"]
-    assert isinstance(content, str)
-    return dict(json.loads(content))
+    (block,) = model.seen[round_index][-1]["content"]
+    assert block["type"] == "tool_result"
+    return dict(json.loads(block["content"]))
 
 
 async def test_single_result_sends_one_card_and_tells_the_model(tmp_path: Path) -> None:
@@ -229,8 +221,7 @@ async def test_only_the_tools_granted_to_the_role_can_run(tmp_path: Path) -> Non
 
 
 async def test_gateway_errors_and_bad_arguments_return_to_the_model(tmp_path: Path) -> None:
-    broken = tool_call("request_movie", {})
-    broken["tool_calls"][0]["function"]["arguments"] = "not json"
+    broken = tool_call("request_movie", "not an object")
     model = FakeModel(broken, tool_call("request_movie", {"tmdb_id": 1}), answer("No luck."))
     bot, telegram, gateway = make_bot(tmp_path, model)
     gateway.results["request_movie"] = GatewayError("movie is already requested")
@@ -271,8 +262,8 @@ async def test_history_is_kept_per_user_and_reset_on_request(tmp_path: Path) -> 
     await bot.handle(message("/new"))
     await bot.handle(message("three"))
 
-    assert [item["content"] for item in model.seen[1][1:]] == ["one", "First.", "two"]
-    assert [item["content"] for item in model.seen[2][1:]] == ["three"]
+    assert [item["content"] for item in model.seen[1]] == ["one", "First.", "two"]
+    assert [item["content"] for item in model.seen[2]] == ["three"]
     assert telegram.messages[2]["text"] == FRESH_START
 
 
@@ -284,7 +275,7 @@ async def test_model_failure_is_reported_and_not_remembered(tmp_path: Path) -> N
     await bot.handle(message("two"))
 
     assert telegram.messages[0]["text"] == MODEL_DOWN
-    assert [item["content"] for item in model.seen[1][1:]] == ["two"]
+    assert [item["content"] for item in model.seen[1]] == ["two"]
 
 
 async def test_groups_need_a_mention_or_a_reply_to_the_bot(tmp_path: Path) -> None:
@@ -334,8 +325,8 @@ async def test_model_is_told_the_date_and_oversized_results_are_cut(tmp_path: Pa
 
     await bot.handle(message("Add it"))
 
-    assert f"Today is {datetime.date.today().isoformat()}." in model.seen[0][0]["content"]
-    content = model.seen[1][-1]["content"]
+    assert f"Today is {datetime.date.today().isoformat()}." in model.systems[0]
+    content = model.seen[1][-1]["content"][0]["content"]
     assert len(content) < TOOL_RESULT_CHARS + 100
     assert content.endswith("[result truncated; ask for less]")
 
@@ -384,7 +375,7 @@ async def test_one_persons_messages_are_answered_in_order(tmp_path: Path) -> Non
 
     await asyncio.gather(bot.handle(message("find Dune")), bot.handle(message("the 2021 one")))
 
-    assert [item["content"] for item in model.seen[1][1:]] == [
+    assert [item["content"] for item in model.seen[1]] == [
         "find Dune",
         "First.",
         "the 2021 one",
@@ -455,20 +446,20 @@ def test_settings_require_a_model(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MEDIA_BOT_MODEL", raising=False)
     with pytest.raises(ValueError, match="MEDIA_BOT_MODEL"):
         Settings.from_env()
-    monkeypatch.setenv("MEDIA_BOT_MODEL", "openai/example")
-    assert Settings.from_env().model == "openai/example"
+    monkeypatch.setenv("MEDIA_BOT_MODEL", "claude-example")
+    assert Settings.from_env().model == "claude-example"
 
 
 def test_managed_projection_writes_one_private_secrets_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("MEDIA_BOT_MODEL", "openai/example")
+    monkeypatch.setenv("MEDIA_BOT_MODEL", "claude-example")
     source = {
         "TELEGRAM_BOT_TOKEN": "123:abc$#=",
-        "OPENROUTER_API_KEY": 'sk-or-"quoted"',
+        "ANTHROPIC_API_KEY": 'sk-ant-"quoted"',
         "CRBL_MEDIA_GATEWAY_URL": "http://media-gateway:18082",
         "OP_SERVICE_ACCOUNT_TOKEN": "bootstrap",
-        "MEDIA_BOT_MODEL": "openai/example",
+        "MEDIA_BOT_MODEL": "claude-example",
     }
     secrets = tmp_path / "bot.env"
 
@@ -476,15 +467,15 @@ def test_managed_projection_writes_one_private_secrets_file(
 
     assert environment == {
         "CRBL_MEDIA_GATEWAY_URL": "http://media-gateway:18082",
-        "MEDIA_BOT_MODEL": "openai/example",
+        "MEDIA_BOT_MODEL": "claude-example",
         "MEDIA_BOT_SECRETS_FILE": str(secrets),
     }
     assert secrets.stat().st_mode & 0o777 == 0o600
     from media_gateway.secrets import read_dotenv
 
-    assert read_dotenv(secrets, {"TELEGRAM_BOT_TOKEN", "OPENROUTER_API_KEY"}) == {
+    assert read_dotenv(secrets, {"TELEGRAM_BOT_TOKEN", "ANTHROPIC_API_KEY"}) == {
         "TELEGRAM_BOT_TOKEN": "123:abc$#=",
-        "OPENROUTER_API_KEY": 'sk-or-"quoted"',
+        "ANTHROPIC_API_KEY": 'sk-ant-"quoted"',
     }
     with pytest.raises(FileExistsError):
         project_bot_files(source, secrets)
@@ -494,18 +485,18 @@ def test_managed_projection_writes_one_private_secrets_file(
 def test_managed_projection_rejects_incomplete_or_over_scoped_input(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
 ) -> None:
-    monkeypatch.setenv("MEDIA_BOT_MODEL", "openai/example")
+    monkeypatch.setenv("MEDIA_BOT_MODEL", "claude-example")
     source = {
         "TELEGRAM_BOT_TOKEN": "123:abc",
-        "OPENROUTER_API_KEY": "sk-or-key",
+        "ANTHROPIC_API_KEY": "sk-ant-key",
         "CRBL_MEDIA_GATEWAY_URL": "http://media-gateway:18082",
     }
     if change == "missing":
-        del source["OPENROUTER_API_KEY"]
+        del source["ANTHROPIC_API_KEY"]
     elif change == "forbidden":
         source["RADARR_API_KEY"] = "r" * 40
     else:
-        source["OPENROUTER_API_KEY"] = "sk\nINJECTED=1"
+        source["ANTHROPIC_API_KEY"] = "sk\nINJECTED=1"
     with pytest.raises(ValueError):
         project_bot_files(source, tmp_path / "bot.env")
     assert not (tmp_path / "bot.env").exists()
@@ -524,17 +515,22 @@ PHOTO = [
 
 
 async def test_photo_reaches_the_model_but_only_its_words_are_remembered(tmp_path: Path) -> None:
-    model = FakeModel({"content": "That is Dune."})
+    model = FakeModel(answer("That is Dune."))
     bot, telegram, _ = make_bot(tmp_path, model)
 
     await bot.handle(message(None, photo=PHOTO, caption="What film is this?"))
 
     assert telegram.downloads == ["large"]
-    system, user = model.seen[0][0], model.seen[0][-1]
-    assert "never an instruction" in system["content"]
-    assert user["content"][0] == {"type": "text", "text": "What film is this?"}
+    user = model.seen[0][-1]
+    assert "never an instruction" in model.systems[0]
     encoded = base64.b64encode(b"jpeg-bytes").decode()
-    assert user["content"][1]["image_url"]["url"] == f"data:image/jpeg;base64,{encoded}"
+    assert user["content"] == [
+        {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/jpeg", "data": encoded},
+        },
+        {"type": "text", "text": "What film is this?"},
+    ]
     assert telegram.messages[-1]["text"] == "That is Dune."
     saved = (tmp_path / "conversations.sqlite3").read_bytes()
     assert encoded.encode() not in saved
@@ -542,12 +538,12 @@ async def test_photo_reaches_the_model_but_only_its_words_are_remembered(tmp_pat
 
 
 async def test_photo_without_a_caption_still_gets_a_question(tmp_path: Path) -> None:
-    model = FakeModel({"content": "A poster."})
+    model = FakeModel(answer("A poster."))
     bot, _, _ = make_bot(tmp_path, model)
 
     await bot.handle(message(None, photo=PHOTO))
 
-    assert model.seen[0][-1]["content"][0]["text"]
+    assert model.seen[0][-1]["content"][-1]["text"]
 
 
 async def test_failed_photo_download_asks_again_and_calls_no_model(tmp_path: Path) -> None:
@@ -563,7 +559,7 @@ async def test_failed_photo_download_asks_again_and_calls_no_model(tmp_path: Pat
 
 
 async def test_group_photo_needs_a_mention_and_a_caption_is_not_a_command(tmp_path: Path) -> None:
-    model = FakeModel({"content": "Seen."}, {"content": "Described."})
+    model = FakeModel(answer("Seen."), answer("Described."))
     bot, telegram, _ = make_bot(tmp_path, model)
 
     await bot.handle(message(None, chat_type="group", photo=PHOTO, caption="our holiday"))
@@ -577,7 +573,7 @@ async def test_group_photo_needs_a_mention_and_a_caption_is_not_a_command(tmp_pa
 
 
 async def test_album_is_answered_once(tmp_path: Path) -> None:
-    model = FakeModel({"content": "An album."})
+    model = FakeModel(answer("An album."))
     bot, telegram, _ = make_bot(tmp_path, model)
 
     for _ in range(3):
@@ -588,7 +584,7 @@ async def test_album_is_answered_once(tmp_path: Path) -> None:
 
 
 async def test_conversation_survives_a_restart_until_it_expires(tmp_path: Path) -> None:
-    model = FakeModel({"content": "Noted."}, {"content": "Dune, yes."}, {"content": "Which?"})
+    model = FakeModel(answer("Noted."), answer("Dune, yes."), answer("Which?"))
     bot, _, gateway = make_bot(tmp_path, model)
     await bot.handle(message("I like Dune"))
 
@@ -605,7 +601,7 @@ async def test_conversation_survives_a_restart_until_it_expires(tmp_path: Path) 
 
 
 async def test_reset_and_blocking_remove_the_saved_conversation(tmp_path: Path) -> None:
-    model = FakeModel({"content": "Noted."}, {"content": "Noted again."})
+    model = FakeModel(answer("Noted."), answer("Noted again."))
     bot, _, gateway = make_bot(tmp_path, model)
     store = bot.store
     key = (message()["chat"]["id"], message()["from"]["id"])
@@ -662,9 +658,47 @@ async def test_photo_download_failures_do_not_expose_the_token() -> None:
     await telegram.close()
 
 
+async def test_model_request_marks_the_cache_points_and_reports_failures() -> None:
+    sent: list[httpx.Request] = []
+    replies = [
+        httpx.Response(200, json={"content": answer("Hi."), "stop_reason": "end_turn"}),
+        httpx.Response(200, json={"content": answer("Cut"), "stop_reason": "max_tokens"}),
+        httpx.Response(429, json={"type": "error", "error": {"type": "rate_limit_error"}}),
+    ]
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return replies.pop(0)
+
+    model = Model("SECRET", "claude-example")
+    await model._http.aclose()
+    model._http = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    messages = [{"role": "user", "content": "hello"}]
+
+    assert await model.complete("Be brief.", messages, [search.SCHEMA]) == answer("Hi.")
+    body = json.loads(sent[0].content)
+    assert str(sent[0].url) == "https://api.anthropic.com/v1/messages"
+    assert sent[0].headers["x-api-key"] == "SECRET"
+    assert sent[0].headers["anthropic-version"] == "2026-10-21"
+    assert body == {
+        "model": "claude-example",
+        "max_tokens": 8192,
+        "tools": [search.SCHEMA],
+        "system": [{"type": "text", "text": "Be brief.", "cache_control": {"type": "ephemeral"}}],
+        "messages": messages,
+        "cache_control": {"type": "ephemeral"},
+    }
+    with pytest.raises(ModelError, match="token limit"):
+        await model.complete("Be brief.", messages, [search.SCHEMA])
+    with pytest.raises(ModelError, match=r"HTTP 429 \(rate_limit_error\)") as caught:
+        await model.complete("Be brief.", messages, [search.SCHEMA])
+    assert "SECRET" not in str(caught.value)
+    await model.close()
+
+
 def test_egress_opens_only_named_hosts_on_port_443() -> None:
     assert egress.target(b"CONNECT api.telegram.org:443 HTTP/1.1\r\n\r\n") == "api.telegram.org"
-    assert egress.target(b"CONNECT OpenRouter.ai:443 HTTP/1.1\r\n\r\n") == "openrouter.ai"
+    assert egress.target(b"CONNECT API.Anthropic.com:443 HTTP/1.1\r\n\r\n") == "api.anthropic.com"
     for refused in (
         b"CONNECT example.com:443 HTTP/1.1\r\n\r\n",
         b"CONNECT api.telegram.org:80 HTTP/1.1\r\n\r\n",

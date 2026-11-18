@@ -3,7 +3,7 @@
 from media_gateway.managed_files import FILE_KEYS, SECRET_KEYS, UPSTREAM_KEYS
 from media_gateway.managed_start import run_managed
 
-APP_KEYS = frozenset({"TELEGRAM_BOT_TOKEN", "OPENROUTER_API_KEY", "CRBL_MEDIA_GATEWAY_URL"})
+APP_KEYS = frozenset({"TELEGRAM_BOT_TOKEN", "ANTHROPIC_API_KEY", "CRBL_MEDIA_GATEWAY_URL"})
 FORBIDDEN_KEYS = (SECRET_KEYS | FILE_KEYS | frozenset(UPSTREAM_KEYS) | {"TMDB_API_KEY"}) - APP_KEYS
 
 

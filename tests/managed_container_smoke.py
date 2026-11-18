@@ -187,7 +187,7 @@ with tempfile.TemporaryDirectory(prefix="media-managed-smoke-") as temporary:
             "bot",
             {
                 "TELEGRAM_BOT_TOKEN": "fetched-telegram-token",
-                "OPENROUTER_API_KEY": "fetched-openrouter-key",
+                "ANTHROPIC_API_KEY": "fetched-anthropic-key",
                 "CRBL_MEDIA_GATEWAY_URL": "http://media-gateway:18082",
             },
         )
@@ -199,7 +199,7 @@ with tempfile.TemporaryDirectory(prefix="media-managed-smoke-") as temporary:
             "-e",
             "CRBL_MEDIA_GATEWAY_TOKEN_FILE=/run/media-keys/gateway.key",
             "-e",
-            "MEDIA_BOT_MODEL=openai/smoke",
+            "MEDIA_BOT_MODEL=claude-smoke",
             "-e",
             "OP_SESSION_OLD=stale-dummy-session",
             "--entrypoint",

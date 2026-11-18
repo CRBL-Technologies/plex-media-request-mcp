@@ -23,7 +23,7 @@ from . import cards, search
 from .client import GatewayClient, GatewayError
 from .health import HEARTBEAT_FILE
 from .history import ConversationStore
-from .model import Model, ModelError, function_tool
+from .model import Model, ModelError, tool_definition
 from .prompt import SYSTEM_PROMPT
 from .telegram import MESSAGE_LIMIT, PHOTO_MAX_BYTES, Telegram, TelegramError
 
@@ -37,7 +37,7 @@ TURN_TIMEOUT_SECONDS = 360
 HISTORY_MESSAGES = 20
 HISTORY_IDLE_SECONDS = 2 * 60 * 60
 TYPING_INTERVAL_SECONDS = 4.5
-SECRET_KEYS = {"TELEGRAM_BOT_TOKEN", "OPENROUTER_API_KEY"}
+SECRET_KEYS = {"TELEGRAM_BOT_TOKEN", "ANTHROPIC_API_KEY"}
 GROUP_CHATS = {"group", "supergroup"}
 RESET_COMMANDS = {"/new", "/reset"}
 
@@ -329,8 +329,11 @@ class Bot:
             system = f"{system}\n\n{PHOTO_GUARD}"
             encoded = base64.b64encode(image).decode()
             user_content = [
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/jpeg", "data": encoded},
+                },
                 {"type": "text", "text": text or PHOTO_ONLY_PROMPT},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}},
             ]
         try:
             schemas = await self.gateway.tools(actor)
@@ -338,43 +341,37 @@ class Bot:
             LOGGER.warning("tool list failed: %s", type(exc).__name__)
             return MEDIA_DOWN
         turn = Turn(actor=actor, reply_to=reply_to, allowed={item["name"] for item in schemas})
-        tools = [function_tool(item) for item in schemas] + [search.SCHEMA]
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": system},
-            *history,
-            {"role": "user", "content": user_content},
-        ]
+        tools = [tool_definition(item) for item in schemas] + [search.SCHEMA]
+        messages: list[dict[str, Any]] = [*history, {"role": "user", "content": user_content}]
         for _ in range(MAX_ROUNDS):
             try:
-                reply = await self.model.complete(messages, tools)
+                reply = await self.model.complete(system, messages, tools)
             except ModelError as exc:
                 LOGGER.warning("%s", exc)
                 return MODEL_DOWN
-            calls = reply.get("tool_calls") or []
-            # Return the whole message: providers attach reasoning state to it.
-            messages.append({**reply, "role": "assistant"})
+            calls = [block for block in reply if block.get("type") == "tool_use"]
+            # Return every block unchanged: the API needs the model's thinking back.
+            messages.append({"role": "assistant", "content": reply})
             if not calls:
-                content = reply.get("content")
-                return (
-                    content.strip() if isinstance(content, str) and content.strip() else MODEL_DOWN
+                answer = "".join(
+                    block.get("text") or "" for block in reply if block.get("type") == "text"
                 )
+                return answer.strip() or MODEL_DOWN
+            results = []
             for call in calls:
                 result = await self._tool(turn, call)
                 content = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
                 if len(content) > TOOL_RESULT_CHARS:
                     content = f"{content[:TOOL_RESULT_CHARS]}... [result truncated; ask for less]"
-                messages.append(
-                    {"role": "tool", "tool_call_id": call.get("id"), "content": content}
+                results.append(
+                    {"type": "tool_result", "tool_use_id": call.get("id"), "content": content}
                 )
+            messages.append({"role": "user", "content": results})
         return TOO_LONG
 
     async def _tool(self, turn: Turn, call: dict[str, Any]) -> dict[str, Any]:
-        function = call.get("function") if isinstance(call, dict) else None
-        name = function.get("name") if isinstance(function, dict) else None
-        try:
-            arguments = json.loads(function.get("arguments") or "{}") if function else None
-        except (TypeError, json.JSONDecodeError):
-            arguments = None
+        name = call.get("name")
+        arguments = call.get("input")
         if not isinstance(arguments, dict):
             return {"error": "tool arguments must be a JSON object"}
         if name == "web_search":
@@ -449,9 +446,9 @@ class Bot:
 async def serve(settings: Settings) -> None:
     secrets = read_dotenv(settings.secrets_file, SECRET_KEYS)
     if set(secrets) != SECRET_KEYS or not all(secrets.values()):
-        raise ValueError("bot secrets file must set TELEGRAM_BOT_TOKEN and OPENROUTER_API_KEY")
+        raise ValueError("bot secrets file must set TELEGRAM_BOT_TOKEN and ANTHROPIC_API_KEY")
     telegram = Telegram(secrets["TELEGRAM_BOT_TOKEN"])
-    model = Model(secrets["OPENROUTER_API_KEY"], settings.model)
+    model = Model(secrets["ANTHROPIC_API_KEY"], settings.model)
     secrets.clear()
     try:
         store = ConversationStore(settings.state_file, idle_seconds=HISTORY_IDLE_SECONDS)

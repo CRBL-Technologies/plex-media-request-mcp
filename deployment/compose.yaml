@@ -101,7 +101,7 @@ services:
 
   media-bot:
     # Same image as the gateway; only the entrypoint differs. The bot holds the
-    # Telegram and OpenRouter credentials and the gateway bearer, nothing else.
+    # Telegram token, the Claude API key and the gateway bearer, nothing else.
     image: ${MEDIA_GATEWAY_IMAGE:?required digest reference}
     restart: unless-stopped
     user: "1000:1000"
@@ -113,7 +113,7 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=16m
     environment:
-      MEDIA_BOT_MODEL: ${MEDIA_BOT_MODEL:?required OpenRouter model ID}
+      MEDIA_BOT_MODEL: ${MEDIA_BOT_MODEL:?required Claude model ID}
       MEDIA_BOT_STATE_FILE: /opt/data/state/conversations.sqlite3
       MEDIA_BOT_SECRETS_FILE: /opt/hermes-data/.env
       CRBL_MEDIA_GATEWAY_URL: http://media-gateway:18082

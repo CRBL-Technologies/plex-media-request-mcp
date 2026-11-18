@@ -28,7 +28,7 @@ SEARCH_ENGINES = {
 ALLOWED_HOSTS = frozenset(
     {
         "api.telegram.org",  # messages and photos
-        "openrouter.ai",  # the model
+        "api.anthropic.com",  # the model
         KEY_STORE[0],  # 1Password: the bot's secrets at startup
         *SEARCH_ENGINES.values(),
     }

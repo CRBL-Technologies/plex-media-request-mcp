@@ -25,8 +25,9 @@ and accountant agents use a separate stack and release lifecycle while sharing
 the external `media` network where required.
 
 The bot long-polls Telegram and runs one model tool loop per message through
-OpenRouter's chat-completions API. `MEDIA_BOT_MODEL` selects the model. The bot
-holds the Telegram token, the OpenRouter key and the gateway bearer, and nothing
+the Claude Messages API, with prompt caching. `MEDIA_BOT_MODEL` selects the model,
+for example `claude-sonnet-5-5`. The bot
+holds the Telegram token, the Claude API key and the gateway bearer, and nothing
 else. It asks the gateway for each actor's role and for the tools that role may
 use, then lets the model call only those tools.
 
@@ -202,8 +203,8 @@ Copy the examples in `deployment/` and provide only host paths and immutable
 image references as Portainer stack variables. Runtime settings live once in
 `gateway.env`; upstream provider credentials live once in `upstream.env`; key
 material is stored in individual read-only files. In the public recipe the bot
-reads `TELEGRAM_BOT_TOKEN` and `OPENROUTER_API_KEY` from the policy `.env`, and
-the `MEDIA_BOT_MODEL` stack variable selects its OpenRouter model.
+reads `TELEGRAM_BOT_TOKEN` and `ANTHROPIC_API_KEY` from the policy `.env`, and
+the `MEDIA_BOT_MODEL` stack variable selects its Claude model.
 
 The gateway API listens on port `18082` inside its networks only. Host port
 `18081` is loopback-only for the host-network Plex webhook. The dashboard listens
@@ -218,7 +219,7 @@ and has no address on the host, so the bot cannot open a connection to the NAS, 
 the home network or to the internet. It reaches two things: the gateway, and
 `media-egress`. `media-egress` is an HTTPS CONNECT proxy from the same image
 (`media_bot.egress`). It opens a tunnel only to the hosts in `ALLOWED_HOSTS`, on
-port 443, at a public address: Telegram, OpenRouter, 1Password for the startup
+port 443, at a public address: Telegram, the Claude API, 1Password for the startup
 retrieval, and the four search engines. `HTTPS_PROXY` and `DDGS_PROXY` point the
 bot's clients at it. The bot cannot resolve outside names, so a client that
 ignores the proxy fails instead of leaking. To let the bot reach a new host, add
@@ -365,7 +366,7 @@ sign, because Deno versions read those differently. Native parsing is tested for
 literal dollar signs, quotes and comment characters. Multiline values and
 `${...}` interpolation forms are rejected instead of being silently changed.
 
-The bot Environment contains only `TELEGRAM_BOT_TOKEN`, `OPENROUTER_API_KEY`
+The bot Environment contains only `TELEGRAM_BOT_TOKEN`, `ANTHROPIC_API_KEY`
 and `CRBL_MEDIA_GATEWAY_URL`. The gateway key comes from the read-only host-file
 mount at `/run/media-keys/gateway.key`. The wrapper writes the token and key to
 a private `/run/media-secrets/bot.env` and starts the bot without them in its

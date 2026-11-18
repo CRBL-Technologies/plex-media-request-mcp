@@ -1,4 +1,4 @@
-"""One OpenAI-compatible chat-completions call through OpenRouter."""
+"""One Messages API call to Claude."""
 
 from __future__ import annotations
 
@@ -6,8 +6,12 @@ from typing import Any
 
 import httpx
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+MESSAGES_URL = "https://api.anthropic.com/v1/messages"
+API_VERSION = "2026-10-21"
 MODEL_TIMEOUT_SECONDS = 120
+# The limit covers the model's thinking and its reply. A chat reply needs far less.
+MAX_TOKENS = 8192
+CACHED = {"type": "ephemeral"}
 
 
 class ModelError(RuntimeError):
@@ -16,7 +20,7 @@ class ModelError(RuntimeError):
 
 class Model:
     def __init__(self, api_key: str, model: str):
-        self._headers = {"Authorization": f"Bearer {api_key}", "X-Title": "CRBL media bot"}
+        self._headers = {"x-api-key": api_key, "anthropic-version": API_VERSION}
         self.model = model
         self._http = httpx.AsyncClient(timeout=MODEL_TIMEOUT_SECONDS)
 
@@ -24,15 +28,24 @@ class Model:
         await self._http.aclose()
 
     async def complete(
-        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
-    ) -> dict[str, Any]:
-        """Return the assistant message: text, tool calls, or both."""
+        self, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Return the content blocks of the reply: text, tool calls, or both."""
 
-        body: dict[str, Any] = {"model": self.model, "messages": messages}
-        if tools:
-            body["tools"] = tools
+        body = {
+            "model": self.model,
+            "max_tokens": MAX_TOKENS,
+            "tools": tools,
+            # Two cache points. This one holds the tools and the system prompt, which
+            # every conversation shares.
+            "system": [{"type": "text", "text": system, "cache_control": CACHED}],
+            "messages": messages,
+            # This one moves to the last message, so each round of a tool loop reads
+            # the rounds before it from the cache.
+            "cache_control": CACHED,
+        }
         try:
-            response = await self._http.post(OPENROUTER_URL, headers=self._headers, json=body)
+            response = await self._http.post(MESSAGES_URL, headers=self._headers, json=body)
         except httpx.HTTPError as exc:
             raise ModelError(f"model request failed: {type(exc).__name__}") from None
         try:
@@ -40,22 +53,23 @@ class Model:
         except ValueError:
             value = None
         if response.status_code >= 400 or not isinstance(value, dict):
-            raise ModelError(f"model request failed with HTTP {response.status_code}")
-        choices = value.get("choices")
-        message = choices[0].get("message") if isinstance(choices, list) and choices else None
-        if not isinstance(message, dict):
+            error = value.get("error") if isinstance(value, dict) else None
+            kind = error.get("type") if isinstance(error, dict) else None
+            raise ModelError(f"model request failed with HTTP {response.status_code} ({kind})")
+        content = value.get("content")
+        if not isinstance(content, list) or not all(isinstance(block, dict) for block in content):
             raise ModelError("model returned no message")
-        return message
+        # A reply cut off at the limit can end in half a tool call.
+        if value.get("stop_reason") == "max_tokens":
+            raise ModelError("model reply exceeded the token limit")
+        return content
 
 
-def function_tool(schema: dict[str, Any]) -> dict[str, Any]:
-    """Translate one gateway (MCP-style) tool schema into the chat-completions form."""
+def tool_definition(schema: dict[str, Any]) -> dict[str, Any]:
+    """Translate one gateway (MCP-style) tool schema into the Messages API form."""
 
     return {
-        "type": "function",
-        "function": {
-            "name": schema["name"],
-            "description": schema.get("description") or "",
-            "parameters": schema.get("inputSchema") or {"type": "object", "properties": {}},
-        },
+        "name": schema["name"],
+        "description": schema.get("description") or "",
+        "input_schema": schema.get("inputSchema") or {"type": "object", "properties": {}},
     }

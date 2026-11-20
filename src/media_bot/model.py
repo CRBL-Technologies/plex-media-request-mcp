@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import httpx
@@ -12,10 +13,49 @@ MODEL_TIMEOUT_SECONDS = 120
 # The limit covers the model's thinking and its reply. A chat reply needs far less.
 MAX_TOKENS = 8192
 CACHED = {"type": "ephemeral"}
+# An overload or a rate limit usually clears within seconds, so one more try
+# hides most of them. A wait longer than this is not worth holding the chat for.
+RETRY_DELAY_SECONDS = 2
+RETRY_AFTER_LIMIT_SECONDS = 10
+RETRY_STATUSES = frozenset({408, 409, 429})
 
 
 class ModelError(RuntimeError):
     pass
+
+
+class ModelBusy(ModelError):
+    """A failure that a second try may clear. ``delay`` is how long to wait first."""
+
+    def __init__(self, message: str, delay: float):
+        super().__init__(message)
+        self.delay = delay
+
+
+class ModelCutOff(ModelError):
+    """The reply reached the token limit before it was finished."""
+
+
+class ModelRefused(ModelError):
+    """The model declined to answer."""
+
+
+def _retry_delay(response: httpx.Response, error: object) -> float | None:
+    """How long to wait before one more try, or None when a retry cannot help."""
+
+    advice = response.headers.get("x-should-retry")
+    retryable = response.status_code in RETRY_STATUSES or response.status_code >= 500
+    if advice == "false" or (advice != "true" and not retryable):
+        return None
+    details = error.get("details") if isinstance(error, dict) else None
+    # A spent monthly limit answers 429 too, and stays spent.
+    if isinstance(details, dict) and details.get("error_code") == "enforced_spend_limit_reached":
+        return None
+    try:
+        delay = float(response.headers.get("retry-after", RETRY_DELAY_SECONDS))
+    except ValueError:
+        delay = RETRY_DELAY_SECONDS
+    return delay if 0 <= delay <= RETRY_AFTER_LIMIT_SECONDS else None
 
 
 class Model:
@@ -45,9 +85,20 @@ class Model:
             "cache_control": CACHED,
         }
         try:
+            return await self._request(body)
+        except ModelBusy as busy:
+            await asyncio.sleep(busy.delay)
+            return await self._request(body)
+
+    async def _request(self, body: dict[str, Any]) -> list[dict[str, Any]]:
+        try:
             response = await self._http.post(MESSAGES_URL, headers=self._headers, json=body)
-        except httpx.HTTPError as exc:
+        except httpx.TimeoutException as exc:
+            # The request already waited its full time. A second wait would outlast the turn.
             raise ModelError(f"model request failed: {type(exc).__name__}") from None
+        except httpx.HTTPError as exc:
+            message = f"model request failed: {type(exc).__name__}"
+            raise ModelBusy(message, RETRY_DELAY_SECONDS) from None
         try:
             value = response.json()
         except ValueError:
@@ -55,13 +106,20 @@ class Model:
         if response.status_code >= 400 or not isinstance(value, dict):
             error = value.get("error") if isinstance(value, dict) else None
             kind = error.get("type") if isinstance(error, dict) else None
-            raise ModelError(f"model request failed with HTTP {response.status_code} ({kind})")
+            message = f"model request failed with HTTP {response.status_code} ({kind})"
+            delay = _retry_delay(response, error)
+            if delay is None:
+                raise ModelError(message)
+            raise ModelBusy(message, delay)
+        # A refusal can arrive with no content at all, so read the reason first.
+        if value.get("stop_reason") == "refusal":
+            raise ModelRefused("model declined the request")
         content = value.get("content")
         if not isinstance(content, list) or not all(isinstance(block, dict) for block in content):
             raise ModelError("model returned no message")
         # A reply cut off at the limit can end in half a tool call.
         if value.get("stop_reason") == "max_tokens":
-            raise ModelError("model reply exceeded the token limit")
+            raise ModelCutOff("model reply exceeded the token limit")
         return content
 
 

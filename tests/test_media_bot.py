@@ -14,11 +14,14 @@ import pytest
 
 from media_bot import bot as bot_module
 from media_bot import egress, search
+from media_bot import model as model_module
 from media_bot.bot import (
+    CUT_OFF,
     FRESH_START,
     GREETING,
     MEDIA_DOWN,
     MODEL_DOWN,
+    REFUSED,
     TOOL_RESULT_CHARS,
     WEB_SEARCH_CAP,
     Bot,
@@ -30,7 +33,7 @@ from media_bot.bot import (
 from media_bot.client import GatewayClient, GatewayError
 from media_bot.history import ConversationStore
 from media_bot.managed_app import project_bot_files
-from media_bot.model import Model, ModelError
+from media_bot.model import Model, ModelBusy, ModelCutOff, ModelError, ModelRefused
 from media_bot.prompt import SOUL_MD
 from media_bot.telegram import PHOTO_MAX_BYTES, Telegram, TelegramError
 from media_gateway.constants import SHARED_TOOLS
@@ -317,6 +320,19 @@ async def test_model_failure_is_reported_and_not_remembered(tmp_path: Path) -> N
 
     assert telegram.messages[0]["text"] == MODEL_DOWN
     assert [item["content"] for item in model.seen[1]] == ["two"]
+
+
+async def test_a_cut_off_reply_and_a_refusal_say_what_happened(tmp_path: Path) -> None:
+    model = FakeModel(ModelCutOff("cut"), ModelRefused("declined"), answer("Back."))
+    bot, telegram, _ = make_bot(tmp_path, model)
+
+    await bot.handle(message("list everything"))
+    await bot.handle(message("something refused"))
+    await bot.handle(message("three"))
+
+    assert [item["text"] for item in telegram.messages] == [CUT_OFF, REFUSED, "Back."]
+    # Neither failed turn is remembered.
+    assert [item["content"] for item in model.seen[2]] == ["three"]
 
 
 async def test_groups_need_a_mention_or_a_reply_to_the_bot(tmp_path: Path) -> None:
@@ -699,24 +715,44 @@ async def test_photo_download_failures_do_not_expose_the_token() -> None:
     await telegram.close()
 
 
-async def test_model_request_marks_the_cache_points_and_reports_failures() -> None:
+async def scripted_model(
+    *replies: httpx.Response | Exception,
+) -> tuple[Model, list[httpx.Request]]:
+    """A model whose HTTP calls are answered from a script, and the requests it sent."""
+
+    pending = list(replies)
     sent: list[httpx.Request] = []
-    replies = [
-        httpx.Response(200, json={"content": answer("Hi."), "stop_reason": "end_turn"}),
-        httpx.Response(200, json={"content": answer("Cut"), "stop_reason": "max_tokens"}),
-        httpx.Response(429, json={"type": "error", "error": {"type": "rate_limit_error"}}),
-    ]
 
     def respond(request: httpx.Request) -> httpx.Response:
         sent.append(request)
-        return replies.pop(0)
+        reply = pending.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
 
     model = Model("SECRET", "claude-example")
     await model._http.aclose()
     model._http = httpx.AsyncClient(transport=httpx.MockTransport(respond))
-    messages = [{"role": "user", "content": "hello"}]
+    return model, sent
 
-    assert await model.complete("Be brief.", messages, [search.SCHEMA]) == answer("Hi.")
+
+def api_error(status: int, kind: str, **headers: str) -> httpx.Response:
+    return httpx.Response(status, json={"type": "error", "error": {"type": kind}}, headers=headers)
+
+
+OK = {"content": answer("Hi."), "stop_reason": "end_turn"}
+MESSAGES = [{"role": "user", "content": "hello"}]
+
+
+async def test_model_request_marks_the_cache_points_and_reports_failures() -> None:
+    model, sent = await scripted_model(
+        httpx.Response(200, json=OK),
+        httpx.Response(200, json={"content": answer("Cut"), "stop_reason": "max_tokens"}),
+        httpx.Response(200, json={"content": [], "stop_reason": "refusal"}),
+        api_error(400, "invalid_request_error"),
+    )
+
+    assert await model.complete("Be brief.", MESSAGES, [search.SCHEMA]) == answer("Hi.")
     body = json.loads(sent[0].content)
     assert str(sent[0].url) == "https://api.anthropic.com/v1/messages"
     assert sent[0].headers["x-api-key"] == "SECRET"
@@ -726,15 +762,66 @@ async def test_model_request_marks_the_cache_points_and_reports_failures() -> No
         "max_tokens": 8192,
         "tools": [search.SCHEMA],
         "system": [{"type": "text", "text": "Be brief.", "cache_control": {"type": "ephemeral"}}],
-        "messages": messages,
+        "messages": MESSAGES,
         "cache_control": {"type": "ephemeral"},
     }
-    with pytest.raises(ModelError, match="token limit"):
-        await model.complete("Be brief.", messages, [search.SCHEMA])
-    with pytest.raises(ModelError, match=r"HTTP 429 \(rate_limit_error\)") as caught:
-        await model.complete("Be brief.", messages, [search.SCHEMA])
+    with pytest.raises(ModelCutOff, match="token limit"):
+        await model.complete("Be brief.", MESSAGES, [search.SCHEMA])
+    with pytest.raises(ModelRefused):
+        await model.complete("Be brief.", MESSAGES, [search.SCHEMA])
+    # A request the API rejects is not sent again.
+    with pytest.raises(ModelError, match=r"HTTP 400 \(invalid_request_error\)") as caught:
+        await model.complete("Be brief.", MESSAGES, [search.SCHEMA])
+    assert not isinstance(caught.value, ModelBusy)
     assert "SECRET" not in str(caught.value)
+    assert len(sent) == 4
     await model.close()
+
+
+async def test_model_request_is_tried_once_more_after_a_passing_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_module, "RETRY_DELAY_SECONDS", 0)
+    model, sent = await scripted_model(
+        api_error(529, "overloaded_error"),
+        httpx.Response(200, json=OK),
+        httpx.ConnectError("refused"),
+        httpx.Response(200, json=OK),
+        api_error(429, "rate_limit_error", **{"retry-after": "0"}),
+        api_error(500, "api_error"),
+        httpx.ReadTimeout("slow"),
+    )
+
+    assert await model.complete("Be brief.", MESSAGES, []) == answer("Hi.")
+    assert await model.complete("Be brief.", MESSAGES, []) == answer("Hi.")
+    assert len(sent) == 4
+    # The second failure is final: one more try, not a loop.
+    with pytest.raises(ModelError, match=r"HTTP 500 \(api_error\)"):
+        await model.complete("Be brief.", MESSAGES, [])
+    assert len(sent) == 6
+    # A timeout already waited its full time, so it is not tried again.
+    with pytest.raises(ModelError, match="ReadTimeout"):
+        await model.complete("Be brief.", MESSAGES, [])
+    assert len(sent) == 7
+    await model.close()
+
+
+def test_retry_waits_as_the_api_asks_and_gives_up_when_a_retry_cannot_help() -> None:
+    delay = model_module._retry_delay
+
+    assert delay(api_error(529, "overloaded_error"), {}) == 2
+    assert delay(api_error(429, "rate_limit_error", **{"retry-after": "3"}), {}) == 3
+    assert delay(api_error(429, "rate_limit_error", **{"retry-after": "soon"}), {}) == 2
+    # Too long to hold a chat for.
+    assert delay(api_error(429, "rate_limit_error", **{"retry-after": "60"}), {}) is None
+    # The monthly limit is spent: the next try fails the same way.
+    spent = {"details": {"error_code": "enforced_spend_limit_reached"}}
+    assert delay(api_error(429, "rate_limit_error"), spent) is None
+    assert delay(api_error(400, "invalid_request_error"), {}) is None
+    assert delay(api_error(401, "authentication_error"), {}) is None
+    # The API's own advice wins in both directions.
+    assert delay(api_error(500, "api_error", **{"x-should-retry": "false"}), {}) is None
+    assert delay(api_error(400, "invalid_request_error", **{"x-should-retry": "true"}), {}) == 2
 
 
 def test_egress_opens_only_named_hosts_on_port_443() -> None:

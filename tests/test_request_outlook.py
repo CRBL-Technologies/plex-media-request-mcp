@@ -180,6 +180,26 @@ async def test_a_failed_outlook_does_not_fail_the_request(harness: Harness) -> N
 
 
 @pytest.mark.follow_up
+async def test_a_slow_outlook_does_not_hold_the_answer(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _movie(harness)
+    monkeypatch.setattr(tools, "OUTLOOK_TIMEOUT_SECONDS", 0.01)
+
+    async def slow(_tmdb_id: int) -> dict[str, Any]:
+        await asyncio.sleep(5)
+        return {"state": "searching"}
+
+    monkeypatch.setattr(harness.service, "_movie_outlook", slow)
+
+    result = await harness.request("request_movie", {"tmdb_id": 123})
+
+    assert result["status"] == "search_started"
+    assert "outlook" not in result
+    assert harness.sent == []
+
+
+@pytest.mark.follow_up
 async def test_a_bulk_request_starts_no_follow_up(harness: Harness) -> None:
     _movie(harness)
 

@@ -29,6 +29,9 @@ LOGGER = logging.getLogger(__name__)
 # follow-up message then tells the requester whether a download started.
 FOLLOW_UP_SECONDS = 90
 FOLLOW_UP_POLL_SECONDS = 5
+# The outlook is an extra on a request that is already made. It must not push the
+# answer past the 45 seconds the bot allows one gateway call.
+OUTLOOK_TIMEOUT_SECONDS = 8
 
 Notify = Callable[[int, str], Awaitable[None]]
 
@@ -978,7 +981,7 @@ class ToolService:
         """Add what to expect after a request, and follow up while a search is open."""
 
         try:
-            outlook = await read()
+            outlook = await asyncio.wait_for(read(), timeout=OUTLOOK_TIMEOUT_SECONDS)
         except Exception:
             # The request is already made. A failure here must not turn it into
             # an error, which invites the same request a second time.

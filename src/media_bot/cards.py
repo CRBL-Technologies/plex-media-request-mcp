@@ -111,8 +111,9 @@ def presentation(result: Mapping[str, Any], rows: list[dict[str, Any]], delivere
     # lookup in a turn has no poster to point at. Saying otherwise invites a
     # reply that refers the user to a card they were never shown.
     card = (
-        "A poster for this result was already sent, carrying an Open in Plex link when "
-        "it is available. "
+        "A poster for this result was already sent. It shows the title, year and synopsis, "
+        "and carries an Open in Plex link when it is available, so do not repeat the "
+        "synopsis. "
         if delivered
         else ""
     )

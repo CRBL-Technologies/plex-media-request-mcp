@@ -181,6 +181,9 @@ async def test_single_result_sends_one_card_and_tells_the_model(tmp_path: Path) 
     assert first["results"] == [HELD]
     assert first["telegram_presentation"]["poster_cards_delivered"] is True
     assert second["telegram_presentation"]["poster_cards_delivered"] is False
+    # Only the lookup that posted a poster tells the model not to repeat it.
+    assert "do not repeat the synopsis" in first["telegram_presentation"]["instruction"]
+    assert "synopsis" not in second["telegram_presentation"]["instruction"]
     assert telegram.messages == [
         {"chat_id": 42, "text": "It's on <b>Plex</b>.", "html": True, "reply_to": None}
     ]

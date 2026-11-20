@@ -806,7 +806,9 @@ class ToolService:
         if not isinstance(raw_titles, list) or not 1 <= len(raw_titles) <= 20:
             raise ToolError("titles must contain 1 to 20 items")
         titles = [_short_text(item, "title", minimum=2) for item in raw_titles]
-        if len({_recommendation_target(title)[0] for title in titles}) != len(titles):
+        # The same title with two years names two films, such as Dune (1984)
+        # and Dune (2021). Only the same title and year twice is a repeat.
+        if len({_recommendation_target(title) for title in titles}) != len(titles):
             raise ToolError("titles must be distinct")
         media_type = args.get("media_type")
         if media_type not in {"all", "movie", "series"}:

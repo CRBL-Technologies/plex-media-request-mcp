@@ -26,7 +26,11 @@ the external `media` network where required.
 
 The bot long-polls Telegram and runs one model tool loop per message through
 the Claude Messages API, with prompt caching. `MEDIA_BOT_MODEL` selects the model,
-for example `claude-sonnet-5-5`. The bot
+for example `claude-sonnet-5-5`. A model request that fails in a passing way (a
+connection error, an overload, a rate limit or a server error) is sent once
+more, after the wait the API asks for when that is 10 seconds or less. A reply
+cut at the token limit and a refusal each get their own message in the chat.
+The bot
 holds the Telegram token, the Claude API key and the gateway bearer, and nothing
 else. It asks the gateway for each actor's role and for the tools that role may
 use, then lets the model call only those tools.

@@ -181,9 +181,50 @@ async def test_single_result_sends_one_card_and_tells_the_model(tmp_path: Path) 
     assert first["results"] == [HELD]
     assert first["telegram_presentation"]["poster_cards_delivered"] is True
     assert second["telegram_presentation"]["poster_cards_delivered"] is False
+    # Only the lookup that posted a poster tells the model not to repeat it.
+    assert "do not repeat the synopsis" in first["telegram_presentation"]["instruction"]
+    assert "synopsis" not in second["telegram_presentation"]["instruction"]
     assert telegram.messages == [
         {"chat_id": 42, "text": "It's on <b>Plex</b>.", "html": True, "reply_to": None}
     ]
+
+
+async def test_a_repeat_lookup_of_the_same_title_sends_no_second_poster(tmp_path: Path) -> None:
+    other = {**HELD, "title": "Arrival", "tmdb_id": 329865}
+    lookup = tool_call("search_media", {"query": "x"})
+    model = FakeModel(
+        lookup,
+        answer("We don't have it. Should I get it?"),
+        lookup,
+        tool_call("request_movie", {"tmdb_id": 693134}),
+        answer("Done."),
+        lookup,
+        answer("Arrival is on Plex."),
+        lookup,
+        answer("Still not here."),
+        lookup,
+        answer("Not yet."),
+    )
+    bot, telegram, gateway = make_bot(tmp_path, model)
+
+    gateway.results["search_media"] = {"results": [HELD]}
+    await bot.handle(message("Do we have Dune?"))
+    await bot.handle(message("yes"))
+    assert len(telegram.cards) == 1
+    # The model is not told a poster went out with the second lookup.
+    assert tool_result(model, 3)["telegram_presentation"]["poster_cards_delivered"] is False
+
+    # Another title in between makes the first one news again.
+    gateway.results["search_media"] = {"results": [other]}
+    await bot.handle(message("And Arrival?"))
+    gateway.results["search_media"] = {"results": [HELD]}
+    await bot.handle(message("Is Dune here yet?"))
+    assert ["Arrival" in card["caption"] for card in telegram.cards] == [False, True, False]
+
+    # A fresh conversation forgets the last poster.
+    await bot.handle(message("/new"))
+    await bot.handle(message("Dune?"))
+    assert len(telegram.cards) == 4
 
 
 async def test_several_matches_are_left_to_the_conversation(tmp_path: Path) -> None:

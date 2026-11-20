@@ -25,6 +25,13 @@ def _nameable(candidate: object) -> bool:
     return isinstance(external_id, int) and not isinstance(external_id, bool) and external_id > 0
 
 
+def identity(candidate: Mapping[str, Any]) -> tuple[str, int]:
+    """The provider identity of a nameable row: its media type and provider ID."""
+
+    media_type = candidate["media_type"]
+    return media_type, candidate["tmdb_id" if media_type == "movie" else "tvdb_id"]
+
+
 def _clip(value: str, maximum: int) -> str:
     if len(value) <= maximum:
         return value
@@ -104,8 +111,9 @@ def presentation(result: Mapping[str, Any], rows: list[dict[str, Any]], delivere
     # lookup in a turn has no poster to point at. Saying otherwise invites a
     # reply that refers the user to a card they were never shown.
     card = (
-        "A poster for this result was already sent, carrying an Open in Plex link when "
-        "it is available. "
+        "A poster for this result was already sent. It shows the title, year and synopsis, "
+        "and carries an Open in Plex link when it is available, so do not repeat the "
+        "synopsis. "
         if delivered
         else ""
     )

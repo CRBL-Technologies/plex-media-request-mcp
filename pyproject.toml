@@ -52,3 +52,4 @@ packages = ["media_gateway", "media_bot"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = ["follow_up: let a request start its real follow-up message"]

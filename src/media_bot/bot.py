@@ -85,6 +85,8 @@ class Conversation:
     messages: list[dict[str, str]] = field(default_factory=list)
     used_at: float = 0.0
     album: str | None = None
+    # The title on the last poster. A repeat lookup of it earns no second poster.
+    last_card: tuple[str, int] | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -95,6 +97,7 @@ class Turn:
     actor: Actor
     reply_to: int | None
     allowed: set[str]
+    conversation: Conversation
     card_sent: bool = False
     web_searches: int = 0
 
@@ -281,18 +284,20 @@ class Bot:
         command = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text and not photo else ""
         if time.time() - conversation.used_at > HISTORY_IDLE_SECONDS:
             conversation.messages.clear()
+            conversation.last_card = None
         if not text and not photo:
             return NOT_TEXT
         if command == "/start":
             return GREETING
         if command in RESET_COMMANDS:
             conversation.messages.clear()
+            conversation.last_card = None
             self.store.clear(key)
             return FRESH_START
         typing = asyncio.create_task(self._keep_typing(actor.chat_id))
         try:
             answer = await asyncio.wait_for(
-                self._turn(actor, text, photo, reply_to, conversation.messages),
+                self._turn(actor, text, photo, reply_to, conversation),
                 timeout=TURN_TIMEOUT_SECONDS,
             )
         except TimeoutError:
@@ -316,7 +321,7 @@ class Bot:
         text: str,
         photo: str | None,
         reply_to: int | None,
-        history: list[dict[str, str]],
+        conversation: Conversation,
     ) -> str:
         user_content: str | list[dict[str, Any]] = text
         system = f"{SYSTEM_PROMPT}\n\nToday is {datetime.date.today().isoformat()}."
@@ -340,9 +345,17 @@ class Bot:
         except Exception as exc:
             LOGGER.warning("tool list failed: %s", type(exc).__name__)
             return MEDIA_DOWN
-        turn = Turn(actor=actor, reply_to=reply_to, allowed={item["name"] for item in schemas})
+        turn = Turn(
+            actor=actor,
+            reply_to=reply_to,
+            allowed={item["name"] for item in schemas},
+            conversation=conversation,
+        )
         tools = [tool_definition(item) for item in schemas] + [search.SCHEMA]
-        messages: list[dict[str, Any]] = [*history, {"role": "user", "content": user_content}]
+        messages: list[dict[str, Any]] = [
+            *conversation.messages,
+            {"role": "user", "content": user_content},
+        ]
         for _ in range(MAX_ROUNDS):
             try:
                 reply = await self.model.complete(system, messages, tools)
@@ -396,8 +409,10 @@ class Bot:
         delivered = False
         single = len(rows) == 1
         # A card is unsolicited, so one message earns one. A model that searches
-        # several titles in a turn must not post a poster for each.
-        if single and not turn.card_sent:
+        # several titles in a turn must not post a poster for each. A model that
+        # looks a title up again to request it must not post its poster twice.
+        identity = cards.identity(rows[0])
+        if single and not turn.card_sent and identity != turn.conversation.last_card:
             turn.card_sent = True
             candidate = rows[0]
             try:
@@ -409,6 +424,7 @@ class Bot:
                     reply_to=turn.reply_to,
                 )
                 delivered = True
+                turn.conversation.last_card = identity
             except TelegramError as exc:
                 LOGGER.warning("result card failed: %s", exc)
         return {

@@ -48,8 +48,13 @@ class Runtime:
         self.store = Store(config.db_path)
         self.policy = Policy(config.policy_file)
         self.upstream = Upstream(config.upstream_url, config.upstream_token_file)
-        self.tools = ToolService(config, self.store, self.upstream)
         self.notifications = Notifications(config, self.store, self.policy, self.upstream)
+        self.tools = ToolService(
+            config,
+            self.store,
+            self.upstream,
+            notify=lambda chat_id, text: self.notifications._send(chat_id, text, None),
+        )
         # The dashboard has no login: only the Tailscale Service reaches its listener.
         # This token stops another site from submitting the dashboard's forms.
         self.form_token = token_urlsafe(32)

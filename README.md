@@ -26,7 +26,11 @@ the external `media` network where required.
 
 The bot long-polls Telegram and runs one model tool loop per message through
 the Claude Messages API, with prompt caching. `MEDIA_BOT_MODEL` selects the model,
-for example `claude-sonnet-5-5`. The bot
+for example `claude-sonnet-5-5`. A model request that fails in a passing way (a
+connection error, an overload, a rate limit or a server error) is sent once
+more, after the wait the API asks for when that is 10 seconds or less. A reply
+cut at the token limit and a refusal each get their own message in the chat.
+The bot
 holds the Telegram token, the Claude API key and the gateway bearer, and nothing
 else. It asks the gateway for each actor's role and for the tools that role may
 use, then lets the model call only those tools.
@@ -70,8 +74,18 @@ to exactly one result is posted as that poster, carrying an `Open in Plex` link
 when the title is held and no button at all otherwise. That link is the only
 control a card has ever offered: there is no picker and no button that acts.
 At most one poster is posted per user message, however many searches a turn
-makes. Telegram fetches the poster itself; the bot passes on only a plain
-HTTPS URL.
+makes. A lookup of the title on the previous poster posts none, so a request
+that follows a lookup does not repeat the poster. Telegram fetches the poster
+itself; the bot passes on only a plain HTTPS URL.
+
+A single request answers at once with an `outlook`: `not_released` or
+`not_aired` with the dates the provider gives, `downloading` when a download is
+already in the queue, or `searching` when the title is out and the search has
+just begun. After `searching`, the gateway reads the queue every 5 seconds for
+up to 90 seconds and sends one message to the chat of the request: the download
+started, or none was found yet. This follow-up is held in memory only, so a
+gateway restart drops it. The arrival notification does not depend on it. A
+list request (`request_titles`) has no outlook and no follow-up.
 
 The tools describe what they do and the model decides which to use. The
 platform hint carries only what cannot be inferred: that Telegram identity is

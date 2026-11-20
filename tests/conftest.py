@@ -7,6 +7,7 @@ import pytest
 
 from media_gateway import plex_watch
 from media_gateway.config import Config
+from media_gateway.tools import ToolService
 
 
 @pytest.fixture(autouse=True)
@@ -16,6 +17,19 @@ def _isolate_plex_slug_cache() -> Any:
     plex_watch.clear_cache()
     yield
     plex_watch.clear_cache()
+
+
+@pytest.fixture(autouse=True)
+def _no_request_follow_up(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep a request from messaging Telegram after its test; ``follow_up`` tests opt in."""
+
+    if request.node.get_closest_marker("follow_up") is not None:
+        return
+
+    async def nothing(*_args: Any) -> None:
+        return None
+
+    monkeypatch.setattr(ToolService, "_follow_up", nothing)
 
 
 class FakeUpstream:

@@ -656,25 +656,37 @@ def test_recommendations_return_one_distinct_exact_match_per_title(config: Confi
     ]
 
 
-def test_recommendations_reject_the_same_title_with_different_years(config: Config) -> None:
+def test_recommendations_resolve_the_same_title_in_two_years(config: Config) -> None:
     app = create_app(config)
+    fake = FakeUpstream()
+    both = [
+        {"tmdbId": 10, "title": "Arrival", "year": 2025},
+        {"tmdbId": 11, "title": "Arrival", "year": 2016},
+    ]
+    fake.responses["radarr_search_movie"] = {"data": both}
     with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
         response = call_tool(
             client,
             "recommend_media",
-            {
-                "titles": [
-                    "Arrival (2016)",
-                    "Arrival (2025)",
-                    "Ex Machina (2014)",
-                    "Dark City (1998)",
-                ],
-                "media_type": "movie",
-            },
+            {"titles": ["Arrival (2016)", "Arrival (2025)"], "media_type": "movie"},
+        )
+        repeated = call_tool(
+            client,
+            "recommend_media",
+            {"titles": ["Arrival (2016)", "arrival  (2016)"], "media_type": "movie"},
         )
 
-    assert response.status_code == 400
-    assert response.json()["error"] == "titles must be distinct"
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert [(item["tmdb_id"], item["year"]) for item in result["results"]] == [
+        (11, 2016),
+        (10, 2025),
+    ]
+    assert result["unmatched_titles"] == []
+    # The same film twice is still a repeat.
+    assert repeated.status_code == 400
+    assert repeated.json()["error"] == "titles must be distinct"
 
 
 def test_recommendations_omit_inexact_provider_matches(config: Config) -> None:

@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import html
+import logging
 import re
+import time
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -18,6 +21,19 @@ from .provider_metadata import public_poster_url
 from .store import Store
 from .types import Actor, Role
 from .upstream import Upstream, UpstreamError
+
+LOGGER = logging.getLogger(__name__)
+
+# After a request, Radarr and Sonarr search at once, and a release that exists is
+# grabbed within seconds. The request answers without waiting for that; one
+# follow-up message then tells the requester whether a download started.
+FOLLOW_UP_SECONDS = 90
+FOLLOW_UP_POLL_SECONDS = 5
+# The outlook is an extra on a request that is already made. It must not push the
+# answer past the 45 seconds the bot allows one gateway call.
+OUTLOOK_TIMEOUT_SECONDS = 8
+
+Notify = Callable[[int, str], Awaitable[None]]
 
 
 class ToolError(ValueError):
@@ -82,6 +98,45 @@ def _recommendation_target(value: str) -> tuple[str, int | None]:
     title = " ".join((match.group(1) if match else value).casefold().split())
     year = int(match.group(2)) if match and match.group(2) else None
     return title, year
+
+
+def _seasons_label(seasons: tuple[int, ...]) -> str:
+    names = ["Specials" if number == 0 else str(number) for number in seasons]
+    if names == ["Specials"]:
+        return "Specials"
+    return f"Season{'s' if len(names) > 1 else ''} {', '.join(names)}"
+
+
+def _time_left_words(value: object) -> str | None:
+    """Turn the queue's "[days.]HH:MM:SS" into words, or None when it is not that."""
+
+    match = (
+        re.fullmatch(r"(?:(\d+)\.)?(\d+):(\d\d):(\d\d)", value) if isinstance(value, str) else None
+    )
+    if match is None:
+        return None
+    days, hours, minutes, _seconds = (int(part or 0) for part in match.groups())
+    hours += days * 24
+    if hours:
+        return f"About {hours} h {minutes:02d} min"
+    return f"About {minutes} min" if minutes else "Less than a minute"
+
+
+def _follow_up_message(label: str, outlook: dict[str, Any]) -> str:
+    """The one Telegram message that follows a request, as Telegram HTML."""
+
+    title = html.escape(label)
+    state = outlook["state"]
+    if state == "downloading":
+        left = _time_left_words(outlook.get("time_left"))
+        return f"⬇️ <b>Download started</b>\n{title}" + (f"\n{left} left" if left else "")
+    if state == "searching":
+        return (
+            f"🔎 <b>No download yet</b>\n{title}\n"
+            "It is out, but no release was found. The search continues."
+        )
+    airs = outlook.get("next_episode_airs")
+    return f"🗓 <b>Not out yet</b>\n{title}" + (f"\nNext episode: {airs}" if airs else "")
 
 
 def _rows(value: object) -> list[dict[str, Any]]:
@@ -321,7 +376,12 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
     "request_movie": {
         "description": (
             "Request one movie by TMDB ID and return the exact movie and authoritative outcome "
-            "of that request. A successful result is sufficient to confirm the request."
+            "of that request. A successful result is sufficient to confirm the request. When "
+            "present, outlook says what to expect: not_released means the film is not out for "
+            "home viewing, with its release dates; downloading means a download has started; "
+            "searching means it is out and the search has just begun. After searching, the "
+            "requester gets a separate message saying whether a download started, so promise "
+            "that message and no time."
         ),
         "inputSchema": {
             "type": "object",
@@ -334,7 +394,12 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
         "description": (
             "Request specific seasons of one series by TVDB ID and return the exact series, "
             "seasons, and authoritative outcome of that request. A successful result is "
-            "sufficient to confirm the request. Season 0 is specials."
+            "sufficient to confirm the request. Season 0 is specials. When present, outlook "
+            "says what to expect: not_aired means the missing episodes have not aired yet; "
+            "downloading means a download has started; searching means aired episodes are "
+            "missing and the search has just begun. After searching, the requester gets a "
+            "separate message saying whether a download started, so promise that message and "
+            "no time. next_episode_airs is the next air date in the requested seasons."
         ),
         "inputSchema": {
             "type": "object",
@@ -423,10 +488,12 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
 
 
 class ToolService:
-    def __init__(self, config: Config, store: Store, upstream: Upstream):
+    def __init__(self, config: Config, store: Store, upstream: Upstream, notify: Notify):
         self.config = config
         self.store = store
         self.upstream = upstream
+        self.notify = notify
+        self._follow_ups: set[asyncio.Task[None]] = set()
         self._request_locks: dict[tuple[str, int], asyncio.Lock] = {}
 
     def _request_lock(self, media_type: str, external_id: int) -> asyncio.Lock:
@@ -739,7 +806,9 @@ class ToolService:
         if not isinstance(raw_titles, list) or not 1 <= len(raw_titles) <= 20:
             raise ToolError("titles must contain 1 to 20 items")
         titles = [_short_text(item, "title", minimum=2) for item in raw_titles]
-        if len({_recommendation_target(title)[0] for title in titles}) != len(titles):
+        # The same title with two years names two films, such as Dune (1984)
+        # and Dune (2021). Only the same title and year twice is a repeat.
+        if len({_recommendation_target(title) for title in titles}) != len(titles):
             raise ToolError("titles must be distinct")
         media_type = args.get("media_type")
         if media_type not in {"all", "movie", "series"}:
@@ -834,23 +903,25 @@ class ToolService:
                     else choice["title"]
                 )
                 try:
+                    # The locked request is called directly: a list must not
+                    # wait for an outlook per title.
                     if choice["media_type"] == "movie":
-                        done = await self._request_movie(
-                            {"tmdb_id": choice["tmdb_id"]}, actor, role
-                        )
+                        async with self._request_lock("movie", choice["tmdb_id"]):
+                            done = await self._request_movie_locked(choice["tmdb_id"], actor)
                     else:
                         # Season 0 is specials. Asking for a whole show does
                         # not mean asking for those, and a hundred-title list
                         # would pull them for every series in it. They stay
                         # available by naming them to request_series.
-                        seasons = [
+                        seasons = tuple(
                             n for n in (choice.get("seasons") or []) if isinstance(n, int) and n > 0
-                        ]
+                        )
                         if not seasons:
                             return {"title": title, "matched": name, "state": "unmatched"}
-                        done = await self._request_series(
-                            {"tvdb_id": choice["tvdb_id"], "seasons": seasons}, actor, role
-                        )
+                        async with self._request_lock("series", choice["tvdb_id"]):
+                            done = await self._request_series_locked(
+                                choice["tvdb_id"], seasons, False, actor
+                            )
                 except (ToolError, UpstreamError) as exc:
                     return {
                         "title": title,
@@ -891,7 +962,103 @@ class ToolService:
         args = _exact(arguments, {"tmdb_id"})
         tmdb_id = _positive(args.get("tmdb_id"), "tmdb_id")
         async with self._request_lock("movie", tmdb_id):
-            return await self._request_movie_locked(tmdb_id, actor)
+            result = await self._request_movie_locked(tmdb_id, actor)
+        if result["status"] == "available":
+            return result
+        movie = result["movie"]
+        return await self._with_outlook(
+            result,
+            actor,
+            f"{movie['title']} ({movie['year']})",
+            lambda: self._movie_outlook(tmdb_id),
+        )
+
+    async def _with_outlook(
+        self,
+        result: dict[str, Any],
+        actor: Actor,
+        label: str,
+        read: Callable[[], Awaitable[dict[str, Any] | None]],
+    ) -> dict[str, Any]:
+        """Add what to expect after a request, and follow up while a search is open."""
+
+        try:
+            outlook = await asyncio.wait_for(read(), timeout=OUTLOOK_TIMEOUT_SECONDS)
+        except Exception:
+            # The request is already made. A failure here must not turn it into
+            # an error, which invites the same request a second time.
+            LOGGER.warning("request outlook is unavailable", exc_info=True)
+            return result
+        if outlook is None:
+            return result
+        if outlook["state"] == "searching":
+            task = asyncio.create_task(self._follow_up(actor.chat_id, label, read))
+            self._follow_ups.add(task)
+            task.add_done_callback(self._follow_ups.discard)
+        return {**result, "outlook": outlook}
+
+    async def _follow_up(
+        self,
+        chat_id: int,
+        label: str,
+        read: Callable[[], Awaitable[dict[str, Any] | None]],
+    ) -> None:
+        """Tell the requester once how the search that a request started turned out."""
+
+        outlook: dict[str, Any] = {"state": "searching"}
+        deadline = time.monotonic() + FOLLOW_UP_SECONDS
+        while outlook["state"] == "searching" and time.monotonic() < deadline:
+            await asyncio.sleep(FOLLOW_UP_POLL_SECONDS)
+            try:
+                outlook = await read() or outlook
+            except Exception:
+                LOGGER.warning("request follow-up could not read the providers", exc_info=True)
+        try:
+            await self.notify(chat_id, _follow_up_message(label, outlook))
+        except Exception as exc:
+            LOGGER.warning("request follow-up was not delivered: %s", type(exc).__name__)
+
+    @staticmethod
+    def _download_outlook(queue: list[dict[str, Any]]) -> dict[str, Any]:
+        if not queue:
+            return {"state": "searching"}
+        outlook: dict[str, Any] = {"state": "downloading"}
+        # "1.02:03:04" is longer than any "HH:MM:SS", so length orders days first.
+        times = [
+            value
+            for item in queue
+            if isinstance(value := _first(item, "timeleft", "timeLeft"), str) and value
+        ]
+        if times:
+            outlook["time_left"] = max(times, key=lambda value: (len(value), value))[:40]
+        return outlook
+
+    async def _movie_outlook(self, tmdb_id: int) -> dict[str, Any] | None:
+        # Only the tracked movie says whether it is out: the lookup of an
+        # untracked film reports isAvailable for a release rule it does not have.
+        lookup = await self.upstream.call(
+            "radarr_search_movie", {"term": f"tmdb:{tmdb_id}", "limit": 10}
+        )
+        movie = next(
+            (item for item in _rows(lookup) if _first(item, "tmdbId", "tmdb_id") == tmdb_id),
+            None,
+        )
+        movie_id = movie.get("id") if movie is not None else None
+        if movie is None or not isinstance(movie_id, int) or movie_id <= 0:
+            return None
+        if movie.get("isAvailable") is False:
+            outlook: dict[str, Any] = {"state": "not_released"}
+            for name, source in (
+                ("in_cinemas", "inCinemas"),
+                ("digital_release", "digitalRelease"),
+                ("physical_release", "physicalRelease"),
+            ):
+                value = movie.get(source)
+                if isinstance(value, str) and value:
+                    outlook[name] = value[:10]
+            return outlook
+        queue = await self.upstream.radarr_queue(limit=100)
+        return self._download_outlook([item for item in queue if item.get("movieId") == movie_id])
 
     async def _request_movie_locked(self, tmdb_id: int, actor: Actor) -> dict[str, Any]:
         lookup = await self.upstream.call(
@@ -1091,7 +1258,59 @@ class ToolService:
         if not isinstance(anime, bool):
             raise ToolError("anime must be a boolean")
         async with self._request_lock("series", tvdb_id):
-            return await self._request_series_locked(tvdb_id, seasons, anime, actor)
+            result = await self._request_series_locked(tvdb_id, seasons, anime, actor)
+        series = result["series"]
+        return await self._with_outlook(
+            result,
+            actor,
+            f"{series['title']} · {_seasons_label(seasons)}",
+            lambda: self._series_outlook(tvdb_id, seasons),
+        )
+
+    async def _series_outlook(
+        self, tvdb_id: int, seasons: tuple[int, ...]
+    ) -> dict[str, Any] | None:
+        lookup = await self.upstream.call(
+            "sonarr_search_series", {"term": f"tvdb:{tvdb_id}", "limit": 10}
+        )
+        series = next(
+            (item for item in _rows(lookup) if _first(item, "tvdbId", "tvdb_id") == tvdb_id),
+            None,
+        )
+        series_id = series.get("id") if series is not None else None
+        if not isinstance(series_id, int) or series_id <= 0:
+            return None
+        raw_episodes = await self.upstream.call("sonarr_get_episodes", {"seriesId": series_id})
+        episodes = [item for item in _rows(raw_episodes) if item.get("seasonNumber") in seasons]
+        if not episodes:
+            # A series added a moment ago has no episodes until Sonarr has read
+            # them. The follow-up reads again and reports what it finds.
+            return {"state": "searching"}
+        now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # Sonarr writes every air date as UTC in one format, so text order is time order.
+        air_dates = [
+            (value, item.get("hasFile") is True)
+            for item in episodes
+            if isinstance(value := item.get("airDateUtc"), str) and value
+        ]
+        upcoming = min((value for value, _held in air_dates if value > now), default=None)
+        outlook: dict[str, Any]
+        if any(value <= now and not held for value, held in air_dates):
+            queue = await self.upstream.call("sonarr_get_queue", {"limit": 100})
+            outlook = self._download_outlook(
+                [
+                    item
+                    for item in _rows(queue)
+                    if item.get("seriesId") == series_id and item.get("seasonNumber") in seasons
+                ]
+            )
+        elif upcoming is not None or any(item.get("hasFile") is not True for item in episodes):
+            outlook = {"state": "not_aired"}
+        else:
+            return None
+        if upcoming is not None:
+            outlook["next_episode_airs"] = upcoming[:10]
+        return outlook
 
     async def _request_series_locked(
         self,

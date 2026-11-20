@@ -973,23 +973,28 @@ class Notifications:
         return f"📺 <b>Available in Plex</b>\n{show}{marker} · {title}"
 
     async def _send(
-        self, chat_id: int, text: str, plex_url: str, *, poster_url: str | None = None
+        self, chat_id: int, text: str, plex_url: str | None, *, poster_url: str | None = None
     ) -> None:
         token = self._telegram_token()
-        markup = {"inline_keyboard": [[{"text": "Open in Plex", "url": plex_url}]]}
+        # A message about something not yet in Plex has no link to offer.
+        markup = (
+            {"reply_markup": {"inline_keyboard": [[{"text": "Open in Plex", "url": plex_url}]]}}
+            if plex_url is not None
+            else {}
+        )
         message_body = {
             "chat_id": chat_id,
             "text": text,
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
-            "reply_markup": markup,
+            **markup,
         }
         photo_body = {
             "chat_id": chat_id,
             "photo": poster_url,
             "caption": text,
             "parse_mode": "HTML",
-            "reply_markup": markup,
+            **markup,
         }
         try:
             async with httpx.AsyncClient(timeout=15) as client:

@@ -25,6 +25,13 @@ def _nameable(candidate: object) -> bool:
     return isinstance(external_id, int) and not isinstance(external_id, bool) and external_id > 0
 
 
+def identity(candidate: Mapping[str, Any]) -> tuple[str, int]:
+    """The provider identity of a nameable row: its media type and provider ID."""
+
+    media_type = candidate["media_type"]
+    return media_type, candidate["tmdb_id" if media_type == "movie" else "tvdb_id"]
+
+
 def _clip(value: str, maximum: int) -> str:
     if len(value) <= maximum:
         return value

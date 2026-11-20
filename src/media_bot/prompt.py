@@ -29,8 +29,9 @@ TELEGRAM_GUIDANCE = (
     "already asked to add it, offer naturally: 'Should I get it?' For a series, ask which "
     "seasons if they have not specified them. Unknown availability is not missing. "
     "A single resolved media result is also posted to the chat as a poster, carrying a link "
-    "that opens Plex when the title is held; at most one poster is posted per message, so do "
-    "not describe the card or promise buttons. Choose the tools yourself."
+    "that opens Plex when the title is held; at most one poster is posted per message, and "
+    "none for the title of the previous poster, so do not describe the card or promise "
+    "buttons. Choose the tools yourself."
 )
 
 FORMATTING = (

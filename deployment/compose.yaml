@@ -1,7 +1,8 @@
-name: hermes-media
+name: media-bot
 
 services:
   media-server-mcp:
+    container_name: media-server-mcp
     image: ghcr.io/wyattjoh/media-server-mcp@sha256:f83620da1d008ef18df3324b15e44854572ea41b528eff585033e4054b438377
     restart: unless-stopped
     user: "1000:1000"
@@ -50,6 +51,7 @@ services:
         max-file: "3"
 
   media-gateway:
+    container_name: media-gateway
     image: ${MEDIA_GATEWAY_IMAGE:?required digest reference}
     restart: unless-stopped
     user: "1000:1000"
@@ -100,6 +102,7 @@ services:
         max-file: "3"
 
   media-bot:
+    container_name: media-bot
     # Same image as the gateway; only the entrypoint differs. The bot holds the
     # Telegram token, the Claude API key and the gateway bearer, nothing else.
     image: ${MEDIA_GATEWAY_IMAGE:?required digest reference}
@@ -145,6 +148,7 @@ services:
         max-file: "3"
 
   media-egress:
+    container_name: media-egress
     # The bot's only way out. It opens HTTPS tunnels to the hosts named in
     # media_bot.egress.ALLOWED_HOSTS and refuses everything else.
     image: ${MEDIA_GATEWAY_IMAGE:?required digest reference}

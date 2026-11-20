@@ -3,10 +3,11 @@
 # keys stay in their existing host files, mounted read-only under /run/media-keys.
 # Saved legacy Portainer fields can remain during proof; only the host-file paths
 # below are read by this recipe.
-name: hermes-media
+name: media-bot
 
 services:
   media-server-mcp:
+    container_name: media-server-mcp
     image: ${MEDIA_UPSTREAM_IMAGE:?required managed upstream digest}
     restart: unless-stopped
     user: "1000:1000"
@@ -39,6 +40,7 @@ services:
         max-file: "3"
 
   media-gateway:
+    container_name: media-gateway
     image: ${MEDIA_GATEWAY_IMAGE:?required managed gateway digest}
     restart: unless-stopped
     user: "1000:1000"
@@ -95,6 +97,7 @@ services:
         max-file: "3"
 
   media-bot:
+    container_name: media-bot
     # Same image as the gateway; only the entrypoint differs. The bot holds the
     # Telegram token, the Claude API key and the gateway bearer, nothing else.
     image: ${MEDIA_GATEWAY_IMAGE:?required managed gateway digest}
@@ -139,6 +142,7 @@ services:
         max-file: "3"
 
   media-egress:
+    container_name: media-egress
     # The bot's only way out. It opens HTTPS tunnels to the hosts named in
     # media_bot.egress.ALLOWED_HOSTS and refuses everything else.
     image: ${MEDIA_GATEWAY_IMAGE:?required managed gateway digest}

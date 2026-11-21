@@ -117,8 +117,9 @@ class Config:
             upstream_token_file=Path(
                 os.getenv("MEDIA_GATEWAY_UPSTREAM_TOKEN_FILE", "/run/media-secrets/upstream.env")
             ),
-            # The dashboard has no login. Bind it only where the private access
-            # path can reach it, and name the hosts that path uses.
+            # The dashboard has no login; it trusts the role header of the private
+            # access path. Bind it only where that path can reach it, and name the
+            # hosts that path uses.
             dashboard_host=os.getenv("MEDIA_GATEWAY_DASHBOARD_HOST", "127.0.0.1"),
             dashboard_port=_int("MEDIA_GATEWAY_DASHBOARD_PORT", 18083),
             dashboard_hosts=tuple(

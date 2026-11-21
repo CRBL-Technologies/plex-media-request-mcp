@@ -40,6 +40,10 @@ from .upstream import Upstream, UpstreamError
 
 LOGGER = logging.getLogger(__name__)
 MAX_BODY_BYTES = 4 * 1024 * 1024
+# The Tailscale app capability that carries a caller's dashboard role. The tailnet
+# policy grants it, with a value such as {"role": "admin"}, and the connector passes it on.
+DASHBOARD_CAPABILITY = "crbl.io/cap/media-admin"
+DASHBOARD_ROLES = ("admin", "viewer")  # Highest first.
 
 
 class Runtime:
@@ -55,8 +59,9 @@ class Runtime:
             self.upstream,
             notify=lambda chat_id, text: self.notifications._send(chat_id, text, None),
         )
-        # The dashboard has no login: only the Tailscale Service reaches its listener.
-        # This token stops another site from submitting the dashboard's forms.
+        # The dashboard has no login: only the Tailscale connector reaches its listener,
+        # and the connector names each caller's role. This token stops another site
+        # from submitting the dashboard's forms.
         self.form_token = token_urlsafe(32)
         self.gateway_token = read_secret(config.gateway_token_file, minimum=32)
         self.plex_token = read_secret(config.plex_webhook_token_file, minimum=32)
@@ -116,6 +121,20 @@ def _trusted(request: Request) -> bool:
     return hmac.compare_digest(authorization, expected)
 
 
+def _dashboard_role(header: str) -> str | None:
+    """The caller's highest role in the header that the Tailscale connector sets.
+
+    The connector removes any copy of the header that the caller sent, and it writes
+    the header only for a caller that the tailnet policy gives a capability.
+    """
+
+    try:
+        granted = {value["role"] for value in json.loads(header)[DASHBOARD_CAPABILITY]}
+    except (ValueError, KeyError, TypeError):
+        return None
+    return next((role for role in DASHBOARD_ROLES if role in granted), None)
+
+
 def _page_number(request: Request, name: str) -> int:
     raw = request.query_params.get(name, "1")
     if len(raw) > 5 or not raw.isascii() or not raw.isdigit():
@@ -158,7 +177,8 @@ async def dashboard(request: Request) -> Response:
             users=runtime.store.users(roles),
             activity=activity_page,
             requests=request_page,
-            csrf=runtime.form_token,
+            role=request.state.role,
+            csrf=runtime.form_token if request.state.role == "admin" else None,
             notice=request.query_params.get("notice"),
         )
     )
@@ -261,6 +281,24 @@ async def plex_webhook(request: Request) -> Response:
         return JSONResponse({"error": "invalid Plex payload"}, status_code=400)
 
 
+class RoleGuard:
+    """Refuse a caller without a role, and let only an administrator change anything."""
+
+    def __init__(self, app: Any):
+        self.app = app
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") == "http":
+            request = Request(scope)
+            role = _dashboard_role(request.headers.get("tailscale-app-capabilities", ""))
+            if role is None or (role != "admin" and request.method not in {"GET", "HEAD"}):
+                response = PlainTextResponse("Forbidden", status_code=403)
+                await response(scope, receive, send)
+                return
+            request.state.role = role
+        await self.app(scope, receive, send)
+
+
 class SecurityHeaders:
     def __init__(self, app: Any):
         self.app = app
@@ -353,6 +391,7 @@ def _dashboard_app(config: Config) -> Starlette:
             Route("/users/remove", change_user, methods=["POST"]),
         ]
     )
+    app.add_middleware(RoleGuard)
     app.add_middleware(SecurityHeaders)
     app.add_middleware(BodySizeGuard)
     # Refuse a request that names another host, so a foreign site cannot point

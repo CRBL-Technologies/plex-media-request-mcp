@@ -164,10 +164,56 @@ def call_tool(
     )
 
 
-def _dashboard(app: Starlette) -> TestClient:
-    """The dashboard listener, reached under the one host name the configuration allows."""
+def _dashboard(app: Starlette, role: str | None = "admin") -> TestClient:
+    """The dashboard listener, reached under the one host name the configuration allows.
 
-    return TestClient(app.state.dashboard, base_url="http://media-admin.test")
+    The role arrives the way the Tailscale connector sends it; ``None`` sends no header.
+    """
+
+    headers = {}
+    if role:
+        headers["Tailscale-App-Capabilities"] = json.dumps(
+            {"crbl.io/cap/media-admin": [{"role": role}]}
+        )
+    return TestClient(app.state.dashboard, base_url="http://media-admin.test", headers=headers)
+
+
+def test_dashboard_refuses_a_caller_without_a_role_and_keeps_a_viewer_read_only(
+    config: Config,
+) -> None:
+    app = create_app(config)
+    with TestClient(app):
+        csrf = app.state.runtime.form_token
+        for role in (None, "guest"):
+            stranger = _dashboard(app, role)
+            assert stranger.get("/").status_code == 403
+            assert stranger.get("/assets/app.css").status_code == 403
+            assert (
+                stranger.post("/users/add", data={"csrf": csrf, "user_id": "2002"}).status_code
+                == 403
+            )
+        # A header that is not the connector's JSON gives no role.
+        broken = TestClient(
+            app.state.dashboard,
+            base_url="http://media-admin.test",
+            headers={"Tailscale-App-Capabilities": "admin"},
+        )
+        assert broken.get("/").status_code == 403
+
+        viewer = _dashboard(app, "viewer")
+        page = viewer.get("/")
+        assert page.status_code == 200
+        assert "· viewer" in page.text
+        assert "<form" not in page.text
+        assert csrf not in page.text
+        # Even with the right form token, a viewer changes nothing.
+        refused = viewer.post("/users/add", data={"csrf": csrf, "user_id": "2002"})
+        assert refused.status_code == 403
+        assert app.state.runtime.policy.snapshot().role(2002).value == "blocked"
+
+        admin = _dashboard(app).get("/")
+        assert "· admin" in admin.text
+        assert 'action="/users/add"' in admin.text
 
 
 def test_dashboard_needs_no_login_and_shows_the_real_user_table(config: Config) -> None:

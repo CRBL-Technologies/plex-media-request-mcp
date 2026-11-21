@@ -94,9 +94,12 @@ def dashboard_page(
     users: list[dict[str, Any]],
     activity: Page,
     requests: Page,
-    csrf: str,
+    role: str,
+    csrf: str | None,
     notice: str | None,
 ) -> str:
+    """The page for a caller with this role. Without a form token it has no forms."""
+
     admins = sum(user["role"] == Role.ADMIN.value for user in users)
     allowed = sum(user["role"] in {Role.ADMIN.value, Role.USER.value} for user in users)
     blocked = sum(user["last_blocked"] is not None for user in users)
@@ -129,14 +132,17 @@ def dashboard_page(
         or '<tr><td colspan="7" class="empty">No bot requests recorded yet.</td></tr>'
     )
     notice_html = f'<div class="notice">{html.escape(notice)}</div>' if notice else ""
+    add_form = ""
+    if csrf:
+        add_form = f"""<form class="inline" method="post" action="/users/add">
+<input type="hidden" name="csrf" value="{html.escape(csrf)}"><label class="sr-only" for="user-id">Telegram user ID</label><input class="input mono" id="user-id" name="user_id" inputmode="numeric"
+placeholder="Telegram user ID" required><button class="btn btn-primary">Allow user</button></form>"""
     return _page(
         f"""<main class="shell"><header class="top"><div class="brand"><div class="mark">{MARK_ICON}</div><div><h1>Media admin</h1>
-<div class="subtitle">Users, requests, and Plex activity</div></div></div></header>
+<div class="subtitle">Users, requests, and Plex activity · {html.escape(role)}</div></div></div></header>
 {notice_html}<section class="grid"><div class="card kpi"><strong>{allowed}</strong><span>Allowed users</span></div>
 <div class="card kpi"><strong>{admins}</strong><span>Administrators</span></div><div class="card kpi"><strong>{blocked}</strong><span>Blocked contacts observed</span></div></section>
-<section class="card panel"><div class="panel-head"><h2>Users</h2><form class="inline" method="post" action="/users/add">
-<input type="hidden" name="csrf" value="{html.escape(csrf)}"><label class="sr-only" for="user-id">Telegram user ID</label><input class="input mono" id="user-id" name="user_id" inputmode="numeric"
-placeholder="Telegram user ID" required><button class="btn btn-primary">Allow user</button></form></div><div class="table-wrap"><table>
+<section class="card panel"><div class="panel-head"><h2>Users</h2>{add_form}</div><div class="table-wrap"><table>
 <thead><tr><th>User</th><th>Telegram ID</th><th>Role</th><th>Last seen</th><th>Last blocked</th><th></th></tr></thead>
 <tbody>{user_rows}</tbody></table></div></section><section class="card panel" id="requests"><div class="panel-head"><h2>Requests</h2></div>
 <div class="table-wrap"><table><thead><tr><th>Title</th><th>Type</th><th>Seasons</th><th>Requester</th><th>Status</th><th>Destinations</th><th>Created</th></tr></thead>
@@ -199,15 +205,15 @@ def _pager(page: Page, *, section: str, other: Page) -> str:
     )
 
 
-def _user_row(user: dict[str, Any], csrf: str) -> str:
+def _user_row(user: dict[str, Any], csrf: str | None) -> str:
     username = f"@{user['username']}" if user["username"] else None
     display = user["name"] or username or "Unknown user"
     sub = username if username and username != display else ""
     action = ""
-    if user["role"] == Role.USER.value:
+    if csrf and user["role"] == Role.USER.value:
         action = f"""<form method="post" action="/users/remove"><input type="hidden" name="csrf" value="{html.escape(csrf)}">
 <input type="hidden" name="user_id" value="{user["user_id"]}"><button class="btn btn-secondary danger">Remove</button></form>"""
-    elif user["role"] == Role.BLOCKED.value:
+    elif csrf and user["role"] == Role.BLOCKED.value:
         action = f"""<form method="post" action="/users/add"><input type="hidden" name="csrf" value="{html.escape(csrf)}">
 <input type="hidden" name="user_id" value="{user["user_id"]}"><button class="btn btn-secondary">Allow</button></form>"""
     return f"""<tr><td><strong>{html.escape(str(display))}</strong><div class="subtitle">{html.escape(str(sub))}</div></td>

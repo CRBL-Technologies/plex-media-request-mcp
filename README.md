@@ -186,8 +186,11 @@ In groups, replies and poster cards answer the triggering message.
 The dashboard has no login. It runs on its own listener, apart from the API, and
 that listener is bound to one network: the one the private access connector is
 on (`DASHBOARD_NETWORK`). The bot, the MCP and the hotio containers cannot open
-it, and it has no port on the host. Whoever can use that connector is an
-administrator, so the connector's access policy is the only protection. Every form
+it, and it has no port on the host. The connector names each caller's role in the
+`Tailscale-App-Capabilities` header, from the capability `crbl.io/cap/media-admin`
+in the tailnet policy. An `admin` sees and uses the user forms. A `viewer` reads
+the same page without forms, and every change it sends is refused. A caller
+without a role gets `403` for every path. Every form
 carries a token that another site cannot read, and the listener answers only to
 the host names in `MEDIA_GATEWAY_DASHBOARD_ALLOWED_HOSTS`. It shows real observed and
 blocked Telegram users, paginated requests, and paginated activity; it does not
@@ -225,6 +228,26 @@ The gateway API listens on port `18082` inside its networks only. Host port
 on port `18083` of the private access network; point the private access path at
 `media-admin:18083`. The Docker socket is absent. The upstream MCP and the bot
 have no published port.
+
+The dashboard needs the caller's role from the Tailscale connector. Serve it with
+the capability accepted, for example for a Tailscale Service:
+
+```sh
+tailscale serve --service=svc:media-admin --http=80 \
+  --accept-app-caps=crbl.io/cap/media-admin http://media-admin:18083
+```
+
+Grant the role in the tailnet policy. The connector looks up the caller's
+capabilities on its own node, so the grant's `dst` is the connector's tag, not
+the Service:
+
+```json
+{
+  "src": ["you@example.com"],
+  "dst": ["tag:media-connector"],
+  "app": { "crbl.io/cap/media-admin": [{ "role": "admin" }] }
+}
+```
 
 Every service has a memory and a process limit in both Compose recipes.
 

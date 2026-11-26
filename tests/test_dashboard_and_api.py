@@ -763,6 +763,33 @@ def test_a_held_movie_is_reported_available_without_touching_plex(config: Config
     assert "radarr_search_movie_releases" not in called
 
 
+def test_a_held_movie_reports_its_audio_languages(
+    config: Config, slug_client: type[_SlugClient]
+) -> None:
+    """Users ask whether a film has a French dub; only the file's media scan knows."""
+
+    app = create_app(config)
+    fake = FakeUpstream()
+    fake.responses["radarr_search_movie"] = {
+        "data": [{"id": 77, "tmdbId": 123, "title": "A Movie", "year": 2026}]
+    }
+    fake.responses["radarr_get_movie"] = {
+        "data": {
+            "id": 77,
+            "hasFile": True,
+            "movieFile": {"mediaInfo": {"audioLanguages": "fre/eng/fre"}},
+        }
+    }
+    with TestClient(app) as client:
+        app.state.runtime.tools.upstream = fake
+        held = call_tool(client, "search_media", {"query": "A Movie", "media_type": "movie"})
+        fake.responses["radarr_get_movie"] = {"data": {"id": 77, "hasFile": True, "movieFile": {}}}
+        unscanned = call_tool(client, "search_media", {"query": "A Movie", "media_type": "movie"})
+
+    assert held.json()["result"]["results"][0]["audio_languages"] == ["fre", "eng"]
+    assert "audio_languages" not in unscanned.json()["result"]["results"][0]
+
+
 def test_a_tracked_movie_without_a_file_starts_a_search(config: Config) -> None:
     app = create_app(config)
     fake = FakeUpstream()

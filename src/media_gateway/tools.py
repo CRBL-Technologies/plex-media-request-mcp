@@ -308,6 +308,30 @@ def _movie_candidate(item: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _audio_languages(movie: dict[str, Any]) -> list[str]:
+    """Audio track languages of a held movie file, as Radarr's media scan reports them.
+
+    Radarr gives one string such as ``eng/fre`` (ISO 639-2 codes); an unscanned
+    file has no media information and yields an empty list.
+    """
+
+    movie_file = movie.get("movieFile")
+    if not isinstance(movie_file, dict):
+        return []
+    media_info = movie_file.get("mediaInfo")
+    if not isinstance(media_info, dict):
+        return []
+    raw = media_info.get("audioLanguages")
+    if not isinstance(raw, str):
+        return []
+    languages: list[str] = []
+    for part in raw.split("/"):
+        language = part.strip()[:20]
+        if language and language not in languages:
+            languages.append(language)
+    return languages[:10]
+
+
 def _series_candidate(item: dict[str, Any]) -> dict[str, Any] | None:
     external_id = _first(item, "tvdbId", "tvdb_id")
     title = item.get("title")
@@ -332,7 +356,10 @@ SHARED_SCHEMAS: dict[str, dict[str, Any]] = {
         "description": (
             "Search Radarr and Sonarr for one movie or series. Each match reports its year, "
             "media type, poster_url, and whether the file is held: downloaded for a movie, and "
-            "for a series season_states, seasons_complete, and seasons_missing. A season state "
+            "for a series season_states, seasons_complete, and seasons_missing. A held movie also "
+            "lists audio_languages, the file's audio tracks as ISO 639-2 codes (fre is French, "
+            "eng is English); it is absent when the file was not scanned, and series do not "
+            "report audio. A season state "
             "marked airing reports files out of episodes aired so far plus next_airing; up_to_date "
             "means those episodes are held, while complete means the season has finished. A lone "
             "held title also carries plex_url. When exactly one title matches, it is posted to the "
@@ -705,6 +732,9 @@ class ToolService:
         if not isinstance(record.get("hasFile"), bool):
             raise UpstreamError("movie availability is unavailable")
         candidate["downloaded"] = record["hasFile"]
+        audio = _audio_languages(record)
+        if record["hasFile"] and audio:
+            candidate["audio_languages"] = audio
 
     async def _enrich_plex_urls(self, results: list[dict[str, Any]]) -> None:
         """Attach ``plex_url`` to a lone held result, at a cost of one call.

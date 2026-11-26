@@ -78,6 +78,10 @@ makes. A lookup of the title on the previous poster posts none, so a request
 that follows a lookup does not repeat the poster. Telegram fetches the poster
 itself; the bot passes on only a plain HTTPS URL.
 
+A held movie also lists the audio languages of its file, from Radarr's media
+scan, so the agent can say whether a film has a French dub. Series do not
+report audio.
+
 A single request answers at once with an `outlook`: `not_released` or
 `not_aired` with the dates the provider gives, `downloading` when a download is
 already in the queue, or `searching` when the title is out and the search has
